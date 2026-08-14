@@ -493,10 +493,19 @@ async fn list_callback(ctx: &Ctx, query: &CallbackQuery, rest: &str, chat: i64, 
         return;
     };
 
-    if let Some(entry_key) = entry_key {
-        lists::remove(ctx, chat_ref, chat, kind, entry_key).await;
-    }
-    let (title, markup) = lists::view(ctx, chat_ref, chat, kind, opener).await;
+    let (title, markup) = match entry_key.and_then(|key| lists::clearing(key).map(|c| (key, c))) {
+        Some((_, false)) => lists::confirm_clear(ctx, chat_ref, chat, kind, opener).await,
+        Some((_, true)) => {
+            lists::clear_all(ctx, chat_ref, chat, kind).await;
+            lists::view(ctx, chat_ref, chat, kind, opener).await
+        }
+        None => {
+            if let Some(entry_key) = entry_key {
+                lists::remove(ctx, chat_ref, chat, kind, entry_key).await;
+            }
+            lists::view(ctx, chat_ref, chat, kind, opener).await
+        }
+    };
     let _ = query
         .answer()
         .edit(InputMessage::new().html(title).reply_markup(markup))

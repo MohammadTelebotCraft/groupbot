@@ -552,6 +552,14 @@ impl Ctx {
     }
 }
 
+pub async fn added_by_an_admin(ctx: &Ctx, chat_ref: PeerRef, chat: i64, actor: i64) -> bool {
+    owner(ctx, chat) == Some(actor)
+        || is_bot_admin(ctx, chat, actor)
+        || chat_admins(ctx, chat_ref, chat)
+            .await
+            .is_some_and(|admins| admins.contains(&actor))
+}
+
 pub async fn chat_admins(ctx: &Ctx, chat_ref: PeerRef, chat: i64) -> Option<HashSet<i64>> {
     if let Some(admins) = ctx.cached_admins(chat) {
         return Some(admins);
@@ -608,6 +616,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
             invalidate_admins(ctx, &raw);
             if let grammers_client::tl::enums::Update::ChannelParticipant(update) = &raw.raw {
                 betrayal::on_participant_update(ctx, update).await;
+                bots::on_participant_update(ctx, update).await;
                 raid::on_participant_update(ctx, update).await;
                 log::on_participant(ctx, update).await;
             }

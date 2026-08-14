@@ -112,7 +112,7 @@ pub async fn on_participant_update(ctx: &Ctx, update: &tl::types::UpdateChannelP
         return;
     };
 
-    if actor != user && added_by_an_admin(ctx, chat_ref, chat, actor).await {
+    if actor != user && super::added_by_an_admin(ctx, chat_ref, chat, actor).await {
         return;
     }
     let Some(peer) = PeerId::user(user).map(PeerId::to_ambient_ref) else {
@@ -130,14 +130,6 @@ pub async fn on_participant_update(ctx: &Ctx, update: &tl::types::UpdateChannelP
         }],
     )
     .await;
-}
-
-async fn added_by_an_admin(ctx: &Ctx, chat_ref: PeerRef, chat: i64, actor: i64) -> bool {
-    super::owner(ctx, chat) == Some(actor)
-        || super::is_bot_admin(ctx, chat, actor)
-        || super::chat_admins(ctx, chat_ref, chat)
-            .await
-            .is_some_and(|admins| admins.contains(&actor))
 }
 
 async fn surge(ctx: &Ctx, chat: i64, chat_ref: PeerRef, arrivals: Vec<Newcomer>) {

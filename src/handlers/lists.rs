@@ -65,7 +65,7 @@ pub async fn command(ctx: &Ctx, message: &Message) -> bool {
     true
 }
 
-async fn clear_all(ctx: &Ctx, chat_ref: PeerRef, chat: i64, kind: Kind) -> usize {
+pub async fn clear_all(ctx: &Ctx, chat_ref: PeerRef, chat: i64, kind: Kind) -> usize {
     let entries = entries(ctx, chat_ref, chat, kind).await;
     let mut removed = 0;
     for entry in entries {
@@ -172,6 +172,46 @@ fn word_id(word: &str) -> String {
     format!("{hash:x}")
 }
 
+pub const CLEAR_KEY: &str = "clear";
+const CLEAR_CONFIRMED: &str = "clearyes";
+
+pub fn clearing(entry_key: &str) -> Option<bool> {
+    match entry_key {
+        CLEAR_KEY => Some(false),
+        CLEAR_CONFIRMED => Some(true),
+        _ => None,
+    }
+}
+
+pub async fn confirm_clear(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    chat: i64,
+    kind: Kind,
+    opener: i64,
+) -> (String, ReplyMarkup) {
+    let count = entries(ctx, chat_ref, chat, kind).await.len();
+    let title = format!(
+        "<b>پنل مدیریت</b> › <b>{}</b>\n\n\
+         همه <b>{count}</b> مورد از این لیست حذف می شود. این کار برگشت ندارد.",
+        kind.title()
+    );
+    let markup = ReplyMarkup::from_buttons(&[
+        vec![
+            super::style::data(
+                "✅  تایید",
+                format!("p:{opener}:{chat}:l:{}:{CLEAR_CONFIRMED}", kind.action()).into_bytes(),
+                super::style::Colour::Success,
+            ),
+            Button::data(
+                "❌  لغو",
+                format!("p:{opener}:{chat}:l:{}", kind.action()).into_bytes(),
+            ),
+        ],
+    ]);
+    (title, markup)
+}
+
 pub async fn view(
     ctx: &Ctx,
     chat_ref: PeerRef,
@@ -191,6 +231,13 @@ pub async fn view(
             )]
         })
         .collect();
+    if !entries.is_empty() {
+        rows.push(vec![super::style::data(
+            format!("پاکسازی {}", kind.title()),
+            format!("p:{opener}:{chat}:l:{}:{CLEAR_KEY}", kind.action()).into_bytes(),
+            super::style::Colour::Danger,
+        )]);
+    }
     rows.push(vec![Button::data(
         "‹ بازگشت",
         format!("p:{opener}:{chat}:ls").into_bytes(),
@@ -348,6 +395,37 @@ mod tests {
             assert_eq!(parts.next().and_then(|p| p.parse().ok()), Some(chat));
             assert!(parts.next().is_some_and(|action| !action.is_empty()));
             assert!(payload.len() <= 64, "payload too long: {payload}");
+        }
+    }
+
+    #[test]
+    fn the_clear_keys_cannot_be_mistaken_for_an_entry() {
+        for key in [CLEAR_KEY, "clearyes"] {
+            assert!(clearing(key).is_some());
+            assert!(key.parse::<i64>().is_err(), "{key} could be a user id");
+            assert!(
+                !key.chars().all(|c| c.is_ascii_hexdigit()),
+                "{key} could be a word_id hash"
+            );
+        }
+        assert_eq!(clearing(&word_id("تبلیغ")), None);
+        assert_eq!(clearing("12345"), None);
+        assert_eq!(clearing(CLEAR_KEY), Some(false));
+        assert_eq!(clearing("clearyes"), Some(true));
+    }
+
+    #[test]
+    fn clear_payloads_fit_telegram() {
+        for kind in [Kind::Ban, Kind::Mute, Kind::Vip, Kind::Filter, Kind::Answer, Kind::Exempt] {
+            for key in [CLEAR_KEY, "clearyes"] {
+                let payload = format!(
+                    "p:{}:{}:l:{}:{key}",
+                    i64::MAX,
+                    i64::MIN,
+                    kind.action()
+                );
+                assert!(payload.len() <= 64, "payload too long: {payload}");
+            }
         }
     }
 }
