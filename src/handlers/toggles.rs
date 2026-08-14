@@ -30,14 +30,27 @@ pub const BOT: Toggles = Toggles {
     ],
 };
 
-const GROUPS: &[&Toggles] = &[&FORWARD, &BOT];
+pub const USERNAME: Toggles = Toggles {
+    group: "un",
+    title: "<b>قفل یوزرنیم</b>",
+    items: &[
+        (super::locks::USERNAME, "یوزرنیم در متن"),
+        (super::locks::BOTCALL, "دستور به ربات مثل /start@bot"),
+        (super::locks::MENTION, "تگ کاربر"),
+    ],
+};
+
+const GROUPS: &[&Toggles] = &[&FORWARD, &BOT, &USERNAME];
 
 pub async fn prompt(ctx: &Ctx, message: &Message, chat: i64, toggles: &Toggles, on: bool) -> bool {
     if !on {
         for (key, _) in toggles.items {
             ctx.settings.set(chat, key, false).await;
         }
-        let _ = message.reply("✗ برداشته شد.").await;
+        let cleared: Vec<&str> = toggles.items.iter().map(|(_, label)| *label).collect();
+        let _ = message
+            .reply(format!("✗ برداشته شد · {}", cleared.join("، ")))
+            .await;
         return true;
     }
     let _ = message

@@ -22,7 +22,10 @@ pub mod promote;
 pub mod purge;
 pub mod report;
 pub mod rights;
+pub mod pinlock;
+pub mod raid;
 pub mod restrict;
+pub mod setting;
 pub mod stats;
 pub mod strict;
 pub mod style;
@@ -34,7 +37,7 @@ pub mod tune;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use grammers_client::Client;
@@ -45,34 +48,51 @@ use grammers_client::session::types::{PeerId, PeerKind, PeerRef};
 
 use crate::state::Settings;
 
+#[derive(Default)]
+pub struct ChatState {
+    peer: RwLock<Option<PeerRef>>,
+
+    admins: RwLock<Option<(Instant, HashSet<i64>)>>,
+
+    admin_fetch: tokio::sync::Mutex<()>,
+
+    messages: std::sync::Mutex<HashMap<i64, Vec<Instant>>>,
+    removals: std::sync::Mutex<HashMap<i64, Vec<Instant>>>,
+    notices: std::sync::Mutex<HashMap<(u8, i64), Instant>>,
+    members: std::sync::Mutex<HashMap<i64, Instant>>,
+    adds: std::sync::Mutex<HashMap<i64, (Instant, u64)>>,
+    captchas: std::sync::Mutex<HashMap<i64, captcha::Pending>>,
+    counts: std::sync::Mutex<HashMap<i64, (u64, String)>>,
+    tallies: std::sync::Mutex<HashMap<&'static str, u64>>,
+    logs: std::sync::Mutex<Vec<String>>,
+    joined: std::sync::Mutex<HashMap<i32, Vec<Joined>>>,
+    pending_numbers: std::sync::Mutex<HashMap<i64, PendingNumber>>,
+
+    inflight: OnceLock<tokio::sync::Semaphore>,
+}
+
+impl ChatState {
+    pub async fn slot(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.inflight
+            .get_or_init(|| tokio::sync::Semaphore::new(PER_CHAT_UPDATES))
+            .acquire()
+            .await
+            .expect("the per-chat semaphore is never closed")
+    }
+}
+
 pub struct Ctx {
     pub client: Client,
     pub settings: Arc<Settings>,
 
-    admin_cache: RwLock<HashMap<i64, (Instant, HashSet<i64>)>>,
-
-    removals: RwLock<HashMap<(i64, i64), Vec<Instant>>>,
-
-    messages: RwLock<HashMap<(i64, i64), Vec<Instant>>>,
-
-    notices: RwLock<HashMap<(u8, i64, i64), Instant>>,
+    chats: RwLock<HashMap<i64, Arc<ChatState>>>,
 
     deleted: RwLock<HashMap<u64, (Instant, String)>>,
     next_deleted_key: AtomicU64,
 
-    chat_refs: RwLock<HashMap<i64, PeerRef>>,
-
     pub started: Instant,
 
     pending_admins: RwLock<HashMap<u64, promote::Pending>>,
-
-    captchas: RwLock<HashMap<(i64, i64), captcha::Pending>>,
-
-    counts: std::sync::Mutex<HashMap<(i64, i64), (u64, String)>>,
-
-    tallies: std::sync::Mutex<HashMap<(i64, &'static str), u64>>,
-
-    admin_fetches: tokio::sync::Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
 
     user: RwLock<Option<Client>>,
 
@@ -80,26 +100,19 @@ pub struct Ctx {
 
     me_id: AtomicI64,
 
-    members: RwLock<HashMap<(i64, i64), Instant>>,
-
-    pending_logs: std::sync::Mutex<HashMap<i64, Vec<String>>>,
-
-    joined: RwLock<HashMap<(i64, i32), Vec<Joined>>>,
-
     user_chats: RwLock<HashMap<i64, PeerRef>>,
 
     pending_password: RwLock<Option<(Instant, Option<String>)>>,
 
-    pending_numbers: RwLock<HashMap<(i64, i64), PendingNumber>>,
-
     join_refs: RwLock<HashMap<String, PeerRef>>,
+
+    last_armed: AtomicU64,
 }
 
 pub const NOTICE_EVERY: Duration = Duration::from_secs(120);
 
 const DELETED_TTL: Duration = Duration::from_secs(3600);
 const DELETED_MAX: usize = 5_000;
-const NOTICES_MAX: usize = 10_000;
 
 type PendingNumber = (Instant, &'static str);
 
@@ -109,41 +122,52 @@ const PENDING_PASSWORD_TTL: Duration = Duration::from_secs(300);
 
 const PENDING_NUMBER_TTL: Duration = Duration::from_secs(120);
 
-const REMOVALS_MAX: usize = 10_000;
+const ARMED_WINDOW: u64 = 130_000;
 
 const ADMIN_CACHE_TTL: Duration = Duration::from_secs(1800);
 
-const ADMIN_CACHE_MAX: usize = 10_000;
+const PER_CHAT_UPDATES: usize = 8;
+
+const ADDS_TTL: Duration = Duration::from_secs(300);
+
+const PER_CHAT_MAX: usize = 20_000;
+const CAPTCHA_TTL: Duration = Duration::from_secs(900);
 
 impl Ctx {
     pub fn new(client: Client, settings: Arc<Settings>) -> Self {
         Self {
             client,
             settings,
-            admin_cache: RwLock::new(HashMap::new()),
-            removals: RwLock::new(HashMap::new()),
-            messages: RwLock::new(HashMap::new()),
-            notices: RwLock::new(HashMap::new()),
+            chats: RwLock::new(HashMap::new()),
             deleted: RwLock::new(HashMap::new()),
             next_deleted_key: AtomicU64::new(1),
-            chat_refs: RwLock::new(HashMap::new()),
             started: Instant::now(),
             pending_admins: RwLock::new(HashMap::new()),
-            captchas: RwLock::new(HashMap::new()),
-            counts: std::sync::Mutex::new(HashMap::new()),
-            tallies: std::sync::Mutex::new(HashMap::new()),
-            admin_fetches: tokio::sync::Mutex::new(HashMap::new()),
             user: RwLock::new(None),
             cleaner_id: AtomicI64::new(0),
             me_id: AtomicI64::new(0),
-            joined: RwLock::new(HashMap::new()),
-            members: RwLock::new(HashMap::new()),
-            pending_logs: std::sync::Mutex::new(HashMap::new()),
             user_chats: RwLock::new(HashMap::new()),
             pending_password: RwLock::new(None),
-            pending_numbers: RwLock::new(HashMap::new()),
             join_refs: RwLock::new(HashMap::new()),
+            last_armed: AtomicU64::new(0),
         }
+    }
+
+    pub fn state(&self, chat: i64) -> Arc<ChatState> {
+        if let Some(state) = self.chats.read().unwrap().get(&chat) {
+            return Arc::clone(state);
+        }
+        Arc::clone(
+            self.chats
+                .write()
+                .unwrap()
+                .entry(chat)
+                .or_default(),
+        )
+    }
+
+    fn peek(&self, chat: i64) -> Option<Arc<ChatState>> {
+        self.chats.read().unwrap().get(&chat).map(Arc::clone)
     }
 
     pub fn user_client(&self) -> Option<Client> {
@@ -159,30 +183,54 @@ impl Ctx {
     }
 
     pub fn channel_member(&self, chat: i64, user: i64) -> bool {
-        self.members
-            .read()
-            .unwrap()
-            .get(&(chat, user))
-            .is_some_and(|seen| seen.elapsed() < MEMBER_TRUST)
+        self.peek(chat).is_some_and(|state| {
+            state
+                .members
+                .lock()
+                .unwrap()
+                .get(&user)
+                .is_some_and(|seen| seen.elapsed() < MEMBER_TRUST)
+        })
     }
 
     pub fn remember_member(&self, chat: i64, user: i64) {
-        const MAX: usize = 100_000;
-        let mut members = self.members.write().unwrap();
-        if members.len() >= MAX {
+        let state = self.state(chat);
+        let mut members = state.members.lock().unwrap();
+        if members.len() >= PER_CHAT_MAX {
             members.retain(|_, seen| seen.elapsed() < MEMBER_TRUST);
         }
-        members.insert((chat, user), Instant::now());
+        members.insert(user, Instant::now());
     }
 
     pub fn forget_member(&self, chat: i64, user: i64) {
-        self.members.write().unwrap().remove(&(chat, user));
+        if let Some(state) = self.peek(chat) {
+            state.members.lock().unwrap().remove(&user);
+        }
+    }
+
+    pub fn cached_adds(&self, chat: i64, user: i64) -> Option<u64> {
+        self.peek(chat)?
+            .adds
+            .lock()
+            .unwrap()
+            .get(&user)
+            .filter(|(at, _)| at.elapsed() < ADDS_TTL)
+            .map(|(_, added)| *added)
+    }
+
+    pub fn remember_adds(&self, chat: i64, user: i64, added: u64) {
+        let state = self.state(chat);
+        let mut adds = state.adds.lock().unwrap();
+        if adds.len() >= PER_CHAT_MAX {
+            adds.retain(|_, (at, _)| at.elapsed() < ADDS_TTL);
+        }
+        adds.insert(user, (Instant::now(), added));
     }
 
     pub fn queue_log(&self, chat: i64, entry: String) {
         const MAX_PER_CHAT: usize = 200;
-        let mut queued = self.pending_logs.lock().unwrap();
-        let entries = queued.entry(chat).or_default();
+        let state = self.state(chat);
+        let mut entries = state.logs.lock().unwrap();
         if entries.len() >= MAX_PER_CHAT {
             entries.remove(0);
         }
@@ -190,23 +238,27 @@ impl Ctx {
     }
 
     pub fn take_logs(&self) -> Vec<(i64, Vec<String>)> {
-        std::mem::take(&mut *self.pending_logs.lock().unwrap())
+        self.awake()
             .into_iter()
+            .filter_map(|(chat, state)| {
+                let queued = std::mem::take(&mut *state.logs.lock().unwrap());
+                (!queued.is_empty()).then_some((chat, queued))
+            })
             .collect()
     }
 
     fn joined_cached(&self, key: (i64, i32)) -> Option<Vec<Joined>> {
-        self.joined.read().unwrap().get(&key).cloned()
+        self.peek(key.0)?.joined.lock().unwrap().get(&key.1).cloned()
     }
 
     fn remember_joined(&self, key: (i64, i32), joined: Vec<Joined>) {
-        const MAX: usize = 1_000;
-        let mut cache = self.joined.write().unwrap();
-
+        const MAX: usize = 200;
+        let state = self.state(key.0);
+        let mut cache = state.joined.lock().unwrap();
         if cache.len() >= MAX {
             cache.clear();
         }
-        cache.insert(key, joined);
+        cache.insert(key.1, joined);
     }
 
     pub fn me_id(&self) -> i64 {
@@ -270,15 +322,26 @@ impl Ctx {
     }
 
     pub fn expect_number(&self, chat: i64, user: i64, setting: &'static str) {
-        let mut pending = self.pending_numbers.write().unwrap();
+        self.last_armed.store(
+            self.started.elapsed().as_millis() as u64,
+            Ordering::Relaxed,
+        );
+        let state = self.state(chat);
+        let mut pending = state.pending_numbers.lock().unwrap();
         pending.retain(|_, (armed, _)| armed.elapsed() < PENDING_NUMBER_TTL);
-        pending.insert((chat, user), (Instant::now(), setting));
+        pending.insert(user, (Instant::now(), setting));
     }
 
     pub fn take_expected_number(&self, chat: i64, user: i64) -> Option<&'static str> {
-        let mut pending = self.pending_numbers.write().unwrap();
-        let (armed, setting) = pending.remove(&(chat, user))?;
+        let state = self.peek(chat)?;
+        let mut pending = state.pending_numbers.lock().unwrap();
+        let (armed, setting) = pending.remove(&user)?;
         (armed.elapsed() < PENDING_NUMBER_TTL).then_some(setting)
+    }
+
+    pub fn maybe_expecting_number(&self) -> bool {
+        let armed = self.last_armed.load(Ordering::Relaxed);
+        armed != 0 && self.started.elapsed().as_millis() as u64 - armed < ARMED_WINDOW
     }
 
     pub fn join_ref(&self, name: &str) -> Option<PeerRef> {
@@ -290,13 +353,6 @@ impl Ctx {
         if refs.len() < 10_000 {
             refs.insert(name.to_owned(), peer);
         }
-    }
-
-    async fn admin_fetch_lock(&self, chat: i64) -> Arc<tokio::sync::Mutex<()>> {
-        let mut fetches = self.admin_fetches.lock().await;
-
-        fetches.retain(|_, lock| Arc::strong_count(lock) > 1);
-        Arc::clone(fetches.entry(chat).or_default())
     }
 
     pub fn pending_admin_new(&self, pending: promote::Pending) -> u64 {
@@ -338,21 +394,26 @@ impl Ctx {
         self.throttle(2, chat, user, Duration::from_secs(20))
     }
 
+    pub fn first_sighting(&self, chat: i64, user: i64, window: Duration) -> bool {
+        self.throttle(4, chat, user, window)
+    }
+
     pub fn may_report(&self, chat: i64, user: i64) -> bool {
         self.throttle(1, chat, user, report::EVERY)
     }
 
     fn throttle(&self, kind: u8, chat: i64, user: i64, every: Duration) -> bool {
-        let mut notices = self.notices.write().unwrap();
-        if let Some(last) = notices.get(&(kind, chat, user))
+        let state = self.state(chat);
+        let mut notices = state.notices.lock().unwrap();
+        if let Some(last) = notices.get(&(kind, user))
             && last.elapsed() < every
         {
             return false;
         }
-        if notices.len() >= NOTICES_MAX {
+        if notices.len() >= PER_CHAT_MAX {
             notices.retain(|_, last| last.elapsed() < NOTICE_EVERY);
         }
-        notices.insert((kind, chat, user), Instant::now());
+        notices.insert((kind, user), Instant::now());
         true
     }
 
@@ -375,110 +436,129 @@ impl Ctx {
     }
 
     pub fn record_message(&self, chat: i64, user: i64, window: Duration) -> usize {
-        let mut messages = self.messages.write().unwrap();
-        if messages.len() >= REMOVALS_MAX {
+        let state = self.state(chat);
+        let mut messages = state.messages.lock().unwrap();
+        if messages.len() >= PER_CHAT_MAX {
             messages.retain(|_, times| times.iter().any(|t| t.elapsed() < window));
         }
-        let times = messages.entry((chat, user)).or_default();
+        let times = messages.entry(user).or_default();
         times.retain(|t| t.elapsed() < window);
         times.push(Instant::now());
         times.len()
     }
 
     pub fn record_removal(&self, chat: i64, actor: i64, window: Duration) -> usize {
-        let mut removals = self.removals.write().unwrap();
-        if removals.len() >= REMOVALS_MAX {
+        let state = self.state(chat);
+        let mut removals = state.removals.lock().unwrap();
+        if removals.len() >= PER_CHAT_MAX {
             removals.retain(|_, times| times.iter().any(|t| t.elapsed() < window));
         }
-        let times = removals.entry((chat, actor)).or_default();
+        let times = removals.entry(actor).or_default();
         times.retain(|t| t.elapsed() < window);
         times.push(Instant::now());
         times.len()
     }
 
     pub fn remember_chat(&self, chat: i64, peer: PeerRef) {
-        const MAX: usize = 50_000;
-        let mut refs = self.chat_refs.write().unwrap();
-        if refs.len() < MAX {
-            refs.insert(chat, peer);
-        }
+        *self.state(chat).peer.write().unwrap() = Some(peer);
     }
 
     pub fn count_message(&self, chat: i64, user: i64, name: impl FnOnce() -> String) {
-        let mut counts = self.counts.lock().unwrap();
-        let entry = counts
-            .entry((chat, user))
-            .or_insert_with(|| (0, name()));
+        let state = self.state(chat);
+        let mut counts = state.counts.lock().unwrap();
+        let entry = counts.entry(user).or_insert_with(|| (0, name()));
         entry.0 += 1;
     }
 
     pub fn bump(&self, chat: i64, counter: &'static str) {
-        *self.tallies.lock().unwrap().entry((chat, counter)).or_insert(0) += 1;
+        let state = self.state(chat);
+        *state.tallies.lock().unwrap().entry(counter).or_insert(0) += 1;
     }
 
     fn cached_admin(&self, chat: i64, user: i64) -> Option<bool> {
-        let cache = self.admin_cache.read().unwrap();
-        let (fetched, admins) = cache.get(&chat)?;
+        let state = self.peek(chat)?;
+        let admins = state.admins.read().unwrap();
+        let (fetched, admins) = admins.as_ref()?;
         (fetched.elapsed() < ADMIN_CACHE_TTL).then(|| admins.contains(&user))
     }
 
+    fn awake(&self) -> Vec<(i64, Arc<ChatState>)> {
+        self.chats
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(chat, state)| (*chat, Arc::clone(state)))
+            .collect()
+    }
+
     pub fn take_tallies(&self) -> HashMap<(i64, &'static str), u64> {
-        std::mem::take(&mut *self.tallies.lock().unwrap())
+        let mut all = HashMap::new();
+        for (chat, state) in self.awake() {
+            for (counter, count) in std::mem::take(&mut *state.tallies.lock().unwrap()) {
+                all.insert((chat, counter), count);
+            }
+        }
+        all
     }
 
     pub fn take_counts(&self) -> HashMap<(i64, i64), (u64, String)> {
-        std::mem::take(&mut self.counts.lock().unwrap())
+        let mut all = HashMap::new();
+        for (chat, state) in self.awake() {
+            let mut counts = state.counts.lock().unwrap();
+            let room = counts.len();
+            for (user, count) in std::mem::replace(&mut *counts, HashMap::with_capacity(room)) {
+                all.insert((chat, user), count);
+            }
+        }
+        all
     }
 
     pub fn captcha_start(&self, chat: i64, user: i64, pending: captcha::Pending) {
-        let mut captchas = self.captchas.write().unwrap();
-
-        captchas.retain(|_, p| p.started.elapsed() < Duration::from_secs(900));
-        captchas.insert((chat, user), pending);
+        let state = self.state(chat);
+        let mut captchas = state.captchas.lock().unwrap();
+        captchas.retain(|_, p| p.started.elapsed() < CAPTCHA_TTL);
+        captchas.insert(user, pending);
     }
 
     pub fn captcha_pending(&self, chat: i64, user: i64) -> Option<captcha::Pending> {
-        self.captchas.read().unwrap().get(&(chat, user)).cloned()
+        self.peek(chat)?.captchas.lock().unwrap().get(&user).cloned()
     }
 
     pub fn captcha_done(&self, chat: i64, user: i64) {
-        self.captchas.write().unwrap().remove(&(chat, user));
+        if let Some(state) = self.peek(chat) {
+            state.captchas.lock().unwrap().remove(&user);
+        }
     }
 
     pub fn chat_ref(&self, chat: i64) -> Option<PeerRef> {
-        self.chat_refs.read().unwrap().get(&chat).copied()
+        *self.peek(chat)?.peer.read().unwrap()
     }
 
     pub fn forget_admins(&self, chat: i64) {
-        self.admin_cache.write().unwrap().remove(&chat);
+        if let Some(state) = self.peek(chat) {
+            *state.admins.write().unwrap() = None;
+        }
     }
 
     fn cache_admins(&self, chat: i64, admins: HashSet<i64>) {
-        let mut cache = self.admin_cache.write().unwrap();
-        if cache.len() >= ADMIN_CACHE_MAX {
-            cache.retain(|_, (fetched, _)| fetched.elapsed() < ADMIN_CACHE_TTL);
-        }
-        cache.insert(chat, (Instant::now(), admins));
+        *self.state(chat).admins.write().unwrap() = Some((Instant::now(), admins));
     }
 
     fn cached_admins(&self, chat: i64) -> Option<HashSet<i64>> {
-        let cache = self.admin_cache.read().unwrap();
-        let (fetched, admins) = cache.get(&chat)?;
+        let state = self.peek(chat)?;
+        let admins = state.admins.read().unwrap();
+        let (fetched, admins) = admins.as_ref()?;
         (fetched.elapsed() < ADMIN_CACHE_TTL).then(|| admins.clone())
     }
 }
 
 pub async fn chat_admins(ctx: &Ctx, chat_ref: PeerRef, chat: i64) -> Option<HashSet<i64>> {
-    admins_of(ctx, chat_ref, chat, true).await
-}
-
-async fn admins_of(ctx: &Ctx, chat_ref: PeerRef, chat: i64, loud: bool) -> Option<HashSet<i64>> {
     if let Some(admins) = ctx.cached_admins(chat) {
         return Some(admins);
     }
 
-    let guard = ctx.admin_fetch_lock(chat).await;
-    let _fetching = guard.lock().await;
+    let state = ctx.state(chat);
+    let _fetching = state.admin_fetch.lock().await;
     if let Some(admins) = ctx.cached_admins(chat) {
         return Some(admins);
     }
@@ -495,9 +575,7 @@ async fn admins_of(ctx: &Ctx, chat_ref: PeerRef, chat: i64, loud: bool) -> Optio
             }
             Ok(None) => break,
             Err(e) => {
-                if loud {
-                    eprintln!("could not list admins of {chat}: {e}");
-                }
+                eprintln!("could not list admins of {chat}: {e}");
                 failed = true;
                 break;
             }
@@ -530,8 +608,10 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
             invalidate_admins(ctx, &raw);
             if let grammers_client::tl::enums::Update::ChannelParticipant(update) = &raw.raw {
                 betrayal::on_participant_update(ctx, update).await;
+                raid::on_participant_update(ctx, update).await;
                 log::on_participant(ctx, update).await;
             }
+            pinlock::on_raw(ctx, &raw).await;
             autoconfig::on_raw(ctx, &raw).await;
             return;
         }
@@ -565,7 +645,15 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         }
     }
 
-    stats::count(ctx, message);
+    let state = chat_id(message).map(|chat| ctx.state(chat));
+    let _slot = match &state {
+        Some(state) => Some(state.slot().await),
+        None => None,
+    };
+
+    let view = locks::View::new(message);
+
+    stats::count(ctx, message, &view);
     if matches!(
         message.action(),
         Some(grammers_client::tl::enums::MessageAction::ChatDeleteUser(_))
@@ -589,6 +677,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         {
             stats::count_add(ctx, message, action.users.len()).await;
         }
+        raid::check(ctx, message, chat).await;
     }
     flood::check(ctx, message).await;
 
@@ -632,8 +721,8 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
                 || log::handle(ctx, message).await
                 || rights::handle(ctx, message).await
                 || vip::handle(ctx, message).await))
-        || locks::handle(ctx, message).await
-        || (!bot_authored && answers::handle(ctx, message).await);
+        || locks::handle(ctx, message, &view).await
+        || (!bot_authored && answers::handle(ctx, message, &view).await);
 
     locks::service(ctx, message).await;
 }
@@ -694,7 +783,23 @@ pub fn bot_admin_key(user: i64) -> String {
     format!("admin:{user}")
 }
 
+pub fn is_linked_post(message: &Message) -> bool {
+    let Some(grammers_client::tl::enums::MessageFwdHeader::Header(header)) =
+        message.forward_header()
+    else {
+        return false;
+    };
+    let Some(origin) = header.saved_from_peer else {
+        return false;
+    };
+
+    message.sender_id() == Some(PeerId::from(origin))
+}
+
 pub async fn is_exempt(ctx: &Ctx, message: &Message) -> bool {
+    if is_linked_post(message) {
+        return true;
+    }
     if let (Some(chat), Some(sender)) = (chat_id(message), message.sender_id().and_then(PeerId::bare_id))
         && vip::is_vip(ctx, chat, sender)
     {
@@ -790,34 +895,6 @@ pub fn name_of(message: &Message) -> String {
             Some(id) => id.to_string(),
             None => "کاربر".to_owned(),
         },
-    }
-}
-
-pub async fn warm_admin_cache(ctx: Arc<Ctx>) {
-    const AT_ONCE: usize = 4;
-
-    let chats = ctx.settings.chats();
-    let mut warmed = 0;
-    for batch in chats.chunks(AT_ONCE) {
-        let mut tasks = tokio::task::JoinSet::new();
-        for &chat in batch {
-            let ctx = Arc::clone(&ctx);
-            tasks.spawn(async move {
-                let Some(chat_ref) = ctx.chat_ref(chat) else {
-                    return false;
-                };
-
-                admins_of(&ctx, chat_ref, chat, false).await.is_some()
-            });
-        }
-        while let Some(result) = tasks.join_next().await {
-            if matches!(result, Ok(true)) {
-                warmed += 1;
-            }
-        }
-    }
-    if warmed > 0 {
-        println!("warmed admin cache for {warmed} chats");
     }
 }
 
@@ -975,7 +1052,10 @@ mod tests {
             include_str!("promote.rs"),
             include_str!("purge.rs"),
             include_str!("report.rs"),
+            include_str!("pinlock.rs"),
+            include_str!("raid.rs"),
             include_str!("restrict.rs"),
+            include_str!("setting.rs"),
             include_str!("stats.rs"),
             include_str!("strict.rs"),
             include_str!("style.rs"),

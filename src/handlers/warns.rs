@@ -8,16 +8,12 @@ pub const LIMIT: &str = "warn_limit";
 
 pub const ACTION: &str = "warn_action";
 const DEFAULT_LIMIT: u32 = 3;
-const LIMIT_RANGE: (u32, u32) = (1, 100);
+pub const LIMIT_RANGE: (u32, u32) = (1, 100);
 pub const LIMIT_PRESETS: &[u32] = &[2, 3, 5, 7, 10];
 
 const WARN: &[&str] = &["اخطار", "وارن"];
 const UNWARN: &[&str] = &["حذف اخطار", "پاک اخطار", "رفع اخطار"];
 const SHOW: &[&str] = &["اخطارها", "لیست اخطار"];
-
-fn key(user: i64) -> String {
-    format!("warn:{user}")
-}
 
 pub fn limit(ctx: &Ctx, chat: i64) -> u32 {
     ctx.settings
@@ -36,11 +32,8 @@ pub async fn set_limit(ctx: &Ctx, chat: i64, value: u32) {
     ctx.settings.set_value(chat, LIMIT, &value.to_string()).await;
 }
 
-pub fn count(ctx: &Ctx, chat: i64, user: i64) -> u32 {
-    ctx.settings
-        .value(chat, &key(user))
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0)
+pub async fn count(ctx: &Ctx, chat: i64, user: i64) -> u32 {
+    ctx.settings.warns_of(chat, user).await
 }
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
@@ -78,7 +71,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     };
 
-    let current = count(ctx, chat, user);
+    let current = count(ctx, chat, user).await;
     let limit = limit(ctx, chat);
 
     match adding {
@@ -136,13 +129,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
 }
 
 async fn store(ctx: &Ctx, chat: i64, user: i64, value: u32) {
-    if value == 0 {
-        ctx.settings.set(chat, &key(user), false).await;
-    } else {
-        ctx.settings
-            .set_value(chat, &key(user), &value.to_string())
-            .await;
-    }
+    ctx.settings.set_warns(chat, user, value).await;
 }
 
 async fn punish(ctx: &Ctx, message: &Message, chat: i64, target: PeerRef, name: &str, limit: u32) {

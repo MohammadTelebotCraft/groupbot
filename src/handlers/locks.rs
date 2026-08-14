@@ -14,7 +14,8 @@ pub struct Lock {
 pub struct View<'a> {
     message: &'a Message,
     media: Option<Media>,
-    lower: std::cell::OnceCell<String>,
+
+    lower: std::sync::OnceLock<String>,
 }
 
 impl<'a> View<'a> {
@@ -22,13 +23,17 @@ impl<'a> View<'a> {
         Self {
             message,
             media: message.media(),
-            lower: std::cell::OnceCell::new(),
+            lower: std::sync::OnceLock::new(),
         }
     }
 
-    fn lower(&self) -> &str {
+    pub fn lower(&self) -> &str {
         self.lower
             .get_or_init(|| self.message.text().to_lowercase())
+    }
+
+    pub fn media(&self) -> Option<&Media> {
+        self.media.as_ref()
     }
 
     fn entities(&self) -> Option<&Vec<tl::enums::MessageEntity>> {
@@ -59,15 +64,16 @@ pub const LOCKS: &[Lock] = &[
     Lock { key: "english", names: &["انگلیسی", "لاتین"], matches: has_english },
     Lock { key: "persian", names: &["فارسی", "پارسی"], matches: has_persian },
     Lock { key: "button", names: &["دکمه", "دکمه شیشه ای", "اینلاین"], matches: has_inline_button },
-    Lock { key: "username", names: &["یوزرنیم", "یوزر", "آیدی"], matches: is_username },
-    Lock { key: "mention", names: &["تگ", "منشن"], matches: is_mention },
+    Lock { key: USERNAME, names: &["یوزرنیم", "یوزر", "آیدی"], matches: is_username },
+    Lock { key: MENTION, names: &["تگ", "منشن"], matches: is_mention },
     Lock { key: "media", names: &["مدیا", "رسانه"], matches: is_media },
     Lock { key: "anon", names: &["ناشناس", "هویت ناشناس", "کانال"], matches: is_anonymous_channel },
     Lock { key: "spoiler", names: &["اسپویلر", "اسپویل"], matches: is_spoiler },
     Lock { key: "story", names: &["استوری"], matches: is_story },
-    Lock { key: "pin", names: &["سنجاق", "پین"], matches: is_pin_notice },
+    Lock { key: "pin", names: &["اعلان سنجاق", "اعلان پین"], matches: is_pin_notice },
     Lock { key: "promoter", names: &["تبچی", "تبلیغ", "تبلیغات"], matches: is_promoter },
     Lock { key: "commands", names: &["دستورات عمومی", "دستورات", "کامند"], matches: is_bot_command },
+    Lock { key: BOTCALL, names: &["دستور ربات", "دستور بات", "کامند ربات"], matches: is_bot_call },
 
     Lock { key: EDIT, names: &["ویرایش", "ادیت"], matches: never },
 
@@ -87,22 +93,27 @@ const GROUP: &[&str] = &["گروه", "کل گروه"];
 pub const EDIT: &str = "edit";
 
 pub const SERVICE: &str = "service";
+pub const USERNAME: &str = "username";
+pub const MENTION: &str = "mention";
+pub const BOTCALL: &str = "botcall";
 pub const FORWARD_CHANNEL: &str = "forward_channel";
 pub const FORWARD_USER: &str = "forward_user";
 const STATUS: &[&str] = &["قفل ها", "قفلها", "لیست قفل", "وضعیت قفل"];
 
-pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
+pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_>) -> bool {
     let text = message.text().trim();
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
 
     if STATUS.contains(&text) {
-        let active: Vec<&str> = LOCKS
-            .iter()
-            .filter(|lock| ctx.settings.is_locked(chat, lock.key))
-            .map(|lock| lock.names[0])
-            .collect();
+        let active: Vec<&str> = ctx.settings.with_chat(chat, |settings| {
+            LOCKS
+                .iter()
+                .filter(|lock| settings.is_locked(lock.key))
+                .map(|lock| lock.names[0])
+                .collect()
+        });
         let _ = message
             .reply(if active.is_empty() {
                 format!("هیچ قفلی فعال نیست. ({} قفل در دسترس)", LOCKS.len())
@@ -129,6 +140,7 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
                 if ctx.settings.set(chat, lock.key, on).await {
                     changed += 1;
                 }
+                super::strict::sync_pick(ctx, chat, lock.key, on).await;
             }
             let _ = message
                 .reply(if on {
@@ -146,6 +158,15 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
         if GROUP.contains(&name) {
             return group_lock(ctx, message, chat, on).await;
         }
+        if super::pinlock::NAMES.contains(&name) {
+            return super::pinlock::set(ctx, message, chat, on).await;
+        }
+        if LOCKS
+            .iter()
+            .any(|lock| lock.key == USERNAME && lock.names.contains(&name))
+        {
+            return super::toggles::prompt(ctx, message, chat, &super::toggles::USERNAME, on).await;
+        }
         if BOT.contains(&name) {
             return super::toggles::prompt(ctx, message, chat, &super::toggles::BOT, on).await;
         }
@@ -154,6 +175,7 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
             return false;
         };
         let changed = ctx.settings.set(chat, lock.key, on).await;
+        super::strict::sync_pick(ctx, chat, lock.key, on).await;
         let label = lock.names[0];
         let _ = message
             .reply(match (on, changed) {
@@ -166,7 +188,7 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
         return true;
     }
 
-    enforce(ctx, message, chat, false).await
+    enforce(ctx, message, chat, false, view).await
 }
 
 pub async fn on_edit(ctx: &std::sync::Arc<Ctx>, message: &Message) {
@@ -174,7 +196,8 @@ pub async fn on_edit(ctx: &std::sync::Arc<Ctx>, message: &Message) {
         return;
     };
     let edits_locked = ctx.settings.is_locked(chat, EDIT);
-    enforce(ctx, message, chat, edits_locked).await;
+    let view = View::new(message);
+    enforce(ctx, message, chat, edits_locked, &view).await;
 }
 
 pub async fn service(ctx: &Ctx, message: &Message) {
@@ -194,13 +217,15 @@ async fn enforce(
     message: &Message,
     chat: i64,
     forced: bool,
+    view: &View<'_>,
 ) -> bool {
-    let view = View::new(message);
-    let filtered = super::filters::matches(ctx, chat, view.lower());
+    let filtered = super::filters::matches(ctx, chat, view);
     let banned_pack = super::packs::is_banned(ctx, chat, message);
-    let matched = LOCKS
-        .iter()
-        .find(|lock| ctx.settings.is_locked(chat, lock.key) && (lock.matches)(&view));
+    let matched = ctx.settings.with_chat(chat, |settings| {
+        LOCKS
+            .iter()
+            .find(|lock| settings.is_locked(lock.key) && (lock.matches)(view))
+    });
     if !forced && !filtered && !banned_pack && matched.is_none() {
         return false;
     }
@@ -241,17 +266,24 @@ async fn enforce(
         },
     )
     .await;
+    let cause = match (matched, filtered, banned_pack) {
+        (Some(lock), ..) => lock.key,
+        (None, true, _) => super::strict::FILTER,
+        (None, false, true) => super::strict::PACK,
+        (None, false, false) => EDIT,
+    };
+    let chances = super::strict::punish(ctx, message, chat, cause).await;
+
     if filtered {
-        super::filters::notify(ctx, message, chat, &text).await;
+        super::filters::notify(ctx, message, chat, &text, chances).await;
     } else {
         let reason = match (matched, banned_pack) {
             (Some(lock), _) => lock.names[0],
             (None, true) => "پک استیکر",
             (None, false) => "ویرایش",
         };
-        super::notice::send(ctx, message, chat, reason).await;
+        super::notice::send(ctx, message, chat, reason, chances).await;
     }
-    super::strict::punish(ctx, message, chat).await;
     true
 }
 
@@ -440,6 +472,15 @@ fn is_username(view: &View) -> bool {
     })
 }
 
+fn command_targets_a_bot(text: &str) -> bool {
+    text.split_whitespace()
+        .any(|word| word.starts_with('/') && word.contains('@'))
+}
+
+fn is_bot_call(view: &View) -> bool {
+    command_targets_a_bot(view.message.text())
+}
+
 fn is_promoter(view: &View) -> bool {
     is_forward_channel(view) || is_username(view) || text_has_telegram_link(view.lower())
 }
@@ -557,6 +598,16 @@ mod tests {
         assert_eq!(parse("قفل"), None);
         assert_eq!(parse("قفلی"), None);
         assert_eq!(parse("سلام"), None);
+    }
+
+    #[test]
+    fn spots_a_username_inside_a_bot_command() {
+        assert!(command_targets_a_bot("/start@RextesterRoBot"));
+        assert!(command_targets_a_bot("سلام /help@somebot لطفا"));
+
+        assert!(!command_targets_a_bot("/start"));
+        assert!(!command_targets_a_bot("ایمیل من a@b.com است"));
+        assert!(!command_targets_a_bot("@channel"));
     }
 
     #[test]

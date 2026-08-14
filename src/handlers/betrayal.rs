@@ -16,8 +16,8 @@ pub const ACTION: &str = "betrayal_action";
 
 pub const DEFAULT_LIMIT: u32 = 5;
 pub const DEFAULT_WINDOW: u32 = 5;
-const LIMIT_RANGE: (u32, u32) = (2, 30);
-const WINDOW_RANGE: (u32, u32) = (1, 120);
+pub const LIMIT_RANGE: (u32, u32) = (2, 30);
+pub const WINDOW_RANGE: (u32, u32) = (1, 120);
 
 pub const LIMIT_PRESETS: &[u32] = &[3, 5, 8, 12, 20];
 pub const WINDOW_PRESETS: &[u32] = &[1, 5, 10, 30, 60];

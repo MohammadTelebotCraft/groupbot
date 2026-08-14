@@ -78,7 +78,6 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         let _ = message.reply(format!("✓ «{label}» قفل شد.")).await;
     } else {
         ctx.settings.set(chat, &key(set), false).await;
-        ctx.settings.set_value(chat, &key(set), "").await;
         let _ = message.reply(format!("✗ «{label}» باز شد.")).await;
     }
     true

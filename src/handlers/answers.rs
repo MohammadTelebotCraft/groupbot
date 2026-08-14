@@ -36,10 +36,6 @@ impl Audience {
     }
 }
 
-pub async fn set_audience(ctx: &Ctx, chat: i64, value: &str) {
-    ctx.settings.set_value(chat, AUDIENCE, value).await;
-}
-
 pub fn triggers(ctx: &Ctx, chat: i64) -> Vec<String> {
     let mut found: Vec<String> = ctx
         .settings
@@ -55,7 +51,7 @@ fn key(trigger: &str) -> String {
     format!("{PREFIX}{trigger}")
 }
 
-pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
+pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
     let text = message.text().trim();
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
@@ -64,15 +60,16 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     if let Some((adding, rest)) = parse(text) {
         return edit(ctx, message, chat, adding, rest).await;
     }
-    answer(ctx, message, chat).await
+    answer(ctx, message, chat, view).await
 }
 
-async fn answer(ctx: &Ctx, message: &Message, chat: i64) -> bool {
+async fn answer(ctx: &Ctx, message: &Message, chat: i64, view: &super::locks::View<'_>) -> bool {
     if ctx.settings.indexed_empty(chat, PREFIX) {
         return false;
     }
-    let trigger = message.text().trim().to_lowercase();
-    let Some(stored) = ctx.settings.value(chat, &key(&trigger)) else {
+
+    let trigger = view.lower().trim();
+    let Some(stored) = ctx.settings.value(chat, &key(trigger)) else {
         return false;
     };
 
@@ -120,7 +117,6 @@ async fn edit(ctx: &Ctx, message: &Message, chat: i64, adding: bool, trigger: &s
 
     if !adding {
         let existed = ctx.settings.set(chat, &key(&trigger), false).await;
-        ctx.settings.set_value(chat, &key(&trigger), "").await;
         let _ = message
             .reply(if existed {
                 format!("✗ پاسخ «{trigger}» حذف شد.")

@@ -14,7 +14,7 @@ pub const TIMEOUT: &str = "captcha_timeout";
 pub const ACTION: &str = "captcha_action";
 
 const DEFAULT_TIMEOUT: u32 = 120;
-const TIMEOUT_RANGE: (u32, u32) = (30, 900);
+pub const TIMEOUT_RANGE: (u32, u32) = (30, 900);
 pub const TIMEOUT_PRESETS: &[u32] = &[60, 120, 300, 600];
 
 const EMOJI: &[&str] = &[
@@ -24,7 +24,7 @@ const EMOJI: &[&str] = &[
 
 pub const CHOICES: &str = "captcha_choices";
 const DEFAULT_CHOICES: u32 = 3;
-const CHOICES_RANGE: (u32, u32) = (2, 6);
+pub const CHOICES_RANGE: (u32, u32) = (2, 6);
 pub const CHOICES_PRESETS: &[u32] = &[2, 3, 4, 5, 6];
 
 const GLOBAL: i64 = 0;
@@ -35,13 +35,6 @@ pub fn choices(ctx: &Ctx, chat: i64) -> usize {
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_CHOICES)
         .clamp(CHOICES_RANGE.0, CHOICES_RANGE.1) as usize
-}
-
-pub async fn set_choices(ctx: &Ctx, chat: i64, value: u32) {
-    let value = value.clamp(CHOICES_RANGE.0, CHOICES_RANGE.1);
-    ctx.settings
-        .set_value(chat, CHOICES, &value.to_string())
-        .await;
 }
 
 #[derive(Clone)]

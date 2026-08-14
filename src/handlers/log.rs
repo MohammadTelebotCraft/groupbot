@@ -216,7 +216,7 @@ pub async fn on_participant(ctx: &Ctx, update: &grammers_client::tl::types::Upda
 }
 
 async fn name_of(ctx: &Ctx, chat: i64, user: i64) -> String {
-    if let Some(name) = super::stats::known_name(ctx, chat, user) {
+    if let Some(name) = super::stats::known_name(ctx, chat, user).await {
         return name;
     }
     let (Some(chat_ref), Some(target)) = (

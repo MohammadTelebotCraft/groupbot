@@ -11,6 +11,7 @@ pub const AUTO_COUNT: &str = "auto_purge_count";
 pub const AUTO_AT_PRESETS: &[u32] = &[0, 3 * 60, 6 * 60, 12 * 60, 21 * 60, 23 * 60];
 
 pub const AUTO_COUNT_PRESETS: &[u32] = &[100, 500, 1_000, 5_000, 20_000, 0];
+pub const AUTO_COUNT_RANGE: (u32, u32) = (0, 100_000);
 pub const AUTO_DEFAULT_AT: u32 = 4 * 60;
 pub const AUTO_DEFAULT_COUNT: u32 = 1_000;
 

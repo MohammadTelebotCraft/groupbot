@@ -100,7 +100,6 @@ async fn main() -> Result {
     ctx.set_user_client(user_client);
 
     handlers::join::prime(&ctx).await;
-    tokio::spawn(handlers::warm_admin_cache(Arc::clone(&ctx)));
 
     let night_ctx = Arc::clone(&ctx);
     tokio::spawn(async move {
@@ -133,7 +132,7 @@ async fn main() -> Result {
             tick.tick().await;
             handlers::stats::flush(&stats_ctx).await;
 
-            if flushes.is_multiple_of(60) {
+            if flushes.is_multiple_of(1440) {
                 handlers::stats::prune(&stats_ctx).await;
             }
             flushes += 1;

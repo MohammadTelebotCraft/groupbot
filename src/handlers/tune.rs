@@ -33,14 +33,14 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
+
+    let Some(numbers) = numbers_of(&rest[name.len()..]) else {
+        return false;
+    };
+
     if !can_manage(ctx, message).await {
         return true;
     }
-
-    let numbers: Vec<u32> = rest[name.len()..]
-        .split_whitespace()
-        .filter_map(|word| word.parse().ok())
-        .collect();
     if numbers.is_empty() {
         let _ = message.reply(usage(what)).await;
         return true;
@@ -94,6 +94,10 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     true
 }
 
+fn numbers_of(tail: &str) -> Option<Vec<u32>> {
+    tail.split_whitespace().map(|word| word.parse().ok()).collect()
+}
+
 fn usage(what: &str) -> &'static str {
     match what {
         "warns" => "مثال: «تنظیم اخطار 5»",
@@ -101,5 +105,32 @@ fn usage(what: &str) -> &'static str {
         "betrayal" => "مثال: «تنظیم خیانت 5 10» یعنی ۵ حذف در ۱۰ دقیقه",
         "notice" => "مثال: «تنظیم اعلان 15» (ثانیه، صفر یعنی پاک نشود)",
         _ => "مثال: «تنظیم رگبار 10 5» یعنی ۱۰ پیام در ۵ ثانیه",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claims_only_a_numeric_tail() {
+        assert_eq!(numbers_of(""), Some(vec![]));
+        assert_eq!(numbers_of(" 15"), Some(vec![15]));
+        assert_eq!(numbers_of(" 10 5"), Some(vec![10, 5]));
+
+        assert_eq!(numbers_of(" شرط 120 30"), None);
+        assert_eq!(numbers_of(" abc"), None);
+    }
+
+    #[test]
+    fn every_alias_is_matched_longest_first() {
+        for (alias, what) in SETTINGS {
+            let picked = SETTINGS
+                .iter()
+                .max_by_key(|(name, _)| if alias.starts_with(*name) { name.len() } else { 0 })
+                .filter(|(name, _)| alias.starts_with(*name))
+                .expect("an alias must match itself");
+            assert_eq!(picked.1, *what, "«{alias}» resolved to the wrong setting");
+        }
     }
 }

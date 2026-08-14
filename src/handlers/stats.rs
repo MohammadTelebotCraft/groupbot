@@ -1,20 +1,8 @@
-use std::collections::HashMap;
-
 use grammers_client::message::{InputMessage, Message};
 use grammers_client::session::types::PeerId;
 
 use super::{Ctx, esc, name_of};
-
-pub const TOTAL: &str = "total:";
-
-pub const TODAY: &str = "today:";
-
-pub const WEEK: &str = "week:";
-pub const MONTH: &str = "month:";
-
-pub const SEEN: &str = "seen:";
-
-pub const RANK: &str = "rank:";
+use crate::state::{Bump, Bumped, Counter, Period};
 
 pub const RANKS: &str = "ranks";
 
@@ -41,8 +29,6 @@ pub fn week_of(day: u64) -> u64 {
 pub fn month_of(day: u64) -> u64 {
     day / 30
 }
-
-pub const ADDS: &str = "adds:";
 
 pub const TALLY: &str = "tally:";
 
@@ -99,23 +85,9 @@ pub const IDLE_DAYS: u64 = 14;
 
 const FORGET_DAYS: u64 = 90;
 
-pub fn idle_members(ctx: &Ctx, chat: i64, day: u64, days: u64) -> Vec<(i64, String, u64)> {
-    let mut idle: Vec<(i64, String, u64)> = ctx.settings.pick_values(chat, SEEN, |user, value| {
-        let (seen, name) = value.split_once('|')?;
-        let seen: u64 = seen.parse().ok()?;
-        let quiet = day.saturating_sub(seen);
-        let user: i64 = user.parse().ok()?;
-        (quiet >= days).then(|| (user, name.to_owned(), quiet))
-    });
-    idle.sort_unstable_by_key(|(_, _, quiet)| std::cmp::Reverse(*quiet));
-    idle
-}
+const IDLE_SHOWN: i64 = 10;
 
-struct Row {
-    user: i64,
-    count: u64,
-    name: String,
-}
+const BOARD: i64 = 10;
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
@@ -130,8 +102,8 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         let _ = message
             .reply(
                 InputMessage::new()
-                    .html(section_text(ctx, chat, "sum"))
-                    .reply_markup(markup(ctx, chat, opener, "sum")),
+                    .html(section_text(ctx, chat, "sum").await)
+                    .reply_markup(markup(ctx, chat, opener, "sum").await),
             )
             .await;
         return true;
@@ -213,8 +185,8 @@ pub async fn on_callback(
             .answer()
             .edit(
                 InputMessage::new()
-                    .html(section_text(ctx, chat, "idle"))
-                    .reply_markup(markup(ctx, chat, opener, "idle")),
+                    .html(section_text(ctx, chat, "idle").await)
+                    .reply_markup(markup(ctx, chat, opener, "idle").await),
             )
             .await;
         return;
@@ -224,8 +196,8 @@ pub async fn on_callback(
         .answer()
         .edit(
             InputMessage::new()
-                .html(section_text(ctx, chat, section))
-                .reply_markup(markup(ctx, chat, opener, section)),
+                .html(section_text(ctx, chat, section).await)
+                .reply_markup(markup(ctx, chat, opener, section).await),
         )
         .await;
 }
@@ -241,10 +213,10 @@ async fn kick_idle(ctx: &Ctx, chat: i64, user: i64) {
         eprintln!("stats: {chat}: could not kick idle {user}: {e}");
         return;
     }
-    ctx.settings.set_value(chat, &format!("{SEEN}{user}"), "").await;
+    ctx.settings.clear_seen(chat, user).await;
 }
 
-fn markup(
+async fn markup(
     ctx: &Ctx,
     chat: i64,
     opener: i64,
@@ -254,10 +226,8 @@ fn markup(
 
     let mut rows: Vec<Vec<Button>> = Vec::new();
     if current == "idle" {
-        for (user, name, quiet) in idle_members(ctx, chat, today(), IDLE_DAYS)
-            .into_iter()
-            .take(10)
-        {
+        let (idle, _) = ctx.settings.idle(chat, today(), IDLE_DAYS, IDLE_SHOWN).await;
+        for (user, name, quiet) in idle {
             rows.push(vec![super::style::data(
                 format!("✗  {name} · {quiet} روز"),
                 format!("s:{opener}:{chat}:kick:{user}").into_bytes(),
@@ -309,11 +279,11 @@ fn clamp(text: String) -> String {
     format!("{cut}\n\n<i>…کوتاه شد</i>")
 }
 
-fn section_text(ctx: &Ctx, chat: i64, section: &str) -> String {
-    clamp(section_body(ctx, chat, section))
+async fn section_text(ctx: &Ctx, chat: i64, section: &str) -> String {
+    clamp(section_body(ctx, chat, section).await)
 }
 
-fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
+async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
     let day = today();
     let title = ctx
         .settings
@@ -323,10 +293,8 @@ fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
 
     match section {
         "top" => {
-            let mut today_rows = rows(ctx, chat, TODAY, day);
-            let mut all_rows = rows(ctx, chat, TOTAL, day);
-            today_rows.sort_unstable_by_key(|row| std::cmp::Reverse(row.count));
-            all_rows.sort_unstable_by_key(|row| std::cmp::Reverse(row.count));
+            let today_rows = ctx.settings.board(chat, Period::Today, day, BOARD).await;
+            let all_rows = ctx.settings.board(chat, Period::Total, 0, BOARD).await;
             format!(
                 "{head} › <b>پرچت ها</b>\n\n<b>امروز</b>\n{}\n\n<b>کل</b>\n{}",
                 leaderboard(&today_rows),
@@ -334,27 +302,28 @@ fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
             )
         }
         "week" | "month" => {
-            let prefix = if section == "week" { WEEK } else { MONTH };
-            let label = if section == "week" { "هفته" } else { "ماه" };
-            let mut ranked = rows(ctx, chat, prefix, day);
-            ranked.sort_unstable_by_key(|row| std::cmp::Reverse(row.count));
-            let total: u64 = ranked.iter().map(|row| row.count).sum();
+            let (period, stamp, label) = if section == "week" {
+                (Period::Week, week_of(day), "هفته")
+            } else {
+                (Period::Month, month_of(day), "ماه")
+            };
+            let ranked = ctx.settings.board(chat, period, stamp, BOARD).await;
+            let (total, active) = ctx.settings.board_totals(chat, period, stamp).await;
             format!(
                 "{head} › <b>{label}</b>\n\n\
                  پیام های این {label} · <b>{total}</b>\n\
-                 کاربران فعال · <b>{}</b>\n\n{}",
-                ranked.len(),
+                 کاربران فعال · <b>{active}</b>\n\n{}",
                 leaderboard(&ranked)
             )
         }
         "idle" => {
-            let idle = idle_members(ctx, chat, day, IDLE_DAYS);
+            let (_, idle) = ctx.settings.idle(chat, day, IDLE_DAYS, IDLE_SHOWN).await;
             format!(
                 "{head} › <b>غیرفعال ها</b>\n\n\
                  کسانی که بیش از <b>{IDLE_DAYS}</b> روز پیامی نفرستاده اند ({}).\n\
                  برای اخراج روی هر نام بزنید.\n\n\
                  <i>تنها کسانی شمرده می شوند که از زمان نصب ربات پیامی فرستاده اند.</i>",
-                idle.len()
+                idle
             )
         }
         "hours" => {
@@ -413,8 +382,7 @@ fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
             )
         }
         "members" => {
-            let mut adds = rows(ctx, chat, ADDS, day);
-            adds.sort_unstable_by_key(|row| std::cmp::Reverse(row.count));
+            let adds = ctx.settings.board(chat, Period::Adds, 0, BOARD).await;
             format!(
                 "{head} › <b>اعضا</b>\n\n\
                  پیوستن امروز · <b>{}</b>\n\
@@ -449,10 +417,9 @@ fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
             super::locks::LOCKS.len(),
         ),
         _ => {
-            let today_rows = rows(ctx, chat, TODAY, day);
-            let all_rows = rows(ctx, chat, TOTAL, day);
-            let today_total: u64 = today_rows.iter().map(|row| row.count).sum();
-            let all_total: u64 = all_rows.iter().map(|row| row.count).sum();
+            let (today_total, today_users) =
+                ctx.settings.board_totals(chat, Period::Today, day).await;
+            let (all_total, members) = ctx.settings.board_totals(chat, Period::Total, 0).await;
             let busiest = (0..24)
                 .map(|hour| (hour, tally(ctx, chat, &format!("h{hour}"), day)))
                 .max_by_key(|(_, count)| *count)
@@ -463,13 +430,11 @@ fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
                 "{head} › <b>خلاصه</b>\n\n\
                  پیام های امروز · <b>{today_total}</b>\n\
                  پیام های کل · <b>{all_total}</b>\n\
-                 فعال امروز · <b>{}</b>\n\
-                 کاربران ثبت شده · <b>{}</b>\n\
+                 فعال امروز · <b>{today_users}</b>\n\
+                 کاربران ثبت شده · <b>{members}</b>\n\
                  شلوغ ترین ساعت · <b>{busiest}</b>\n\
                  حذف شده امروز · <b>{}</b>\n\
                  پیوستن امروز · <b>{}</b>",
-                today_rows.len(),
-                all_rows.len(),
                 tally(ctx, chat, DELETED, day),
                 tally(ctx, chat, JOINED, day),
             )
@@ -477,19 +442,18 @@ fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
     }
 }
 
-fn leaderboard(rows: &[Row]) -> String {
+fn leaderboard(rows: &[Counter]) -> String {
     if rows.is_empty() {
         return "‹ چیزی ثبت نشده".to_owned();
     }
     rows.iter()
-        .take(10)
         .enumerate()
         .map(|(place, row)| {
             format!(
                 "{}. <a href=\"tg://user?id={}\">{}</a> · <b>{}</b>",
                 place + 1,
                 row.user,
-                esc(&row.name),
+                esc(if row.name.is_empty() { "کاربر" } else { &row.name }),
                 row.count
             )
         })
@@ -514,16 +478,10 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) {
         return;
     };
 
-    let day = today();
-    let today_count = count_of(ctx, chat, TODAY, user, day);
-    let total_count = count_of(ctx, chat, TOTAL, user, day);
-    let adds = count_of(ctx, chat, ADDS, user, day);
-    let mut ranked = rows(ctx, chat, TODAY, day);
-    ranked.sort_unstable_by_key(|row| std::cmp::Reverse(row.count));
-    let place = ranked
-        .iter()
-        .position(|row| row.user == user)
-        .map(|index| (index + 1).to_string())
+    let counts = ctx.settings.card(chat, user, today()).await;
+    let place = counts
+        .place
+        .map(|place| place.to_string())
         .unwrap_or_else(|| "بدون رتبه".to_owned());
 
     let role = if super::owner(ctx, chat) == Some(user) {
@@ -554,12 +512,15 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) {
          تصاویر پروفایل · <b>{photo_count}</b>\n\
          مقام · <b>{role}</b>\n\n\
          <b>آمار کاربر</b>\n\
-         پیام های امروز · <b>{today_count}</b>\n\
-         پیام های کل · <b>{total_count}</b>\n\
+         پیام های امروز · <b>{}</b>\n\
+         پیام های کل · <b>{}</b>\n\
          رتبه امروز · <b>{place}</b>\n\
-         اعضای اضافه کرده · <b>{adds}</b>{}",
+         اعضای اضافه کرده · <b>{}</b>{}",
         esc(&name),
         esc(&username),
+        counts.today,
+        counts.total,
+        counts.adds,
         match super::extras::note(ctx, chat, user) {
             Some(note) => format!("\n\n<b>یادداشت</b>\n{}", esc(&note)),
             None => String::new(),
@@ -575,45 +536,7 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) {
     let _ = message.reply(card).await;
 }
 
-fn rows(ctx: &Ctx, chat: i64, prefix: &str, day: u64) -> Vec<Row> {
-    ctx.settings.pick_values(chat, prefix, |user, value| {
-        let (count, name) = parse_value(value, prefix, day)?;
-        Some(Row {
-            user: user.parse().ok()?,
-            count,
-            name,
-        })
-    })
-}
-
-fn count_of(ctx: &Ctx, chat: i64, prefix: &str, user: i64, day: u64) -> u64 {
-    ctx.settings
-        .value(chat, &format!("{prefix}{user}"))
-        .and_then(|value| parse_value(&value, prefix, day))
-        .map(|(count, _)| count)
-        .unwrap_or(0)
-}
-
-fn parse_value(value: &str, prefix: &str, day: u64) -> Option<(u64, String)> {
-    let mut parts = value.split('|');
-    let expected = match prefix {
-        TODAY => Some(day),
-        WEEK => Some(week_of(day)),
-        MONTH => Some(month_of(day)),
-        _ => None,
-    };
-    if let Some(expected) = expected {
-        let stored: u64 = parts.next()?.parse().ok()?;
-        if stored != expected {
-            return None;
-        }
-    }
-    let count = parts.next()?.parse().ok()?;
-    let name = parts.next().unwrap_or("کاربر").to_owned();
-    Some((count, name))
-}
-
-pub fn count(ctx: &Ctx, message: &Message) {
+pub fn count(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) {
     let (Some(chat), Some(user)) = (
         message.peer_id().bot_api_dialog_id(),
         message.sender_id().and_then(PeerId::bare_id),
@@ -621,13 +544,13 @@ pub fn count(ctx: &Ctx, message: &Message) {
         return;
     };
     ctx.count_message(chat, user, || name_of(message));
-    ctx.bump(chat, kind_of(message));
+    ctx.bump(chat, kind_of(view));
     ctx.bump(chat, HOURS[local_hour() as usize % 24]);
 }
 
-fn kind_of(message: &Message) -> &'static str {
+fn kind_of(view: &super::locks::View<'_>) -> &'static str {
     use grammers_client::media::Media;
-    match message.media() {
+    match view.media() {
         None => "k_text",
         Some(Media::Photo(_)) => "k_photo",
         Some(Media::Sticker(_)) => "k_sticker",
@@ -668,82 +591,41 @@ pub async fn flush(ctx: &Ctx) {
         rows.push((chat, format!("{TALLY}{counter}"), format!("{day}|{total}")));
     }
 
-    let pending: HashMap<(i64, i64), (u64, String)> = ctx.take_counts();
-    let mut ranked: Vec<(i64, i64, String, u64)> = Vec::new();
-    for ((chat, user), (added, name)) in pending {
-        let total = count_of(ctx, chat, TOTAL, user, day) + added;
-        let today_count = count_of(ctx, chat, TODAY, user, day) + added;
-        let week_count = count_of(ctx, chat, WEEK, user, day) + added;
-        let month_count = count_of(ctx, chat, MONTH, user, day) + added;
-
-        rows.push((chat, format!("{TOTAL}{user}"), format!("{total}|{name}")));
-        rows.push((
-            chat,
-            format!("{TODAY}{user}"),
-            format!("{day}|{today_count}|{name}"),
-        ));
-        rows.push((
-            chat,
-            format!("{WEEK}{user}"),
-            format!("{}|{week_count}|{name}", week_of(day)),
-        ));
-        rows.push((
-            chat,
-            format!("{MONTH}{user}"),
-            format!("{}|{month_count}|{name}", month_of(day)),
-        ));
-        rows.push((chat, format!("{SEEN}{user}"), format!("{day}|{name}")));
-        ranked.push((chat, user, name, total));
-    }
-
     if !rows.is_empty() {
         ctx.settings.set_values(rows).await;
     }
-    for (chat, user, name, total) in ranked {
-        award_rank(ctx, chat, user, &name, total).await;
+
+    let bumps: Vec<Bump> = ctx
+        .take_counts()
+        .into_iter()
+        .map(|((chat, user), (added, name))| Bump {
+            chat,
+            user,
+            name,
+            added,
+        })
+        .collect();
+    if bumps.is_empty() {
+        return;
+    }
+    for bumped in ctx
+        .settings
+        .bump(&bumps, day, week_of(day), month_of(day))
+        .await
+    {
+        award_rank(ctx, &bumped).await;
     }
 }
 
 pub async fn prune(ctx: &Ctx) {
-    let day = today();
-
-    let forgotten: Vec<(i64, i64)> = ctx
-        .settings
-        .chats()
-        .into_iter()
-        .flat_map(|chat| {
-            idle_members(ctx, chat, day, FORGET_DAYS)
-                .into_iter()
-                .map(move |(user, _, _)| (chat, user))
-        })
-        .collect();
-    let mut dropped = 0;
-    if !forgotten.is_empty() {
-        let forgotten: std::collections::HashSet<(i64, i64)> = forgotten.into_iter().collect();
-        for prefix in [TOTAL, SEEN, ADDS, RANK] {
-            dropped += ctx
-                .settings
-                .prune_users(prefix, |chat, user| forgotten.contains(&(chat, user)))
-                .await;
-        }
-    }
-
-    let dropped = dropped
-        + ctx.settings.prune_stale(TODAY, &format!("{day}|")).await
-        + ctx
-            .settings
-            .prune_stale(WEEK, &format!("{}|", week_of(day)))
-            .await
-        + ctx
-            .settings
-            .prune_stale(MONTH, &format!("{}|", month_of(day)))
-            .await;
-    if dropped > 0 {
-        println!("pruned {dropped} stale counter rows");
+    match ctx.settings.forget_idle(today(), FORGET_DAYS).await {
+        0 => {}
+        dropped => println!("forgot {dropped} members quiet for {FORGET_DAYS}+ days"),
     }
 }
 
-async fn award_rank(ctx: &Ctx, chat: i64, user: i64, name: &str, total: u64) {
+async fn award_rank(ctx: &Ctx, bumped: &Bumped) {
+    let (chat, user, total) = (bumped.chat, bumped.user, bumped.total);
     if !ctx.settings.is_locked(chat, RANKS) {
         return;
     }
@@ -754,14 +636,10 @@ async fn award_rank(ctx: &Ctx, chat: i64, user: i64, name: &str, total: u64) {
     else {
         return;
     };
-    let already: u64 = ctx
-        .settings
-        .value(chat, &format!("{RANK}{user}"))
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    if already >= *milestone {
+    if bumped.awarded >= *milestone {
         return;
     }
+    let name = bumped.name.as_str();
 
     let (Some(chat_ref), Some(target)) = (
         ctx.chat_ref(chat),
@@ -783,9 +661,7 @@ async fn award_rank(ctx: &Ctx, chat: i64, user: i64, name: &str, total: u64) {
     };
     match builder.rank(*title).await {
         Ok(()) => {
-            ctx.settings
-                .set_value(chat, &format!("{RANK}{user}"), &milestone.to_string())
-                .await;
+            ctx.settings.set_awarded(chat, user, *milestone).await;
             let _ = ctx
                 .client
                 .send_message(
@@ -856,7 +732,7 @@ pub async fn run_daily(ctx: &Ctx) {
         ctx.settings
             .set_value(chat, REPORT_DAY, &day.to_string())
             .await;
-        let body = daily_body(ctx, chat, day);
+        let body = daily_body(ctx, chat, day).await;
         if let Err(e) = ctx
             .client
             .send_message(chat_ref, InputMessage::new().html(body))
@@ -867,13 +743,13 @@ pub async fn run_daily(ctx: &Ctx) {
     }
 }
 
-pub fn daily_body(ctx: &Ctx, chat: i64, day: u64) -> String {
-    let mut ranked = rows(ctx, chat, TODAY, day);
-    ranked.sort_unstable_by_key(|row| std::cmp::Reverse(row.count));
+pub async fn daily_body(ctx: &Ctx, chat: i64, day: u64) -> String {
+    let ranked = ctx.settings.board(chat, Period::Today, day, BOARD).await;
+    let (sent, active) = ctx.settings.board_totals(chat, Period::Today, day).await;
     format!(
         "<b>گزارش امروز</b>\n\n\
-         پیام ها · <b>{}</b>\n\
-         کاربران فعال · <b>{}</b>\n\
+         پیام ها · <b>{sent}</b>\n\
+         کاربران فعال · <b>{active}</b>\n\
          پیوستن · <b>{}</b>\n\
          خروج · <b>{}</b>\n\
          حذف شده · <b>{}</b>\n\
@@ -881,8 +757,6 @@ pub fn daily_body(ctx: &Ctx, chat: i64, day: u64) -> String {
          سکوت · <b>{}</b>\n\
          اخطار · <b>{}</b>\n\n\
          <b>پرچت های امروز</b>\n{}",
-        ranked.iter().map(|row| row.count).sum::<u64>(),
-        ranked.len(),
         tally(ctx, chat, JOINED, day),
         tally(ctx, chat, LEFT, day),
         tally(ctx, chat, DELETED, day),
@@ -893,14 +767,20 @@ pub fn daily_body(ctx: &Ctx, chat: i64, day: u64) -> String {
     )
 }
 
-pub fn known_name(ctx: &Ctx, chat: i64, user: i64) -> Option<String> {
-    let value = ctx.settings.value(chat, &format!("{TOTAL}{user}"))?;
-    let (_, name) = parse_value(&value, TOTAL, today())?;
-    (!name.is_empty() && name != user.to_string()).then_some(name)
+pub async fn adds(ctx: &Ctx, chat: i64, user: i64) -> u64 {
+    if let Some(added) = ctx.cached_adds(chat, user) {
+        return added;
+    }
+    let added = ctx.settings.adds_of(chat, user).await;
+    ctx.remember_adds(chat, user, added);
+    added
 }
 
-pub fn adds(ctx: &Ctx, chat: i64, user: i64) -> u64 {
-    count_of(ctx, chat, ADDS, user, today())
+pub async fn known_name(ctx: &Ctx, chat: i64, user: i64) -> Option<String> {
+    ctx.settings
+        .name_of(chat, user)
+        .await
+        .filter(|name| *name != user.to_string())
 }
 
 pub async fn count_add(ctx: &Ctx, message: &Message, added: usize) {
@@ -910,15 +790,11 @@ pub async fn count_add(ctx: &Ctx, message: &Message, added: usize) {
     ) else {
         return;
     };
-    let day = today();
-    let total = count_of(ctx, chat, ADDS, user, day) + added as u64;
-    ctx.settings
-        .set_value(
-            chat,
-            &format!("{ADDS}{user}"),
-            &format!("{total}|{}", name_of(message)),
-        )
+    let total = ctx
+        .settings
+        .credit_add(chat, user, &name_of(message), added as u64)
         .await;
+    ctx.remember_adds(chat, user, total);
 }
 
 #[cfg(test)]
@@ -926,16 +802,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn daily_rows_expire_without_cleanup() {
-        assert_eq!(
-            parse_value("100|5|Ali", TODAY, 100),
-            Some((5, "Ali".to_owned()))
-        );
-
-        assert_eq!(parse_value("99|5|Ali", TODAY, 100), None);
-        assert_eq!(
-            parse_value("42|Ali", TOTAL, 100),
-            Some((42, "Ali".to_owned()))
-        );
+    fn period_stamps_turn_over_with_their_period() {
+        assert_eq!(week_of(6), week_of(0));
+        assert_ne!(week_of(7), week_of(6));
+        assert_eq!(month_of(29), month_of(0));
+        assert_ne!(month_of(30), month_of(29));
     }
 }

@@ -12,8 +12,8 @@ pub const LIMIT: &str = "flood_limit";
 pub const WINDOW: &str = "flood_window";
 
 pub const ACTION: &str = "flood_action";
-const LIMIT_RANGE: (u32, u32) = (2, 50);
-const WINDOW_RANGE: (u32, u32) = (2, 120);
+pub const LIMIT_RANGE: (u32, u32) = (2, 50);
+pub const WINDOW_RANGE: (u32, u32) = (2, 120);
 const DEFAULT_LIMIT: u32 = 8;
 const DEFAULT_WINDOW: u32 = 10;
 

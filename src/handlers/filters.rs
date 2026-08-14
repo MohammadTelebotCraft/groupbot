@@ -21,12 +21,15 @@ pub fn words(ctx: &Ctx, chat: i64) -> Vec<String> {
     ctx.settings.flags_with_prefix(chat, PREFIX)
 }
 
-pub fn matches(ctx: &Ctx, chat: i64, lowercased: &str) -> bool {
-    if lowercased.is_empty() {
+pub fn matches(ctx: &Ctx, chat: i64, view: &super::locks::View) -> bool {
+    if ctx.settings.indexed_empty(chat, PREFIX) {
         return false;
     }
-    ctx.settings
-        .indexed_any(chat, PREFIX, |word| lowercased.contains(word))
+    let lowercased = view.lower();
+    !lowercased.is_empty()
+        && ctx
+            .settings
+            .indexed_any(chat, PREFIX, |word| lowercased.contains(word))
 }
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
@@ -87,7 +90,13 @@ fn parse(text: &str) -> Option<(bool, &str)> {
     None
 }
 
-pub async fn notify(ctx: &Ctx, message: &Message, chat: i64, deleted_text: &str) {
+pub async fn notify(
+    ctx: &Ctx,
+    message: &Message,
+    chat: i64,
+    deleted_text: &str,
+    chances: Option<u32>,
+) {
     let Some(user) = message.sender_id().and_then(PeerId::bare_id) else {
         return;
     };
@@ -100,8 +109,12 @@ pub async fn notify(ctx: &Ctx, message: &Message, chat: i64, deleted_text: &str)
         .respond(
             InputMessage::new()
                 .html(format!(
-                    "<a href=\"tg://user?id={user}\">{}</a> پیام شما به دلیل داشتن کلمه فیلتر شده حذف شد.",
-                    esc(&name_of(message))
+                    "<a href=\"tg://user?id={user}\">{}</a> پیام شما به دلیل داشتن کلمه فیلتر شده حذف شد.{}",
+                    esc(&name_of(message)),
+                    match chances {
+                        Some(chances) => format!("\n{}", super::strict::chances_line(chances)),
+                        None => String::new(),
+                    }
                 ))
                 .reply_markup(ReplyMarkup::from_buttons(&[vec![Button::data(
                     "متن پیام من چه بود؟",

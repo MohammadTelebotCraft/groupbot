@@ -14,12 +14,15 @@ pub const PROMPT_EVERY: &str = "gate_every";
 
 pub const PROMPT_TTL: &str = "gate_ttl";
 pub const EVERY_PRESETS: &[u32] = &[0, 30, 60, 120, 300, 900];
+pub const EVERY_RANGE: (u32, u32) = (0, 3600);
 pub const TTL_PRESETS: &[u32] = &[0, 10, 30, 60, 300];
+pub const TTL_RANGE: (u32, u32) = (0, 3600);
 const DEFAULT_EVERY: u32 = 120;
 const DEFAULT_TTL: u32 = 30;
 
 pub const ADD_REQUIRED: &str = "add_required";
-pub const ADD_PRESETS: &[u64] = &[0, 1, 3, 5, 10, 20];
+pub const ADD_PRESETS: &[u32] = &[0, 1, 3, 5, 10, 20];
+pub const ADD_RANGE: (u32, u32) = (0, 1000);
 
 const SET: &[&str] = &["تنظیم عضویت اجباری", "عضویت اجباری"];
 const CLEAR: &[&str] = &["حذف عضویت اجباری", "خاموش عضویت اجباری"];
@@ -300,7 +303,7 @@ pub async fn enforce(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
     if super::is_exempt(ctx, message).await {
         return false;
     }
-    let added = super::stats::adds(ctx, chat, user);
+    let added = super::stats::adds(ctx, chat, user).await;
     let owes_adds = added < needed;
     let missing_channel = match &channel {
         Some(_) if ctx.channel_member(chat, user) => false,
@@ -383,11 +386,10 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
         return;
     };
     let needed = required_adds(ctx, chat);
-    let added = query
-        .sender_id()
-        .bare_id()
-        .map(|user| super::stats::adds(ctx, chat, user))
-        .unwrap_or(0);
+    let added = match query.sender_id().bare_id() {
+        Some(user) => super::stats::adds(ctx, chat, user).await,
+        None => 0,
+    };
 
     if let Some(user) = query.sender_id().bare_id() {
         ctx.forget_member(chat, user);
