@@ -146,6 +146,7 @@ async fn main() -> Result {
     }
 
     handlers::join::prime(&ctx).await;
+    handlers::tempmedia::restore(&ctx).await;
 
     let night_ctx = Arc::clone(&ctx);
     tokio::spawn(async move {
@@ -154,8 +155,26 @@ async fn main() -> Result {
         loop {
             tick.tick().await;
             handlers::extras::run_night(&night_ctx).await;
-            handlers::stats::run_daily(&night_ctx).await;
-            handlers::purge::run_auto(&night_ctx).await;
+        }
+    });
+
+    let report_ctx = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(NIGHT_CHECK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            handlers::stats::run_daily(&report_ctx).await;
+        }
+    });
+
+    let purge_ctx = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(NIGHT_CHECK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            handlers::purge::run_auto(&purge_ctx).await;
         }
     });
 

@@ -20,6 +20,17 @@ const MAX_PENDING: usize = 5_000;
 
 const CHUNK: usize = 100;
 
+pub fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64)
+}
+
+pub fn due_from_unix(due_at: i64) -> Instant {
+    let left = due_at.saturating_sub(unix_now()).max(0) as u64;
+    Instant::now() + Duration::from_secs(left)
+}
+
 pub struct Kind {
     pub name: &'static str,
     pub key: &'static str,
@@ -84,14 +95,21 @@ pub async fn watch(ctx: &Ctx, message: &Message, view: &View<'_>) {
         return;
     }
 
+    let seconds = u64::from(minutes) * 60;
     ctx.queue_temp_media(
         chat,
         message.id(),
-        Instant::now() + Duration::from_secs(u64::from(minutes) * 60),
+        Instant::now() + Duration::from_secs(seconds),
+        unix_now() + seconds as i64,
     );
 }
 
 pub async fn sweep(ctx: &Ctx) {
+    let writes = ctx.take_pending_writes();
+    if !writes.is_empty() {
+        ctx.settings.save_pending(writes).await;
+    }
+
     for (chat, ids) in ctx.take_due_media() {
         let Some(chat_ref) = ctx.chat_ref(chat) else {
             continue;
@@ -102,7 +120,21 @@ pub async fn sweep(ctx: &Ctx) {
                 break;
             }
         }
+
+        ctx.settings.drop_pending(chat, &ids).await;
     }
+}
+
+pub async fn restore(ctx: &Ctx) {
+    let rows = ctx.settings.load_pending().await;
+    if rows.is_empty() {
+        return;
+    }
+    let count = rows.len();
+    for (chat, id, due_at) in rows {
+        ctx.restore_temp_media(chat, id, due_from_unix(due_at));
+    }
+    println!("temp media: restored {count} pending delete(s)");
 }
 
 pub fn queue(pending: &mut VecDeque<(Instant, i32)>, id: i32, due: Instant) {
@@ -169,6 +201,21 @@ mod tests {
         assert!(drain_due(&mut pending, now).is_empty());
         assert_eq!(drain_due(&mut pending, now + Duration::from_secs(61)), vec![3]);
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn a_stored_deadline_comes_back_usable() {
+        let now = unix_now();
+        assert!(now > 1_700_000_000, "unix_now looks wrong: {now}");
+
+        let overdue = due_from_unix(now - 600);
+        assert!(overdue <= Instant::now(), "an overdue row must fire at once");
+
+        let later = due_from_unix(now + 600);
+        assert!(later > Instant::now());
+        assert!(later <= Instant::now() + Duration::from_secs(601));
+
+        assert!(due_from_unix(0) <= Instant::now());
     }
 
     #[test]

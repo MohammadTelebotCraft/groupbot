@@ -733,16 +733,18 @@ pub async fn run_daily(ctx: &Ctx) {
             continue;
         };
 
-        ctx.settings
-            .set_value(chat, REPORT_DAY, &day.to_string())
-            .await;
         let body = daily_body(ctx, chat, day).await;
-        if let Err(e) = ctx
+        match ctx
             .client
             .send_message(chat_ref, InputMessage::new().html(body))
             .await
         {
-            eprintln!("daily report: {chat}: {e}");
+            Ok(_) => {
+                ctx.settings
+                    .set_value(chat, REPORT_DAY, &day.to_string())
+                    .await;
+            }
+            Err(e) => eprintln!("daily report: {chat}: {e}"),
         }
     }
 }

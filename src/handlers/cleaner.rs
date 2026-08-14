@@ -382,8 +382,7 @@ pub async fn wipe(ctx: &Ctx, message: &Message) -> bool {
             .await;
         return true;
     };
-    let (Ok(Some(chat_ref)), Some(chat), Some(user_id)) = (
-        message.peer_ref().await,
+    let (Some(chat), Some(user_id)) = (
         message.peer_id().bot_api_dialog_id(),
         target.id.bare_id(),
     ) else {
@@ -394,10 +393,11 @@ pub async fn wipe(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    let done = match wipe_as_cleaner(ctx, chat, user_id, arg).await {
-        Some(result) => result,
-
-        None => delete_history(&ctx.client, chat_ref, target).await,
+    let Some(done) = wipe_as_cleaner(ctx, chat, user_id, arg).await else {
+        let _ = message
+            .reply("برای این کار کلینر لازم است. «افزودن کلینر» را بفرستید.")
+            .await;
+        return true;
     };
     let _ = match done {
         Ok(()) => {

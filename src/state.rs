@@ -156,6 +156,17 @@ impl Settings {
         )
         .execute(&mut *conn)
         .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS pending_deletes (
+                chat_id    BIGINT NOT NULL,
+                message_id INT    NOT NULL,
+                due_at     BIGINT NOT NULL,
+                PRIMARY KEY (chat_id, message_id)
+            )",
+        )
+        .execute(&mut *conn)
+        .await?;
         for column in ["warns", "strikes", "struck"] {
             sqlx::query(&format!(
                 "ALTER TABLE counters ADD COLUMN IF NOT EXISTS {column} BIGINT NOT NULL DEFAULT 0"
@@ -630,6 +641,55 @@ impl Settings {
                 .await
         {
             eprintln!("counters: clearing seen for {chat}/{user} failed: {e}");
+        }
+    }
+
+    pub async fn save_pending(&self, rows: Vec<(i64, i32, i64)>) {
+        const CHUNK: usize = 1_000;
+        for batch in rows.chunks(CHUNK) {
+            let (mut chats, mut ids, mut dues) = (Vec::new(), Vec::new(), Vec::new());
+            for (chat, id, due) in batch {
+                chats.push(*chat);
+                ids.push(*id);
+                dues.push(*due);
+            }
+            let result = sqlx::query(
+                "INSERT INTO pending_deletes (chat_id, message_id, due_at)
+                 SELECT * FROM UNNEST($1::bigint[], $2::int[], $3::bigint[])
+                 ON CONFLICT (chat_id, message_id) DO NOTHING",
+            )
+            .bind(&chats)
+            .bind(&ids)
+            .bind(&dues)
+            .execute(&self.pool)
+            .await;
+            if let Err(e) = result {
+                eprintln!("pending deletes: batch write failed ({} rows): {e}", batch.len());
+            }
+        }
+    }
+
+    pub async fn drop_pending(&self, chat: i64, ids: &[i32]) {
+        let result = sqlx::query("DELETE FROM pending_deletes WHERE chat_id = $1 AND message_id = ANY($2)")
+            .bind(chat)
+            .bind(ids)
+            .execute(&self.pool)
+            .await;
+        if let Err(e) = result {
+            eprintln!("pending deletes: {chat}: clear failed: {e}");
+        }
+    }
+
+    pub async fn load_pending(&self) -> Vec<(i64, i32, i64)> {
+        match sqlx::query_as("SELECT chat_id, message_id, due_at FROM pending_deletes")
+            .fetch_all(&self.pool)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!("pending deletes: load failed: {e}");
+                Vec::new()
+            }
         }
     }
 

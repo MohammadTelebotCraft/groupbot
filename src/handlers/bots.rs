@@ -11,6 +11,74 @@ pub const KICK_ADDER: &str = "bot_kick_adder";
 
 pub const EVEN_ADMINS: &str = "bot_even_admins";
 
+pub const ALLOWED: &str = "botok:";
+
+const ALLOW: &[&str] = &["ربات مجاز", "افزودن ربات مجاز"];
+const DISALLOW: &[&str] = &["حذف ربات مجاز", "لغو ربات مجاز"];
+
+pub fn allow_key(user: i64) -> String {
+    format!("{ALLOWED}{user}")
+}
+
+pub fn is_allowed(ctx: &Ctx, chat: i64, user: i64) -> bool {
+    ctx.settings.is_locked(chat, &allow_key(user))
+}
+
+pub async fn allow(ctx: &Ctx, message: &Message) -> bool {
+    let text = message.text().trim();
+    let Some((adding, arg)) = parse_allow(text) else {
+        return false;
+    };
+    let Some(named) = super::named(message, arg) else {
+        return false;
+    };
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
+        return true;
+    }
+    let Some(chat) = message.peer_id().bot_api_dialog_id() else {
+        return false;
+    };
+    let Some((target, target_name)) = super::resolve(ctx, message, named).await else {
+        let _ = message
+            .reply("کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.")
+            .await;
+        return true;
+    };
+    let Some(target_id) = target.id.bare_id() else {
+        let _ = message.reply("کاربر پیدا نشد.").await;
+        return true;
+    };
+
+    let changed = ctx.settings.set(chat, &allow_key(target_id), adding).await;
+    let mark = if adding { "✓" } else { "✗" };
+    let what = match (adding, changed) {
+        (true, true) => "به رباتای مجاز اضافه شد",
+        (true, false) => "از قبل مجاز بود",
+        (false, true) => "از رباتای مجاز حذف شد",
+        (false, false) => "مجاز نبود",
+    };
+    let _ = message.reply(format!("{mark} {target_name} {what}.")).await;
+    true
+}
+
+fn parse_allow(text: &str) -> Option<(bool, Option<&str>)> {
+    for (commands, adding) in [(ALLOW, true), (DISALLOW, false)] {
+        for command in commands {
+            let Some(rest) = text.strip_prefix(command) else {
+                continue;
+            };
+            let rest = rest.trim();
+            if rest.is_empty() {
+                return Some((adding, None));
+            }
+            if text[command.len()..].starts_with(char::is_whitespace) && !rest.contains(' ') {
+                return Some((adding, Some(rest)));
+            }
+        }
+    }
+    None
+}
+
 pub async fn on_participant_update(
     ctx: &std::sync::Arc<Ctx>,
     update: &tl::types::UpdateChannelParticipant,
@@ -116,12 +184,10 @@ pub fn cleaner_candidate(ctx: &Ctx, message: &Message) -> bool {
     if message.outgoing() || message.peer_id().kind() != PeerKind::Channel {
         return false;
     }
-    let Some(chat) = message.peer_id().bot_api_dialog_id() else {
-        return false;
-    };
-    if !ctx.settings.is_locked(chat, LOCK) {
+    if message.peer_id().bot_api_dialog_id().is_none() {
         return false;
     }
+
     if !super::bot_authored(message) {
         return false;
     }
@@ -130,6 +196,16 @@ pub fn cleaner_candidate(ctx: &Ctx, message: &Message) -> bool {
         Some(user) => user != ctx.me_id() && !ctx.is_cleaner(user),
         None => false,
     }
+}
+
+fn spared_on_sight(ctx: &Ctx, chat: i64, user: i64) -> bool {
+    if is_allowed(ctx, chat, user) || super::vip::is_vip(ctx, chat, user) {
+        return true;
+    }
+    if super::owner(ctx, chat) == Some(user) || super::is_bot_admin(ctx, chat, user) {
+        return true;
+    }
+    ctx.cached_admin(chat, user).unwrap_or(true)
 }
 
 pub async fn on_cleaner_message(ctx: &Ctx, message: &Message) {
@@ -143,24 +219,53 @@ pub async fn on_cleaner_message(ctx: &Ctx, message: &Message) {
         return;
     };
 
-    if !ctx.settings.is_locked(chat, EVEN_ADMINS) && super::is_exempt(ctx, message).await {
+    let locked = ctx.settings.is_locked(chat, LOCK);
+
+    let spared = is_allowed(ctx, chat, user)
+        || (!ctx.settings.is_locked(chat, EVEN_ADMINS) && spared_on_sight(ctx, chat, user));
+
+    if locked && !spared {
+        let _ = message.delete().await;
+        let Some(chat_ref) = ctx.chat_ref(chat) else {
+            eprintln!("bot lock: {chat}: saw a bot post but have no ref to ban with");
+            return;
+        };
+        let Some(target) = PeerId::user(user).map(PeerId::to_ambient_ref) else {
+            return;
+        };
+        let name = super::name_of(message);
+        if remove(ctx, chat, chat_ref, target, &name).await {
+            super::cleaner::wipe_user(ctx, chat, user).await;
+            println!("bot lock: {chat}: banned {user} for posting");
+        }
+        return;
+    }
+    if spared {
         return;
     }
 
-    let _ = message.delete().await;
+    let view = super::locks::View::new(message);
+    let Some(reason) = super::locks::scan(ctx, chat, message, &view) else {
+        return;
+    };
 
-    let Some(chat_ref) = ctx.chat_ref(chat) else {
-        eprintln!("bot lock: {chat}: saw a bot post but have no ref to ban with");
+    if let Err(e) = message.delete().await {
+        eprintln!("bot lock: {chat}: could not delete a bot's message: {e}");
         return;
-    };
-    let Some(target) = PeerId::user(user).map(PeerId::to_ambient_ref) else {
-        return;
-    };
-    let name = super::name_of(message);
-    if remove(ctx, chat, chat_ref, target, &name).await {
-        super::cleaner::wipe_user(ctx, chat, user).await;
-        println!("bot lock: {chat}: banned {user} for posting");
     }
+    ctx.bump(chat, super::stats::DELETED);
+    super::log::write(
+        ctx,
+        chat,
+        "log_del",
+        super::log::Entry {
+            title: "حذف پیام ربات",
+            target: Some((user, &super::name_of(message))),
+            reason: Some(reason),
+            ..Default::default()
+        },
+    )
+    .await;
 }
 
 fn spared_because(
@@ -170,11 +275,13 @@ fn spared_because(
     is_admin: bool,
     even_admins: bool,
     vip: bool,
+    allowed: bool,
 ) -> Option<&'static str> {
     match () {
         () if !is_bot => Some("not a bot"),
         () if is_me => Some("myself"),
         () if is_cleaner => Some("the cleaner"),
+        () if allowed => Some("allowed"),
         () if vip => Some("vip"),
         () if is_admin && !even_admins => Some("admin"),
         () => None,
@@ -222,6 +329,7 @@ pub async fn sweep(ctx: &Ctx, chat: i64) -> usize {
                     is_admin,
                     even_admins,
                     super::vip::is_vip(ctx, chat, user),
+                    is_allowed(ctx, chat, user),
                 );
                 if let Some(why) = why {
                     spared.push(format!("{user} ({why})"));
@@ -338,24 +446,34 @@ mod tests {
 
     #[test]
     fn the_sweep_never_takes_its_own_side() {
-        let plain = spared_because(true, false, false, false, false, false);
+        let plain = spared_because(true, false, false, false, false, false, false);
         assert_eq!(plain, None, "a plain bot goes");
 
-        assert_eq!(spared_because(false, false, false, false, false, false), Some("not a bot"));
-        assert_eq!(spared_because(true, true, false, false, false, false), Some("myself"));
-        assert_eq!(spared_because(true, false, true, false, false, false), Some("the cleaner"));
-        assert_eq!(spared_because(true, false, false, false, false, true), Some("vip"));
+        assert_eq!(spared_because(false, false, false, false, false, false, false), Some("not a bot"));
+        assert_eq!(spared_because(true, true, false, false, false, false, false), Some("myself"));
+        assert_eq!(spared_because(true, false, true, false, false, false, false), Some("the cleaner"));
+        assert_eq!(spared_because(true, false, false, false, false, true, false), Some("vip"));
         assert_eq!(
-            spared_because(true, false, false, true, false, false),
+            spared_because(true, false, false, false, false, false, true),
+            Some("allowed"),
+            "a bot on the allowlist stays"
+        );
+        assert_eq!(
+            spared_because(true, false, false, true, false, false, false),
             Some("admin"),
             "an admin bot is spared unless the lock says otherwise"
         );
         assert_eq!(
-            spared_because(true, false, false, true, true, false),
+            spared_because(true, false, false, true, true, false, false),
             None,
             "with «اعمال روی ادمین ها هم» an admin bot goes too"
         );
+        assert_eq!(
+            spared_because(true, false, false, true, true, false, true),
+            Some("allowed"),
+            "the allowlist outranks «اعمال روی ادمین ها هم» — it is the explicit exception"
+        );
 
-        assert_eq!(spared_because(true, true, false, true, true, false), Some("myself"));
+        assert_eq!(spared_because(true, true, false, true, true, false, false), Some("myself"));
     }
 }

@@ -110,6 +110,8 @@ pub struct Ctx {
 
     join_refs: RwLock<HashMap<String, PeerRef>>,
 
+    pending_writes: std::sync::Mutex<Vec<(i64, i32, i64)>>,
+
     last_armed: AtomicU64,
 }
 
@@ -153,6 +155,7 @@ impl Ctx {
             user_chats: RwLock::new(HashMap::new()),
             pending_password: RwLock::new(None),
             join_refs: RwLock::new(HashMap::new()),
+            pending_writes: std::sync::Mutex::new(Vec::new()),
             last_armed: AtomicU64::new(0),
         }
     }
@@ -251,9 +254,19 @@ impl Ctx {
         true
     }
 
-    pub fn queue_temp_media(&self, chat: i64, id: i32, due: Instant) {
+    pub fn queue_temp_media(&self, chat: i64, id: i32, due: Instant, due_at: i64) {
         let state = self.state(chat);
         tempmedia::queue(&mut state.temp_media.lock().unwrap(), id, due);
+        self.pending_writes.lock().unwrap().push((chat, id, due_at));
+    }
+
+    pub fn restore_temp_media(&self, chat: i64, id: i32, due: Instant) {
+        let state = self.state(chat);
+        tempmedia::queue(&mut state.temp_media.lock().unwrap(), id, due);
+    }
+
+    pub fn take_pending_writes(&self) -> Vec<(i64, i32, i64)> {
+        std::mem::take(&mut *self.pending_writes.lock().unwrap())
     }
 
     pub fn take_due_media(&self) -> Vec<(i64, Vec<i32>)> {
@@ -261,6 +274,7 @@ impl Ctx {
         self.awake()
             .into_iter()
             .filter_map(|(chat, state)| {
+                self.chat_ref(chat)?;
                 let due = tempmedia::drain_due(&mut state.temp_media.lock().unwrap(), now);
                 (!due.is_empty()).then_some((chat, due))
             })
@@ -772,7 +786,8 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
                 || cleaner::sweep(ctx, message).await
                 || log::handle(ctx, message).await
                 || rights::handle(ctx, message).await
-                || vip::handle(ctx, message).await))
+                || vip::handle(ctx, message).await
+                || bots::allow(ctx, message).await))
         || (!bot_authored && answers::handle(ctx, message, &view).await);
 
     locks::service(ctx, message).await;

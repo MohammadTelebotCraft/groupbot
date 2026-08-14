@@ -219,6 +219,21 @@ pub async fn service(ctx: &Ctx, message: &Message) {
     }
 }
 
+pub fn scan(ctx: &Ctx, chat: i64, message: &Message, view: &View<'_>) -> Option<&'static str> {
+    if super::filters::matches(ctx, chat, view) {
+        return Some(super::strict::FILTER);
+    }
+    if super::packs::is_banned(ctx, chat, message) {
+        return Some(super::strict::PACK);
+    }
+    ctx.settings.with_chat(chat, |settings| {
+        LOCKS
+            .iter()
+            .find(|lock| settings.is_locked(lock.key) && (lock.matches)(view))
+            .map(|lock| lock.names[0])
+    })
+}
+
 async fn enforce(
     ctx: &std::sync::Arc<Ctx>,
     message: &Message,
@@ -348,7 +363,9 @@ fn is_link(view: &View) -> bool {
             .any(|e| matches!(e, tl::enums::MessageEntity::Url(_)))
     });
 
-    marked_up || text_has_link(view.lower())
+    marked_up
+        || text_has_link(view.lower())
+        || markup_of(view).is_some_and(markup_has_link)
 }
 
 fn is_hyperlink(view: &View) -> bool {
@@ -449,6 +466,47 @@ fn has_inline_button(view: &View) -> bool {
     )
 }
 
+fn markup_links(markup: &tl::enums::ReplyMarkup) -> Vec<String> {
+    use tl::enums::KeyboardButton as B;
+
+    let rows = match markup {
+        tl::enums::ReplyMarkup::ReplyInlineMarkup(inline) => &inline.rows,
+        tl::enums::ReplyMarkup::ReplyKeyboardMarkup(keyboard) => &keyboard.rows,
+        _ => return Vec::new(),
+    };
+    rows.iter()
+        .flat_map(|tl::enums::KeyboardButtonRow::Row(row)| &row.buttons)
+        .filter_map(|button| match button {
+            B::Url(b) => Some(&b.url),
+            B::UrlAuth(b) => Some(&b.url),
+            B::InputKeyboardButtonUrlAuth(b) => Some(&b.url),
+            B::WebView(b) => Some(&b.url),
+            B::SimpleWebView(b) => Some(&b.url),
+            B::Copy(b) => Some(&b.copy_text),
+            B::SwitchInline(b) => Some(&b.query),
+            _ => None,
+        })
+        .map(|found| found.to_lowercase())
+        .collect()
+}
+
+fn markup_of<'a>(view: &'a View) -> Option<&'a tl::enums::ReplyMarkup> {
+    match &view.message.raw {
+        tl::enums::Message::Message(message) => message.reply_markup.as_ref(),
+        _ => None,
+    }
+}
+
+fn markup_has_link(markup: &tl::enums::ReplyMarkup) -> bool {
+    markup_links(markup).iter().any(|url| text_has_link(url))
+}
+
+fn markup_has_telegram_link(markup: &tl::enums::ReplyMarkup) -> bool {
+    markup_links(markup)
+        .iter()
+        .any(|url| text_has_telegram_link(url))
+}
+
 fn text_has_link(text: &str) -> bool {
     ["http://", "https://", "t.me/", "telegram.me/", "www."]
         .iter()
@@ -489,7 +547,10 @@ fn is_bot_call(view: &View) -> bool {
 }
 
 fn is_promoter(view: &View) -> bool {
-    is_forward_channel(view) || is_username(view) || text_has_telegram_link(view.lower())
+    is_forward_channel(view)
+        || is_username(view)
+        || text_has_telegram_link(view.lower())
+        || markup_of(view).is_some_and(markup_has_telegram_link)
 }
 
 fn is_bot_command(view: &View) -> bool {
@@ -656,5 +717,98 @@ mod tests {
         assert!(text_has_link("سلام https://example.com"));
         assert!(text_has_link(&"join T.ME/somegroup".to_lowercase()));
         assert!(!text_has_link("سلام دوستان"));
+    }
+
+    fn keyboard(buttons: Vec<tl::enums::KeyboardButton>) -> tl::enums::ReplyMarkup {
+        tl::types::ReplyInlineMarkup {
+            rows: vec![tl::types::KeyboardButtonRow { buttons }.into()],
+        }
+        .into()
+    }
+
+    fn url_button(url: &str) -> tl::enums::KeyboardButton {
+        tl::types::KeyboardButtonUrl {
+            style: None,
+            text: "بزن".to_owned(),
+            url: url.to_owned(),
+        }
+        .into()
+    }
+
+    #[test]
+    fn finds_a_link_hiding_in_a_button() {
+        assert!(markup_has_link(&keyboard(vec![url_button(
+            "https://example.com"
+        )])));
+        assert!(markup_has_telegram_link(&keyboard(vec![url_button(
+            "https://t.me/somechannel"
+        )])));
+
+        assert!(markup_has_link(&keyboard(vec![url_button(
+            "HTTPS://Example.COM"
+        )])));
+
+        assert!(!markup_has_link(&keyboard(vec![url_button(
+            "tg://user?id=1"
+        )])));
+        assert!(!markup_has_link(&keyboard(Vec::new())));
+    }
+
+    #[test]
+    fn every_url_bearing_button_is_read() {
+        let link = "https://t.me/spam".to_owned();
+        let buttons: Vec<tl::enums::KeyboardButton> = vec![
+            url_button(&link),
+            tl::types::KeyboardButtonUrlAuth {
+                style: None,
+                text: String::new(),
+                fwd_text: None,
+                url: link.clone(),
+                button_id: 0,
+            }
+            .into(),
+            tl::types::KeyboardButtonWebView {
+                style: None,
+                text: String::new(),
+                url: link.clone(),
+            }
+            .into(),
+            tl::types::KeyboardButtonSimpleWebView {
+                style: None,
+                text: String::new(),
+                url: link.clone(),
+            }
+            .into(),
+            tl::types::KeyboardButtonCopy {
+                style: None,
+                text: String::new(),
+                copy_text: link.clone(),
+            }
+            .into(),
+            tl::types::KeyboardButtonSwitchInline {
+                same_peer: false,
+                style: None,
+                text: String::new(),
+                query: link.clone(),
+                peer_types: None,
+            }
+            .into(),
+        ];
+        for button in buttons {
+            assert!(
+                markup_has_telegram_link(&keyboard(vec![button.clone()])),
+                "a link in {button:?} was not seen"
+            );
+        }
+
+        assert!(!markup_has_link(&keyboard(vec![
+            tl::types::KeyboardButtonCallback {
+                requires_password: false,
+                style: None,
+                text: "https://example.com".to_owned(),
+                data: b"noop".to_vec(),
+            }
+            .into()
+        ])));
     }
 }
