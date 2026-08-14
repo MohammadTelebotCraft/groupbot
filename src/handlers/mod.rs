@@ -68,6 +68,7 @@ pub struct ChatState {
     tallies: std::sync::Mutex<HashMap<&'static str, u64>>,
     logs: std::sync::Mutex<Vec<String>>,
     temp_media: std::sync::Mutex<VecDeque<(Instant, i32)>>,
+    swept_bots: std::sync::Mutex<bool>,
     joined: std::sync::Mutex<HashMap<i32, Vec<Joined>>>,
     pending_numbers: std::sync::Mutex<HashMap<i64, PendingNumber>>,
 
@@ -238,6 +239,16 @@ impl Ctx {
             entries.remove(0);
         }
         entries.push(entry);
+    }
+
+    pub fn claim_bot_sweep(&self, chat: i64) -> bool {
+        let state = self.state(chat);
+        let mut claimed = state.swept_bots.lock().unwrap();
+        if *claimed {
+            return false;
+        }
+        *claimed = true;
+        true
     }
 
     pub fn queue_temp_media(&self, chat: i64, id: i32, due: Instant) {
@@ -673,6 +684,16 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         }
     }
 
+    if let Some(chat) = chat_id(message)
+        && ctx.settings.is_locked(chat, bots::LOCK)
+        && ctx.claim_bot_sweep(chat)
+    {
+        let ctx = Arc::clone(ctx);
+        tokio::spawn(async move {
+            bots::sweep(&ctx, chat).await;
+        });
+    }
+
     let state = chat_id(message).map(|chat| ctx.state(chat));
     let _slot = match &state {
         Some(state) => Some(state.slot().await),
@@ -1060,10 +1081,12 @@ pub async fn admins(ctx: &Ctx, chat: PeerRef) -> (Option<(i64, String)>, Vec<Str
     );
     let (mut creator, mut names) = (None, Vec::new());
     while let Ok(Some(participant)) = participants.next().await {
+        let name = esc(&participant.user.full_name());
+
         if participant.user.is_bot() {
+            names.push(format!("‹ {name} · ربات"));
             continue;
         }
-        let name = esc(&participant.user.full_name());
         if matches!(participant.role, grammers_client::peer::Role::Creator(_)) {
             creator = Some((participant.user.id().bare_id_unchecked(), name.clone()));
             names.push(format!("★ {name}"));

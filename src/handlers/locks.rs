@@ -146,6 +146,7 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
                     changed += 1;
                 }
                 super::strict::sync_pick(ctx, chat, lock.key, on).await;
+                super::bots::on_lock_set(ctx, chat, lock.key, on).await;
             }
             let _ = message
                 .reply(if on {
@@ -181,6 +182,7 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
         };
         let changed = ctx.settings.set(chat, lock.key, on).await;
         super::strict::sync_pick(ctx, chat, lock.key, on).await;
+        super::bots::on_lock_set(ctx, chat, lock.key, on).await;
         let label = lock.names[0];
         let _ = message
             .reply(match (on, changed) {

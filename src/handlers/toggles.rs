@@ -88,6 +88,7 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, action: &str, chat: i
 
     let now_on = !ctx.settings.is_locked(chat, key);
     ctx.settings.set(chat, key, now_on).await;
+    super::bots::on_lock_set(ctx, chat, key, now_on).await;
 
     let _ = query
         .answer()

@@ -418,6 +418,17 @@ pub async fn wipe(ctx: &Ctx, message: &Message) -> bool {
     true
 }
 
+pub async fn wipe_user(ctx: &Ctx, chat: i64, user_id: i64) -> bool {
+    match wipe_as_cleaner(ctx, chat, user_id, None).await {
+        Some(Ok(())) => true,
+        Some(Err(e)) => {
+            eprintln!("wipe_user: {chat}: {e}");
+            false
+        }
+        None => false,
+    }
+}
+
 async fn wipe_as_cleaner(
     ctx: &Ctx,
     chat: i64,

@@ -83,15 +83,23 @@ async fn main() -> Result {
         runner: user_runner,
         updates: user_updates,
         handle: user_handle,
-    } = SenderPool::new(Arc::clone(&user_session), api_id);
+    } = SenderPool::with_configuration(
+        Arc::clone(&user_session),
+        api_id,
+        ConnectionParams {
+            updates_channel_capacity: UPDATES_CHANNEL_CAPACITY,
+            ..Default::default()
+        },
+    );
 
-    drop(user_updates);
     let user_task = tokio::spawn(user_runner.run());
     let user_client = Client::new(user_handle);
+    let mut cleaner_ready = false;
     match user_client.is_authorized().await {
         Ok(true) => match user_client.get_me().await {
             Ok(me) => {
                 ctx.set_cleaner_id(me.id().bare_id_unchecked());
+                cleaner_ready = true;
                 println!("cleaner signed in as {}", me.full_name());
             }
             Err(e) => eprintln!("cleaner: signed in but unreachable: {e}"),
@@ -99,7 +107,43 @@ async fn main() -> Result {
         Ok(false) => println!("cleaner not signed in — send «ورود کلینر» to the bot"),
         Err(e) => eprintln!("cleaner: {e}"),
     }
-    ctx.set_user_client(user_client);
+    ctx.set_user_client(user_client.clone());
+
+    if cleaner_ready {
+        let cleaner_ctx = Arc::clone(&ctx);
+        tokio::spawn(async move {
+            let mut updates = match user_client
+                .stream_updates(user_updates, UpdatesConfiguration { catch_up: false })
+                .await
+            {
+                Ok(updates) => updates,
+                Err(e) => {
+                    eprintln!("cleaner updates: {e}");
+                    return;
+                }
+            };
+            loop {
+                match updates.next().await {
+                    Ok(grammers_client::update::Update::NewMessage(message)) => {
+                        if !handlers::bots::cleaner_candidate(&cleaner_ctx, &message) {
+                            continue;
+                        }
+                        let ctx = Arc::clone(&cleaner_ctx);
+                        tokio::spawn(async move {
+                            handlers::bots::on_cleaner_message(&ctx, &message).await;
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("cleaner updates: {e}");
+                        break;
+                    }
+                }
+            }
+        });
+    } else {
+        drop(user_updates);
+    }
 
     handlers::join::prime(&ctx).await;
 

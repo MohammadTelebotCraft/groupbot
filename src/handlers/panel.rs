@@ -476,6 +476,7 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
             for lock in LOCKS {
                 ctx.settings.set(chat, lock.key, on).await;
                 strict::sync_pick(ctx, chat, lock.key, on).await;
+                super::bots::on_lock_set(ctx, chat, lock.key, on).await;
             }
             (locks_title(0), locks_markup(ctx, chat, opener, 0))
         }
@@ -502,6 +503,7 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
             let now_on = !ctx.settings.is_locked(chat, lock.key);
             ctx.settings.set(chat, lock.key, now_on).await;
             strict::sync_pick(ctx, chat, lock.key, now_on).await;
+            super::bots::on_lock_set(ctx, chat, lock.key, now_on).await;
             let page = page.min(last_page());
             (locks_title(page), locks_markup(ctx, chat, opener, page))
         }
