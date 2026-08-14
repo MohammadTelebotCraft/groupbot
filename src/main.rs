@@ -26,6 +26,8 @@ const NIGHT_CHECK: std::time::Duration = std::time::Duration::from_secs(60);
 
 const LOG_FLUSH: std::time::Duration = std::time::Duration::from_secs(3);
 
+const TEMP_MEDIA_SWEEP: std::time::Duration = std::time::Duration::from_secs(30);
+
 const STATS_FLUSH: std::time::Duration = std::time::Duration::from_secs(60);
 
 const UPDATES_CHANNEL_CAPACITY: std::num::NonZeroUsize =
@@ -110,6 +112,16 @@ async fn main() -> Result {
             handlers::extras::run_night(&night_ctx).await;
             handlers::stats::run_daily(&night_ctx).await;
             handlers::purge::run_auto(&night_ctx).await;
+        }
+    });
+
+    let media_ctx = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(TEMP_MEDIA_SWEEP);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            handlers::tempmedia::sweep(&media_ctx).await;
         }
     });
 

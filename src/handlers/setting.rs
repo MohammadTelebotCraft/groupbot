@@ -1,7 +1,7 @@
 use grammers_client::message::Button;
 
 use super::style::{Colour, choice, data as coloured, toggle};
-use super::{Ctx, betrayal, captcha, flood, join, notice, purge, raid, strict, warns};
+use super::{Ctx, betrayal, captcha, flood, join, notice, purge, raid, strict, tempmedia, warns};
 
 pub struct Pick {
     pub id: &'static str,
@@ -125,6 +125,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { id: "rd_on", key: raid::MODE, label: "ضد هجوم", section: "rd", kind: Kind::Flag },
     Setting { id: "strict", key: strict::MODE, label: "حالت سختگیرانه", section: "s", kind: Kind::Flag },
     Setting { id: "rk_on", key: super::stats::RANKS, label: "مقام خودکار", section: "adv", kind: Kind::Flag },
+    Setting { id: "tmed_on", key: tempmedia::MODE, label: "رسانه موقت", section: "tmed", kind: Kind::Flag },
 
     Setting {
         id: "fl_lim", key: flood::LIMIT, label: "پیام", section: "fl",
@@ -239,6 +240,13 @@ pub const SETTINGS: &[Setting] = &[
         },
     },
     Setting {
+        id: "tmed_min", key: tempmedia::MINUTES, label: "زمان حذف رسانه", section: "tmed",
+        kind: Kind::Number {
+            range: tempmedia::MINUTES_RANGE, presets: tempmedia::MINUTES_PRESETS,
+            per_row: 3, show: duration, read: tempmedia::minutes,
+        },
+    },
+    Setting {
         id: "apc", key: purge::AUTO_COUNT, label: "چند پیام هر بار", section: "ap",
         kind: Kind::Number {
             range: purge::AUTO_COUNT_RANGE, presets: purge::AUTO_COUNT_PRESETS,
@@ -311,6 +319,16 @@ pub const SETTINGS: &[Setting] = &[
                 Pick { id: "strict_ban", value: "ban", label: "بن", danger: true },
             ],
             default: "mute",
+        },
+    },
+    Setting {
+        id: "tmed_who", key: tempmedia::AUDIENCE, label: "شامل چه کسانی", section: "tmed",
+        kind: Kind::Pick {
+            options: &[
+                Pick { id: "tmed_plain", value: "plain", label: "بدون مقام", danger: false },
+                Pick { id: "tmed_all", value: "all", label: "همه", danger: false },
+            ],
+            default: "plain",
         },
     },
     Setting {

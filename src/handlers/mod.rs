@@ -29,13 +29,14 @@ pub mod setting;
 pub mod stats;
 pub mod strict;
 pub mod style;
+pub mod tempmedia;
 pub mod vip;
 pub mod warns;
 pub mod welcome;
 pub mod toggles;
 pub mod tune;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -65,6 +66,7 @@ pub struct ChatState {
     counts: std::sync::Mutex<HashMap<i64, (u64, String)>>,
     tallies: std::sync::Mutex<HashMap<&'static str, u64>>,
     logs: std::sync::Mutex<Vec<String>>,
+    temp_media: std::sync::Mutex<VecDeque<(Instant, i32)>>,
     joined: std::sync::Mutex<HashMap<i32, Vec<Joined>>>,
     pending_numbers: std::sync::Mutex<HashMap<i64, PendingNumber>>,
 
@@ -235,6 +237,22 @@ impl Ctx {
             entries.remove(0);
         }
         entries.push(entry);
+    }
+
+    pub fn queue_temp_media(&self, chat: i64, id: i32, due: Instant) {
+        let state = self.state(chat);
+        tempmedia::queue(&mut state.temp_media.lock().unwrap(), id, due);
+    }
+
+    pub fn take_due_media(&self) -> Vec<(i64, Vec<i32>)> {
+        let now = Instant::now();
+        self.awake()
+            .into_iter()
+            .filter_map(|(chat, state)| {
+                let due = tempmedia::drain_due(&mut state.temp_media.lock().unwrap(), now);
+                (!due.is_empty()).then_some((chat, due))
+            })
+            .collect()
     }
 
     pub fn take_logs(&self) -> Vec<(i64, Vec<String>)> {
@@ -690,6 +708,8 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
     }
     flood::check(ctx, message).await;
 
+    tempmedia::watch(ctx, message, &view).await;
+
     if panel::typed_number(ctx, message).await {
         return;
     }
@@ -1115,6 +1135,7 @@ mod tests {
             include_str!("stats.rs"),
             include_str!("strict.rs"),
             include_str!("style.rs"),
+            include_str!("tempmedia.rs"),
             include_str!("vip.rs"),
             include_str!("warns.rs"),
             include_str!("welcome.rs"),

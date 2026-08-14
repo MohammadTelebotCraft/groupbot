@@ -513,11 +513,11 @@ fn is_media(view: &View) -> bool {
     view.media.is_some()
 }
 
-fn is_photo(view: &View) -> bool {
+pub fn is_photo(view: &View) -> bool {
     matches!(view.media, Some(Media::Photo(_)))
 }
 
-fn is_sticker(view: &View) -> bool {
+pub fn is_sticker(view: &View) -> bool {
     matches!(view.media, Some(Media::Sticker(_)))
 }
 
@@ -544,7 +544,7 @@ fn is_location(view: &View) -> bool {
     )
 }
 
-fn is_gif(view: &View) -> bool {
+pub fn is_gif(view: &View) -> bool {
     match &view.media {
         Some(Media::Document(doc)) => {
             doc.is_animated() || doc.mime_type() == Some("image/gif")
@@ -553,7 +553,7 @@ fn is_gif(view: &View) -> bool {
     }
 }
 
-fn is_video(view: &View) -> bool {
+pub fn is_video(view: &View) -> bool {
     match &view.media {
         Some(Media::Document(doc)) => {
             !doc.is_animated() && doc.mime_type().is_some_and(|m| m.starts_with("video/"))
@@ -569,7 +569,7 @@ fn is_voice(view: &View) -> bool {
     }
 }
 
-fn is_music(view: &View) -> bool {
+pub fn is_music(view: &View) -> bool {
     match &view.media {
         Some(Media::Document(doc)) => doc
             .mime_type()
@@ -578,7 +578,7 @@ fn is_music(view: &View) -> bool {
     }
 }
 
-fn is_file(view: &View) -> bool {
+pub fn is_file(view: &View) -> bool {
     matches!(view.media.as_ref(), Some(Media::Document(_)))
         && !is_video(view)
         && !is_gif(view)

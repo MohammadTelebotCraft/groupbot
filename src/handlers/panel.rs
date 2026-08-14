@@ -5,7 +5,7 @@ use super::locks::LOCKS;
 use super::style::{Colour, choice, data as coloured, toggle};
 use super::{
     Ctx, answers, betrayal, can_manage, captcha, flood, join, lists, log, notice, raid, setting,
-    strict, warns, welcome,
+    strict, tempmedia, warns, welcome,
 };
 
 const OPEN: &[&str] = &["پنل", "تنظیمات", "پنل ربات"];
@@ -294,6 +294,21 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
                 .to_owned(),
             timing_markup(ctx, chat, opener),
         ),
+        "tmed" => (
+            temp_media_title(ctx, chat),
+            temp_media_markup(ctx, chat, opener),
+        ),
+
+        picked if picked.starts_with("tmed:") => {
+            if let Some(kind) = tempmedia::find(&picked["tmed:".len()..]) {
+                let keep = tempmedia::temporary(ctx, chat, kind);
+                ctx.settings.set(chat, kind.key, keep).await;
+            }
+            (
+                temp_media_title(ctx, chat),
+                temp_media_markup(ctx, chat, opener),
+            )
+        }
         "ls" => (LISTS_TITLE.to_owned(), lists_markup(chat, opener)),
         "s" => (strict_title(ctx, chat), strict_markup(ctx, chat, opener)),
         "rd" => (raid_title(ctx, chat), raid_markup(ctx, chat, opener)),
@@ -1288,8 +1303,65 @@ fn timing_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             payload(opener, chat, "dr"),
             super::stats::report_at(ctx, chat).is_some(),
         )],
+        vec![section(
+            "⏳  رسانه موقت",
+            payload(opener, chat, "tmed"),
+            ctx.settings.is_locked(chat, tempmedia::MODE),
+        )],
         vec![Button::data("‹ بازگشت", payload(opener, chat, "adv"))],
     ])
+}
+
+fn temp_media_title(ctx: &Ctx, chat: i64) -> String {
+    let kept: Vec<&str> = tempmedia::KINDS
+        .iter()
+        .filter(|kind| !tempmedia::temporary(ctx, chat, kind))
+        .map(|kind| kind.label)
+        .collect();
+    format!(
+        "<b>پنل مدیریت</b> › <b>رسانه موقت</b>\n\n\
+         وضعیت · <b>{}</b>\n\
+         زمان حذف · <b>{}</b>\n\
+         شامل · <b>{}</b>\n\
+         بدون حذف · <b>{}</b>\n\n\
+         <i>رسانه های انتخاب شده پس از این مدت خودشان حذف می شوند.</i>",
+        if ctx.settings.is_locked(chat, tempmedia::MODE) {
+            "روشن"
+        } else {
+            "خاموش"
+        },
+        strict::time_label(tempmedia::minutes(ctx, chat)),
+        if tempmedia::reaches_everyone(ctx, chat) {
+            "همه"
+        } else {
+            "بدون مقام"
+        },
+        if kept.is_empty() {
+            "هیچ کدام".to_owned()
+        } else {
+            kept.join("، ")
+        }
+    )
+}
+
+fn temp_media_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
+    let mut rows = rows_for(ctx, chat, opener, "tmed_on");
+    rows.extend(tempmedia::KINDS.chunks(2).map(|pair| {
+        pair.iter()
+            .map(|kind| {
+                let on = tempmedia::temporary(ctx, chat, kind);
+                toggle(
+                    format!("{}  {}", if on { "✓" } else { "✗" }, kind.label),
+                    payload(opener, chat, &format!("{}:{}", tempmedia::MODE, kind.name)),
+                    on,
+                )
+            })
+            .collect()
+    }));
+    rows.extend(rows_for(ctx, chat, opener, "tmed_min"));
+    rows.extend(rows_for(ctx, chat, opener, "tmed_who"));
+    rows.push(vec![Button::data("‹ بازگشت", payload(opener, chat, "tm"))]);
+    ReplyMarkup::from_buttons(&rows)
 }
 
 fn last_page() -> usize {
@@ -1403,7 +1475,7 @@ mod tests {
         const PAGES: &[&str] = &[
             "root", "locks", "adv", "sec", "msg", "tm", "ls", "s", "rd", "sp", "bt", "fl",
             "wn", "cp", "nt", "an", "wc", "ng", "sl", "jn", "ad", "gp", "gr", "lg", "dr",
-            "ap", "close", "page", "in", "on", "off", "ng_toggle", "ap_toggle",
+            "ap", "tmed", "close", "page", "in", "on", "off", "ng_toggle", "ap_toggle",
             "dr_toggle", "dr_now", "lg_off", "jn_off", "wc_off",
         ];
 
