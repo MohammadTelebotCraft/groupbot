@@ -86,8 +86,11 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
                 Ban => "✓ بن شد",
                 Unban => "✗ بنش برداشته شد",
             };
-            let how_long = match parsed.duration_text {
-                Some(text) if parsed.duration.is_some() => format!(" به مدت {text}"),
+            let how_long = match (parsed.duration, honoured(parsed.duration)) {
+                (Some(_), Some(held)) => {
+                    format!(" به مدت {}", super::log::duration_label(held.as_secs()))
+                }
+                (Some(_), None) => " به صورت دائمی".to_owned(),
                 _ => String::new(),
             };
             message
@@ -104,6 +107,17 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     true
 }
 
+const SHORTEST: Duration = Duration::from_secs(30);
+const LONGEST: Duration = Duration::from_secs(366 * 86_400);
+
+pub fn honoured(duration: Option<Duration>) -> Option<Duration> {
+    match duration {
+        Some(asked) if asked > LONGEST => None,
+        Some(asked) => Some(asked.max(SHORTEST)),
+        None => None,
+    }
+}
+
 pub async fn apply(
     ctx: &Ctx,
     chat: grammers_client::session::types::PeerRef,
@@ -112,6 +126,7 @@ pub async fn apply(
     duration: Option<Duration>,
     by: By<'_>,
 ) -> Result<(), grammers_client::InvocationError> {
+    let duration = honoured(duration);
     let done = apply_rights(ctx, chat, target, action, duration).await;
 
     if done.is_ok()
@@ -305,6 +320,22 @@ mod tests {
         assert_eq!(p("حذف سیک 12345").target, Some("12345"));
         assert!(parse("سکوتی").is_none());
         assert!(parse("سلام").is_none());
+    }
+
+    #[test]
+    fn a_duration_telegram_would_read_as_forever_is_corrected() {
+        let secs = |d: Option<Duration>| d.map(|d| d.as_secs());
+
+        assert_eq!(secs(honoured(Some(Duration::from_secs(1)))), Some(30));
+        assert_eq!(secs(honoured(Some(Duration::from_secs(29)))), Some(30));
+
+        assert_eq!(secs(honoured(Some(Duration::from_secs(30)))), Some(30));
+        assert_eq!(secs(honoured(Some(Duration::from_secs(600)))), Some(600));
+
+        assert_eq!(honoured(Some(Duration::from_secs(367 * 86_400))), None);
+        assert_eq!(honoured(None), None);
+
+        assert_eq!(secs(honoured(p("سکوت 1 ثانیه").duration)), Some(30));
     }
 
     #[test]
