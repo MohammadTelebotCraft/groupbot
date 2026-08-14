@@ -131,7 +131,7 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
 
     if let Some((on, name)) = parse(text) {
         if !can_manage(ctx, message).await {
-            return true;
+            return enforce(ctx, message, chat, false, view).await;
         }
 
         if ALL.contains(&name) {

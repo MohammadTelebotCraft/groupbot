@@ -36,12 +36,15 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     };
     let (action, arg) = (parsed.action, parsed.target);
 
+    let Some(named) = super::named(message, arg) else {
+        return false;
+    };
     if !can_manage(ctx, message).await {
         return true;
     }
 
     let (Some((target, target_name)), Ok(Some(chat_ref))) = (
-        super::target(ctx, message, arg).await,
+        super::resolve(ctx, message, named).await,
         message.peer_ref().await,
     ) else {
         let _ = message
@@ -277,6 +280,20 @@ mod tests {
 
     fn p(text: &str) -> Parsed<'_> {
         parse(text).expect("should parse")
+    }
+
+    #[test]
+    fn the_argument_must_name_a_user() {
+        use super::super::arg_names_a_user as names;
+        let word = "میکنم";
+
+        assert!(!names(p(&format!("بن {word}")).target.unwrap()));
+        assert!(names(p("بن @someone").target.unwrap()));
+        assert!(names(p("بن 12345").target.unwrap()));
+        assert!(names(p("بن ۱۲۳۴۵").target.unwrap()));
+
+        assert_eq!(p("بن").target, None);
+        assert_eq!(p("بن 10 دقیقه").target, None);
     }
 
     #[test]

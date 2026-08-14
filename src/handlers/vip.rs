@@ -25,11 +25,14 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
+    let Some(named) = super::named(message, arg) else {
+        return false;
+    };
     if !can_manage(ctx, message).await {
         return true;
     }
 
-    let Some((target, target_name)) = super::target(ctx, message, arg).await else {
+    let Some((target, target_name)) = super::resolve(ctx, message, named).await else {
         let _ = message
             .reply("کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.")
             .await;

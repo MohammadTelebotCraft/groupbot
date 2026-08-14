@@ -149,8 +149,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     if INFO.iter().any(|command| {
         text == *command || text.strip_prefix(command).is_some_and(|r| r.starts_with(' '))
     }) {
-        user_card(ctx, message, chat, text).await;
-        return true;
+        return user_card(ctx, message, chat, text).await;
     }
     false
 }
@@ -461,21 +460,25 @@ fn leaderboard(rows: &[Counter]) -> String {
         .join("\n")
 }
 
-async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) {
+async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool {
     let arg = INFO
         .iter()
         .find_map(|command| text.strip_prefix(command))
         .map(str::trim)
         .filter(|rest| !rest.is_empty())
         .map(str::to_owned);
-    let Some((target, name)) = super::target(ctx, message, arg.as_deref()).await else {
+
+    let Some(named) = super::named(message, arg.as_deref()) else {
+        return false;
+    };
+    let Some((target, name)) = super::resolve(ctx, message, named).await else {
         let _ = message
             .reply("کاربر پیدا نشد. ریپلای کنید یا @username / آیدی عددی بفرستید.")
             .await;
-        return;
+        return true;
     };
     let Some(user) = target.id.bare_id() else {
-        return;
+        return true;
     };
 
     let counts = ctx.settings.card(chat, user, today()).await;
@@ -534,6 +537,7 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) {
         card = card.media(media);
     }
     let _ = message.reply(card).await;
+    true
 }
 
 pub fn count(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) {

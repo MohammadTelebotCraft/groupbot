@@ -20,11 +20,9 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     ) else {
         return false;
     };
+
     let Ok(Some(reported)) = message.get_reply().await else {
-        let _ = message
-            .reply("روی پیامی که می خواهید گزارش کنید ریپلای کنید.")
-            .await;
-        return true;
+        return false;
     };
 
     let _ = message.delete().await;

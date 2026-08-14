@@ -142,10 +142,13 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             }
         })
     {
+        let Some(named) = super::named(message, arg) else {
+            return false;
+        };
         if !can_manage(ctx, message).await {
             return true;
         }
-        let Some((target, target_name)) = super::target(ctx, message, arg).await else {
+        let Some((target, target_name)) = super::resolve(ctx, message, named).await else {
             let _ = message
                 .reply("کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.")
                 .await;
@@ -174,10 +177,9 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         if !can_manage(ctx, message).await {
             return true;
         }
-        let numbers: Vec<u32> = super::digits(rest)
-            .split_whitespace()
-            .filter_map(|word| word.parse().ok())
-            .collect();
+        let Some(numbers) = super::numbers_in(rest) else {
+            return false;
+        };
         if let [every, ttl] = numbers[..] {
             set_prompt(ctx, chat, PROMPT_EVERY, every).await;
             set_prompt(ctx, chat, PROMPT_TTL, ttl).await;
@@ -199,11 +201,16 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         let rest = text.strip_prefix(command)?;
         (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
     }) {
+        let count = match super::numbers_in(rest).as_deref() {
+            Some(&[count]) => Some(u64::from(count)),
+            Some([]) if rest.is_empty() => None,
+            _ => return false,
+        };
         if !can_manage(ctx, message).await {
             return true;
         }
-        let _ = match rest.parse::<u64>() {
-            Ok(count) => {
+        let _ = match count {
+            Some(count) => {
                 set_required_adds(ctx, chat, count).await;
                 message
                     .reply(match count {
@@ -212,7 +219,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
                     })
                     .await
             }
-            Err(_) => {
+            None => {
                 message
                     .reply(InputMessage::new().html(format!(
                         "<b>اد اجباری</b>\n\n\
@@ -257,7 +264,12 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    let name = rest.trim_start_matches('@').trim().to_lowercase();
+    let Some(name) = rest.strip_prefix('@').map(|n| n.trim().to_lowercase()) else {
+        return false;
+    };
+    if name.is_empty() {
+        return false;
+    }
 
     let Ok(Some(_)) = ctx.client.resolve_username(&name).await else {
         let _ = message

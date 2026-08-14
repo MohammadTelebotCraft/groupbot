@@ -34,9 +34,19 @@ pub fn matches(ctx: &Ctx, chat: i64, view: &super::locks::View) -> bool {
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
-    let Some((add, word)) = parse(text) else {
+    let Some((add, command, word)) = parse(text) else {
         return false;
     };
+
+    let word = match (word.is_empty(), super::phrase_carries_text(command)) {
+        (false, false) => return false,
+        (true, _) => match message.get_reply().await.ok().flatten() {
+            Some(replied) => replied.text().trim().to_owned(),
+            None => return false,
+        },
+        _ => word.to_owned(),
+    };
+    let word = word.as_str();
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
@@ -46,10 +56,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
 
     let word = word.trim().to_lowercase();
     if word.is_empty() {
-        let _ = message
-            .reply("کلمه را بنویسید. مثال: فیلتر کلمه تبلیغ")
-            .await;
-        return true;
+        return false;
     }
     if word.len() > MAX_LEN || word.contains('=') {
         let _ = message
@@ -76,14 +83,14 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     true
 }
 
-fn parse(text: &str) -> Option<(bool, &str)> {
+fn parse(text: &str) -> Option<(bool, &'static str, &str)> {
     for (commands, add) in [(ADD, true), (REMOVE, false)] {
         for command in commands {
             let Some(rest) = text.strip_prefix(command) else {
                 continue;
             };
             if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                return Some((add, rest.trim()));
+                return Some((add, command, rest.trim()));
             }
         }
     }
@@ -156,10 +163,13 @@ mod tests {
 
     #[test]
     fn parses_commands() {
-        assert_eq!(parse("فیلتر کلمه تبلیغ"), Some((true, "تبلیغ")));
-        assert_eq!(parse("فیلتر تبلیغ رایگان"), Some((true, "تبلیغ رایگان")));
-        assert_eq!(parse("حذف فیلتر تبلیغ"), Some((false, "تبلیغ")));
-        assert_eq!(parse("فیلتر"), Some((true, "")));
+        assert_eq!(parse("فیلتر کلمه تبلیغ"), Some((true, "فیلتر کلمه", "تبلیغ")));
+        assert_eq!(parse("فیلتر تبلیغ رایگان"), Some((true, "فیلتر", "تبلیغ رایگان")));
+        assert_eq!(parse("حذف فیلتر تبلیغ"), Some((false, "حذف فیلتر", "تبلیغ")));
+        assert_eq!(parse("فیلتر"), Some((true, "فیلتر", "")));
+
+        assert!(!super::super::phrase_carries_text("فیلتر"));
+        assert!(super::super::phrase_carries_text("فیلتر کلمه"));
         assert_eq!(parse("فیلترها"), None);
         assert_eq!(parse("سلام"), None);
     }

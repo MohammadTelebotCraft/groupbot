@@ -691,7 +691,8 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
 
     let bot_authored = bot_authored(message);
 
-    let _ = cleaner::on_join(ctx, message).await
+    let _ = locks::handle(ctx, message, &view).await
+        || cleaner::on_join(ctx, message).await
         || autoconfig::on_message(ctx, message).await
         || bots::handle(ctx, message).await
         || captcha::on_join(ctx, message).await
@@ -721,7 +722,6 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
                 || log::handle(ctx, message).await
                 || rights::handle(ctx, message).await
                 || vip::handle(ctx, message).await))
-        || locks::handle(ctx, message, &view).await
         || (!bot_authored && answers::handle(ctx, message, &view).await);
 
     locks::service(ctx, message).await;
@@ -842,8 +842,29 @@ pub fn is_owner(ctx: &Ctx, message: &Message) -> bool {
     }
 }
 
-pub async fn target(ctx: &Ctx, message: &Message, arg: Option<&str>) -> Option<(PeerRef, String)> {
-    if let Some(arg) = arg {
+pub struct Named<'a> {
+    arg: Option<&'a str>,
+}
+
+pub(crate) fn arg_names_a_user(arg: &str) -> bool {
+    arg.strip_prefix('@').is_some_and(|name| !name.is_empty())
+        || digits(arg).trim().parse::<i64>().is_ok()
+}
+
+pub fn named<'a>(message: &Message, arg: Option<&'a str>) -> Option<Named<'a>> {
+    let names_somebody = match arg {
+        Some(arg) => arg_names_a_user(arg),
+        None => message.reply_to_message_id().is_some(),
+    };
+    names_somebody.then_some(Named { arg })
+}
+
+pub async fn resolve(
+    ctx: &Ctx,
+    message: &Message,
+    named: Named<'_>,
+) -> Option<(PeerRef, String)> {
+    if let Some(arg) = named.arg {
         if let Some(username) = arg.strip_prefix('@').filter(|u| !u.is_empty()) {
             let peer = ctx.client.resolve_username(username).await.ok()??;
             let name = peer.name().unwrap_or(username).to_owned();
@@ -857,6 +878,17 @@ pub async fn target(ctx: &Ctx, message: &Message, arg: Option<&str>) -> Option<(
     let replied = message.get_reply().await.ok()??;
     let name = name_of(&replied);
     Some((replied.sender_ref().await.ok()??, name))
+}
+
+pub fn phrase_carries_text(command: &str) -> bool {
+    command.split_whitespace().count() > 1
+}
+
+pub fn numbers_in(tail: &str) -> Option<Vec<u32>> {
+    digits(tail)
+        .split_whitespace()
+        .map(|word| word.parse().ok())
+        .collect()
 }
 
 pub fn digits(text: &str) -> std::borrow::Cow<'_, str> {
@@ -1031,6 +1063,21 @@ async fn permissions(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_closed_tail_is_all_or_nothing() {
+        use super::numbers_in;
+        let word = "چیه";
+
+        assert_eq!(numbers_in(""), Some(vec![]));
+        assert_eq!(numbers_in(" 50 "), Some(vec![50]));
+        assert_eq!(numbers_in("10 5"), Some(vec![10, 5]));
+        assert_eq!(numbers_in("۱۰ ۵"), Some(vec![10, 5]));
+
+        assert_eq!(numbers_in(word), None);
+        assert_eq!(numbers_in(&format!("{word} 50")), None);
+        assert_eq!(numbers_in(&format!("50 {word}")), None);
+    }
+
     #[test]
     fn sources_have_no_zero_width_non_joiner() {
         for file in [

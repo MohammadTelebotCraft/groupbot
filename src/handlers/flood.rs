@@ -58,14 +58,15 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
+
+    let numbers = match super::numbers_in(&rest) {
+        Some(numbers) => numbers,
+        None => return false,
+    };
     if !super::can_manage(ctx, message).await {
         return true;
     }
 
-    let numbers: Vec<u32> = rest
-        .split_whitespace()
-        .filter_map(|word| word.parse().ok())
-        .collect();
     if numbers.len() != 2 {
         let _ = message
             .reply("مثال: «ضد رگبار 10 5» یعنی ۱۰ پیام در ۵ ثانیه. برای خاموش کردن از پنل استفاده کنید.")

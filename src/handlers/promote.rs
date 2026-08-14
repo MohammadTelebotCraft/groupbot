@@ -52,6 +52,9 @@ async fn tag(ctx: &Ctx, message: &Message, text: &str) -> bool {
         _ => (None, rest),
     };
     let title = if clearing { "" } else { title };
+    let Some(named) = super::named(message, arg) else {
+        return false;
+    };
     if title.chars().count() > TAG_MAX {
         let _ = message
             .reply(format!("تگ باید حداکثر {TAG_MAX} حرف باشد."))
@@ -65,7 +68,7 @@ async fn tag(ctx: &Ctx, message: &Message, text: &str) -> bool {
         return true;
     }
 
-    let Some((target, name)) = super::target(ctx, message, arg).await else {
+    let Some((target, name)) = super::resolve(ctx, message, named).await else {
         let _ = message
             .reply("کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.")
             .await;
@@ -139,12 +142,15 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
+    let arg = (!arg.is_empty()).then_some(arg);
+    let Some(named) = super::named(message, arg.as_deref()) else {
+        return false;
+    };
     if !is_owner(ctx, message) && !sender_is_creator(ctx, message).await {
         return true;
     }
 
-    let arg = (!arg.is_empty()).then_some(arg);
-    let Some((target, name)) = super::target(ctx, message, arg.as_deref()).await else {
+    let Some((target, name)) = super::resolve(ctx, message, named).await else {
         let _ = message
             .reply("کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.")
             .await;

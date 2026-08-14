@@ -283,6 +283,9 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
+    if super::named(message, Some(rest)).is_none() {
+        return false;
+    }
     let target = resolve(ctx, message, rest).await;
     let Some(target) = target else {
         let _ = message

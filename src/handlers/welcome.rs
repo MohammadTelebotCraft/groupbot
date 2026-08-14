@@ -50,12 +50,20 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    let Some(rest) = SET.iter().find_map(|command| {
+    let Some((command, rest)) = SET.iter().find_map(|command| {
         let rest = text.strip_prefix(command)?;
-        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim().to_owned())
+        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| (*command, rest.trim()))
     }) else {
         return false;
     };
+
+    if !rest.is_empty() && !super::phrase_carries_text(command) {
+        return false;
+    }
+    if rest.is_empty() && message.media().is_none() && message.reply_to_message_id().is_none() {
+        return false;
+    }
+    let rest = rest.to_owned();
     if !can_manage(ctx, message).await {
         return true;
     }

@@ -265,4 +265,16 @@ mod tests {
         assert_eq!(parse("حذف 0"), None);
         assert_eq!(parse("حذف"), None);
     }
+
+    #[test]
+    fn the_count_must_be_the_whole_tail() {
+        let word = "میکنمت";
+
+        assert_eq!(parse(&format!("حذف {word}")), None);
+        assert_eq!(parse(&format!("حذف {word} 50")), None);
+        assert_eq!(parse(&format!("حذف 50 {word}")), None);
+        assert_eq!(parse(&format!("حذف{word}")), None);
+
+        assert_eq!(parse("حذف 50"), Some(50));
+    }
 }

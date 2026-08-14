@@ -122,11 +122,22 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
 
     let admin = || can_manage(ctx, message);
 
-    if let Some(note) = after(text, TAG_ALL) {
+    if let Some(rest) = after(text, TAG_ALL) {
+        let matched = TAG_ALL
+            .iter()
+            .find(|command| text.starts_with(**command))
+            .copied()
+            .unwrap_or_default();
+        let wanted = match super::numbers_in(rest).as_deref() {
+            Some([]) if !super::phrase_carries_text(matched) => return false,
+            Some([]) => TAG_DEFAULT,
+            Some([count]) => *count as usize,
+            _ => return false,
+        };
         if !admin().await {
             return true;
         }
-        tag_all(ctx, message, note).await;
+        tag_all(ctx, message, wanted).await;
         return true;
     }
 
@@ -157,10 +168,13 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
 
     if let Some(rest) = after(text, NOTE_CLEAR) {
+        let Some(named) = super::named(message, none_if_empty(rest)) else {
+            return false;
+        };
         if !admin().await {
             return true;
         }
-        let Some((target, name)) = super::target(ctx, message, none_if_empty(rest)).await else {
+        let Some((target, name)) = super::resolve(ctx, message, named).await else {
             return true;
         };
         if let Some(user) = target.id.bare_id() {
@@ -171,10 +185,13 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
 
     if let Some(rest) = after(text, NOTE_CMD) {
+        let Some(named) = super::named(message, None) else {
+            return false;
+        };
         if !admin().await {
             return true;
         }
-        let Some((target, name)) = super::target(ctx, message, None).await else {
+        let Some((target, name)) = super::resolve(ctx, message, named).await else {
             let _ = message.reply("روی پیام کاربر ریپلای کنید.").await;
             return true;
         };
@@ -206,6 +223,9 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
 
     if PIN.contains(&text) || PIN_QUIET.contains(&text) || UNPIN.contains(&text) {
+        if message.reply_to_message_id().is_none() {
+            return false;
+        }
         if !admin().await {
             return true;
         }
@@ -213,10 +233,14 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
 
     if let Some(rest) = after(text, SLOW) {
+        let asked = match super::numbers_in(rest).as_deref() {
+            Some(&[asked]) => asked,
+            _ => return false,
+        };
         if !admin().await {
             return true;
         }
-        return slow_mode(ctx, message, chat, rest).await;
+        return slow_mode(ctx, message, chat, asked).await;
     }
 
     if let Some(rest) = after(text, NIGHT_CMD) {
@@ -229,26 +253,31 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
 }
 
 async fn set_night_from(ctx: &Ctx, message: &Message, chat: i64, rest: &str) -> bool {
-    if rest.is_empty() || rest.starts_with("خاموش") {
+    if rest.is_empty() {
+        return false;
+    }
+    if rest.starts_with("خاموش") {
         set_night(ctx, chat, None).await;
         let _ = message.reply("✗ قفل شب خاموش شد.").await;
         return true;
     }
 
-    let times: Vec<u32> = rest
-        .split_whitespace()
-        .filter_map(|word| {
-            let (hours, minutes) = match word.split_once(':') {
-                Some((h, m)) => (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?),
-                None => (word.parse::<u32>().ok()?, 0),
-            };
-            Some((hours % 24) * 60 + minutes.min(59))
-        })
-        .collect();
-    if times.len() != 2 {
+    const SEPARATOR: &str = "تا";
+    let mut times: Vec<u32> = Vec::new();
+    for word in super::digits(rest).split_whitespace() {
+        if word == SEPARATOR {
+            continue;
+        }
+        let Some(minutes) = clock_at(word) else {
+            return false;
+        };
+        times.push(minutes);
+    }
+    let [from, to] = times[..] else {
         let _ = message.reply("مثال: «قفل شب 23 تا 7» یا «قفل شب 23:30 تا 7:15»").await;
         return true;
-    }
+    };
+    let times = [from, to];
     set_night(ctx, chat, Some((times[0], times[1]))).await;
     let _ = message
         .reply(format!(
@@ -260,21 +289,7 @@ async fn set_night_from(ctx: &Ctx, message: &Message, chat: i64, rest: &str) -> 
     true
 }
 
-async fn slow_mode(ctx: &Ctx, message: &Message, chat: i64, rest: &str) -> bool {
-    let Some(asked) = rest.split_whitespace().find_map(|w| w.parse::<u32>().ok()) else {
-        let _ = message
-            .reply(format!(
-                "مثال: «اسلوموشن 30». مقدارهای مجاز: {}",
-                SLOW_STEPS
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" · ")
-            ))
-            .await;
-        return true;
-    };
-
+async fn slow_mode(ctx: &Ctx, message: &Message, chat: i64, asked: u32) -> bool {
     let done = apply_slow(ctx, chat, asked).await;
     let now = ctx
         .settings
@@ -371,31 +386,15 @@ pub async fn run_night(ctx: &Ctx) {
     }
 }
 
-async fn tag_all(ctx: &Ctx, message: &Message, rest: &str) {
+async fn tag_all(ctx: &Ctx, message: &Message, wanted: usize) {
     let Ok(Some(chat_ref)) = message.peer_ref().await else {
         return;
-    };
-
-    let rest = super::digits(rest);
-    let (wanted, note) = match rest.split_once(char::is_whitespace) {
-        Some((first, tail)) => match first.parse::<usize>() {
-            Ok(count) => (count, tail.trim()),
-            Err(_) => (TAG_DEFAULT, rest.as_ref()),
-        },
-        None => match rest.parse::<usize>() {
-            Ok(count) => (count, ""),
-            Err(_) => (TAG_DEFAULT, rest.as_ref()),
-        },
     };
     let wanted = wanted.clamp(1, TAG_MAX);
 
     let caller = message
         .sender_id()
         .and_then(grammers_client::session::types::PeerId::bare_id);
-    let head = match note.is_empty() {
-        true => String::new(),
-        false => format!("{}\n\n", esc(note)),
-    };
 
     let anchor = message.get_reply().await.ok().flatten();
     let anchor = anchor.as_ref().unwrap_or(message);
@@ -403,7 +402,6 @@ async fn tag_all(ctx: &Ctx, message: &Message, rest: &str) {
     let mut participants = ctx.client.iter_participants(chat_ref);
     let mut batch: Vec<String> = Vec::with_capacity(TAG_PER_MESSAGE);
     let mut tagged = 0;
-    let mut first = true;
     loop {
         let next = participants.next().await;
         let done = matches!(next, Ok(None) | Err(_));
@@ -424,11 +422,10 @@ async fn tag_all(ctx: &Ctx, message: &Message, rest: &str) {
             }
             continue;
         }
-        let body = format!("{}{}", if first { &head } else { "" }, batch.join(" · "));
+        let body = batch.join(" · ");
         let _ = anchor.reply(InputMessage::new().html(body)).await;
         tagged += batch.len();
         batch.clear();
-        first = false;
         if done || tagged >= wanted {
             break;
         }
@@ -445,6 +442,14 @@ fn after<'a>(text: &'a str, commands: &[&str]) -> Option<&'a str> {
         let rest = text.strip_prefix(command)?;
         (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
     })
+}
+
+fn clock_at(word: &str) -> Option<u32> {
+    let (hours, minutes) = match word.split_once(':') {
+        Some((h, m)) => (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?),
+        None => (word.parse::<u32>().ok()?, 0),
+    };
+    Some((hours % 24) * 60 + minutes.min(59))
 }
 
 fn none_if_empty(text: &str) -> Option<&str> {

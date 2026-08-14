@@ -1,6 +1,6 @@
 use grammers_client::message::Message;
 
-use super::{Ctx, betrayal, can_manage, captcha, flood, warns};
+use super::{Ctx, betrayal, can_manage, captcha, flood, numbers_in, warns};
 
 const SETTINGS: &[(&str, &str)] = &[
     ("اخطار", "warns"),
@@ -34,7 +34,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
-    let Some(numbers) = numbers_of(&rest[name.len()..]) else {
+    let Some(numbers) = numbers_in(&rest[name.len()..]) else {
         return false;
     };
 
@@ -94,10 +94,6 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     true
 }
 
-fn numbers_of(tail: &str) -> Option<Vec<u32>> {
-    tail.split_whitespace().map(|word| word.parse().ok()).collect()
-}
-
 fn usage(what: &str) -> &'static str {
     match what {
         "warns" => "مثال: «تنظیم اخطار 5»",
@@ -114,12 +110,12 @@ mod tests {
 
     #[test]
     fn claims_only_a_numeric_tail() {
-        assert_eq!(numbers_of(""), Some(vec![]));
-        assert_eq!(numbers_of(" 15"), Some(vec![15]));
-        assert_eq!(numbers_of(" 10 5"), Some(vec![10, 5]));
+        assert_eq!(numbers_in(""), Some(vec![]));
+        assert_eq!(numbers_in(" 15"), Some(vec![15]));
+        assert_eq!(numbers_in(" 10 5"), Some(vec![10, 5]));
 
-        assert_eq!(numbers_of(" شرط 120 30"), None);
-        assert_eq!(numbers_of(" abc"), None);
+        assert_eq!(numbers_in(" شرط 120 30"), None);
+        assert_eq!(numbers_in(" abc"), None);
     }
 
     #[test]

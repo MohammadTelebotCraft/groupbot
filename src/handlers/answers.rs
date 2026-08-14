@@ -101,6 +101,9 @@ async fn answer(ctx: &Ctx, message: &Message, chat: i64, view: &super::locks::Vi
 }
 
 async fn edit(ctx: &Ctx, message: &Message, chat: i64, adding: bool, trigger: &str) -> bool {
+    if adding && !has_body(message, trigger) {
+        return false;
+    }
     if !can_manage(ctx, message).await {
         return true;
     }
@@ -175,6 +178,12 @@ async fn edit(ctx: &Ctx, message: &Message, chat: i64, adding: bool, trigger: &s
         )))
         .await;
     true
+}
+
+fn has_body(message: &Message, trigger: &str) -> bool {
+    inline_answer(&trigger.trim().to_lowercase()).is_some()
+        || message.media().is_some()
+        || message.reply_to_message_id().is_some()
 }
 
 fn inline_answer(rest: &str) -> Option<(String, String)> {

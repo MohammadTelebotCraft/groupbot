@@ -204,21 +204,14 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }) else {
         return false;
     };
+
     let Some((name, state)) = rest.rsplit_once(char::is_whitespace) else {
-        let _ = message
-            .reply("مثال: «اختیار عکس بسته» یا «اختیار نظرسنجی باز».")
-            .await;
-        return true;
+        return false;
     };
     let shut = match (OPEN_WORDS.contains(&state), CLOSED_WORDS.contains(&state)) {
         (true, _) => false,
         (_, true) => true,
-        _ => {
-            let _ = message
-                .reply("آخر دستور «باز» یا «بسته» بنویسید، مثل «اختیار عکس بسته».")
-                .await;
-            return true;
-        }
+        _ => return false,
     };
     let name = name.trim();
     let Some(right) = RIGHTS

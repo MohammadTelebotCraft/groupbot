@@ -15,7 +15,14 @@ const START: &[&str] = &["/start", "شروع"];
 
 pub async fn start(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
-    if !START.iter().any(|command| text.starts_with(command)) {
+
+    let started = START.iter().any(|command| {
+        text == *command
+            || text
+                .strip_prefix(command)
+                .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+    });
+    if !started {
         return false;
     }
     let mut card = InputMessage::new().html(format!(
@@ -140,6 +147,9 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return false;
     }
 
+    let Some(named) = super::named(message, arg) else {
+        return false;
+    };
     if !is_owner(ctx, message) {
         if owner(ctx, chat).is_none() && can_manage(ctx, message).await {
             let _ = message
@@ -149,7 +159,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    let Some((target, target_name)) = super::target(ctx, message, arg).await else {
+    let Some((target, target_name)) = super::resolve(ctx, message, named).await else {
         let _ = message
             .reply("کاربر پیدا نشد. روی پیام او ریپلای کنید یا «ترفیع @username» / «ترفیع 123456789» بفرستید.")
             .await;
