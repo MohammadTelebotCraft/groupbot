@@ -134,6 +134,11 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
             return enforce(ctx, message, chat, false, view).await;
         }
 
+        if !super::limits::allowed(ctx, message, super::limits::SET) {
+            super::limits::deny(message, super::limits::SET).await;
+            return true;
+        }
+
         if ALL.contains(&name) {
             let mut changed = 0;
             for lock in LOCKS {

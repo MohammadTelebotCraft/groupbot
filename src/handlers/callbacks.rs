@@ -1,6 +1,6 @@
 use grammers_client::update::CallbackQuery;
 
-use super::{Ctx, chat_admins, is_bot_admin, owner};
+use super::{Ctx, chat_admins, is_bot_admin, limits, owner};
 
 pub async fn handle(ctx: &Ctx, query: &CallbackQuery) {
     let Ok(data) = std::str::from_utf8(query.data()) else {
@@ -38,6 +38,18 @@ pub async fn handle(ctx: &Ctx, query: &CallbackQuery) {
             .alert("فقط ادمین ها می توانند این دکمه را بزنند.")
             .send()
             .await;
+        return;
+    }
+
+    if let Some(cap) = match data.split(':').next() {
+        Some("jx") => Some(limits::EXEMPT),
+        Some("pg" | "r") => Some(limits::CLEAN),
+        Some("s" | "p" | "t") => Some(limits::SET),
+        _ => None,
+    } && let Some(presser) = query.sender_id().bare_id()
+        && !limits::permits(ctx, chat, presser, cap)
+    {
+        limits::refuse(query, cap).await;
         return;
     }
 

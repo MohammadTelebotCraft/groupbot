@@ -2,7 +2,7 @@ use grammers_client::message::{InputMessage, Message};
 use grammers_client::session::types::PeerRef;
 
 use super::restrict::{self, Action};
-use super::{Ctx, can_manage, esc, name_of};
+use super::{Ctx, esc, name_of};
 
 pub const LIMIT: &str = "warn_limit";
 
@@ -60,7 +60,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let Some(named) = super::named(message, arg.as_deref()) else {
         return false;
     };
-    if !can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::WARN).await {
         return true;
     }
 

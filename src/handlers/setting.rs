@@ -1,7 +1,9 @@
 use grammers_client::message::Button;
 
 use super::style::{Colour, choice, data as coloured, toggle};
-use super::{Ctx, betrayal, captcha, flood, join, notice, purge, raid, strict, tempmedia, warns};
+use super::{
+    Ctx, betrayal, captcha, flood, join, limits, notice, purge, raid, strict, tempmedia, warns,
+};
 
 pub struct Pick {
     pub id: &'static str,
@@ -126,6 +128,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { id: "strict", key: strict::MODE, label: "حالت سختگیرانه", section: "s", kind: Kind::Flag },
     Setting { id: "rk_on", key: super::stats::RANKS, label: "مقام خودکار", section: "adv", kind: Kind::Flag },
     Setting { id: "tmed_on", key: tempmedia::MODE, label: "رسانه موقت", section: "tmed", kind: Kind::Flag },
+    Setting { id: "lim_on", key: limits::MODE, label: "محدودیت مدیران", section: "lim", kind: Kind::Flag },
 
     Setting {
         id: "fl_lim", key: flood::LIMIT, label: "پیام", section: "fl",

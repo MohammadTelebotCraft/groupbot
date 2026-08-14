@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use grammers_client::message::Message;
 
-use super::{Ctx, can_manage, name_of};
+use super::{Ctx, name_of};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
@@ -39,7 +39,12 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let Some(named) = super::named(message, arg) else {
         return false;
     };
-    if !can_manage(ctx, message).await {
+
+    let needed = match action {
+        Ban | Unban => super::limits::BAN,
+        Mute | Unmute => super::limits::MUTE,
+    };
+    if !super::limits::allows(ctx, message, needed).await {
         return true;
     }
 

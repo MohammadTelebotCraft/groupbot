@@ -11,6 +11,7 @@ pub mod extras;
 pub mod filters;
 pub mod flood;
 pub mod join;
+pub mod limits;
 pub mod lists;
 pub mod log;
 pub mod locks;
@@ -1119,6 +1120,7 @@ mod tests {
             include_str!("extras.rs"),
             include_str!("filters.rs"),
             include_str!("flood.rs"),
+            include_str!("limits.rs"),
             include_str!("lists.rs"),
             include_str!("locks.rs"),
             include_str!("notice.rs"),

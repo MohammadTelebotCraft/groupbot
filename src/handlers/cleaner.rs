@@ -49,7 +49,7 @@ pub async fn add(ctx: &Ctx, message: &Message) -> bool {
     if !ADD.contains(&message.text().trim()) {
         return false;
     }
-    if !super::can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::CLEAN).await {
         return true;
     }
     let (Some(cleaner), Some(user)) = (ctx.cleaner_id(), ctx.user_client()) else {
@@ -291,7 +291,7 @@ pub async fn sweep(ctx: &Ctx, message: &Message) -> bool {
     let Some((label, filter)) = media_filter(rest) else {
         return false;
     };
-    if !super::can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::CLEAN).await {
         return true;
     }
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
@@ -373,7 +373,7 @@ pub async fn wipe(ctx: &Ctx, message: &Message) -> bool {
     let Some(named) = super::named(message, arg) else {
         return false;
     };
-    if !super::can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::CLEAN).await {
         return true;
     }
     let Some((target, name)) = super::resolve(ctx, message, named).await else {

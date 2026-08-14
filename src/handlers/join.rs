@@ -2,7 +2,7 @@ use grammers_client::message::{Button, InputMessage, Message, ReplyMarkup};
 use grammers_client::session::types::{PeerId, PeerRef};
 use grammers_client::update::CallbackQuery;
 
-use super::{Ctx, can_manage, esc};
+use super::{Ctx, esc};
 
 pub const CHANNEL: &str = "join_channel";
 
@@ -110,7 +110,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     };
 
     if CLEAR.contains(&text) {
-        if !can_manage(ctx, message).await {
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
         set_channel(ctx, chat, "").await;
@@ -119,7 +119,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
 
     if CLEAR_ADD.contains(&text) {
-        if !can_manage(ctx, message).await {
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
         set_required_adds(ctx, chat, 0).await;
@@ -145,7 +145,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         let Some(named) = super::named(message, arg) else {
             return false;
         };
-        if !can_manage(ctx, message).await {
+        if !super::limits::allows(ctx, message, super::limits::EXEMPT).await {
             return true;
         }
         let Some((target, target_name)) = super::resolve(ctx, message, named).await else {
@@ -174,7 +174,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         let rest = text.strip_prefix(command)?;
         (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
     }) {
-        if !can_manage(ctx, message).await {
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
         let Some(numbers) = super::numbers_in(rest) else {
@@ -206,7 +206,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             Some([]) if rest.is_empty() => None,
             _ => return false,
         };
-        if !can_manage(ctx, message).await {
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
         let _ = match count {
@@ -242,7 +242,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }) else {
         return false;
     };
-    if !can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
 

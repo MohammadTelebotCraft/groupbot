@@ -109,7 +109,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
     if REPORT_CLEAR.contains(&text) {
-        if !super::can_manage(ctx, message).await {
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
         set_report_at(ctx, chat, None).await;
@@ -120,7 +120,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         let rest = text.strip_prefix(command)?;
         (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
     }) {
-        if !super::can_manage(ctx, message).await {
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
         let typed = super::digits(rest);

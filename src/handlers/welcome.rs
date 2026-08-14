@@ -3,7 +3,7 @@ use grammers_client::session::types::PeerId;
 use grammers_client::tl;
 use grammers_client::tl::{Deserializable, Serializable};
 
-use super::{Ctx, can_manage, esc};
+use super::{Ctx, esc};
 
 pub const TEXT: &str = "welcome_text";
 
@@ -28,7 +28,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     };
 
     if CLEAR.contains(&text) {
-        if !can_manage(ctx, message).await {
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
         ctx.settings.set_value(chat, TEXT, "").await;
@@ -38,7 +38,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
 
     if SHOW.contains(&text) {
-        if !can_manage(ctx, message).await {
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
         match template(ctx, chat) {
@@ -64,7 +64,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return false;
     }
     let rest = rest.to_owned();
-    if !can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
 

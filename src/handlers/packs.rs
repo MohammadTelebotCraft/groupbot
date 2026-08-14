@@ -1,7 +1,7 @@
 use grammers_client::message::Message;
 use grammers_client::tl;
 
-use super::{Ctx, can_manage};
+use super::{Ctx};
 
 pub const PREFIX: &str = "pack:";
 
@@ -40,7 +40,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
-    if !can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
 

@@ -1,6 +1,6 @@
 use grammers_client::message::Message;
 
-use super::{Ctx, betrayal, can_manage, captcha, flood, numbers_in, warns};
+use super::{Ctx, betrayal, captcha, flood, numbers_in, warns};
 
 const SETTINGS: &[(&str, &str)] = &[
     ("اخطار", "warns"),
@@ -38,7 +38,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
-    if !can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
     if numbers.is_empty() {

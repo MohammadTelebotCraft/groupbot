@@ -1,7 +1,7 @@
 use grammers_client::message::{InputMessage, Message};
 use grammers_client::tl;
 
-use super::{Ctx, can_manage, esc, name_of};
+use super::{Ctx, esc, name_of};
 
 pub const RULES: &str = "rules";
 
@@ -120,7 +120,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    let admin = || can_manage(ctx, message);
+    let admin = |cap| super::limits::allows(ctx, message, cap);
 
     if let Some(rest) = after(text, TAG_ALL) {
         let matched = TAG_ALL
@@ -134,7 +134,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             Some([count]) => *count as usize,
             _ => return false,
         };
-        if !admin().await {
+        if !admin(super::limits::SET).await {
             return true;
         }
         tag_all(ctx, message, wanted).await;
@@ -142,7 +142,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
 
     if let Some(rest) = after(text, SET_RULES) {
-        if !admin().await {
+        if !admin(super::limits::SET).await {
             return true;
         }
         let body = if rest.is_empty() {
@@ -171,7 +171,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         let Some(named) = super::named(message, none_if_empty(rest)) else {
             return false;
         };
-        if !admin().await {
+        if !admin(super::limits::SET).await {
             return true;
         }
         let Some((target, name)) = super::resolve(ctx, message, named).await else {
@@ -188,7 +188,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         let Some(named) = super::named(message, None) else {
             return false;
         };
-        if !admin().await {
+        if !admin(super::limits::SET).await {
             return true;
         }
         let Some((target, name)) = super::resolve(ctx, message, named).await else {
@@ -226,7 +226,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         if message.reply_to_message_id().is_none() {
             return false;
         }
-        if !admin().await {
+        if !admin(super::limits::PIN).await {
             return true;
         }
         return pin(ctx, message, chat, UNPIN.contains(&text), PIN_QUIET.contains(&text)).await;
@@ -237,14 +237,14 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             Some(&[asked]) => asked,
             _ => return false,
         };
-        if !admin().await {
+        if !admin(super::limits::SET).await {
             return true;
         }
         return slow_mode(ctx, message, chat, asked).await;
     }
 
     if let Some(rest) = after(text, NIGHT_CMD) {
-        if !admin().await {
+        if !admin(super::limits::SET).await {
             return true;
         }
         return set_night_from(ctx, message, chat, rest).await;

@@ -63,7 +63,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         Some(numbers) => numbers,
         None => return false,
     };
-    if !super::can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
 

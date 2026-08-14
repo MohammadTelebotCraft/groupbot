@@ -1,7 +1,7 @@
 use grammers_client::message::{Button, InputMessage, Message, ReplyMarkup};
 use grammers_client::update::CallbackQuery;
 
-use super::{Ctx, can_manage};
+use super::{Ctx};
 
 const ALL: &[&str] = &["حذف همه", "پاکسازی همه", "حذف کل پیام ها"];
 
@@ -101,7 +101,7 @@ pub async fn handle_all(ctx: &Ctx, message: &Message) -> bool {
     if !ALL.contains(&message.text().trim()) {
         return false;
     }
-    if !can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::CLEAN).await {
         return true;
     }
     let (Some(opener), Some(_)) = (
@@ -186,7 +186,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
-    if !can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::CLEAN).await {
         return true;
     }
     let (Ok(Some(chat_ref)), Some(chat)) = (

@@ -104,7 +104,7 @@ async fn edit(ctx: &Ctx, message: &Message, chat: i64, adding: bool, trigger: &s
     if adding && !has_body(message, trigger) {
         return false;
     }
-    if !can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
     let mut trigger = trigger.trim().to_lowercase();

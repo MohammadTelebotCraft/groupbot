@@ -1,7 +1,7 @@
 use grammers_client::message::{InputMessage, Message};
 use grammers_client::tl;
 
-use super::{Ctx, can_manage};
+use super::{Ctx};
 
 pub const PREFIX: &str = "perm:";
 
@@ -178,7 +178,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     };
 
     if SHOW.contains(&text) {
-        if !can_manage(ctx, message).await {
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
         seed(ctx, message, chat).await;
@@ -226,7 +226,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             .await;
         return true;
     };
-    if !can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
     let Ok(Some(chat_ref)) = message.peer_ref().await else {

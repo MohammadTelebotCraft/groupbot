@@ -1,6 +1,6 @@
 use grammers_client::message::Message;
 
-use super::{Ctx, can_manage};
+use super::{Ctx};
 
 const ADD: &[&str] = &["ویژه", "افزودن ویژه", "تنظیم ویژه"];
 const REMOVE: &[&str] = &["حذف ویژه", "لغو ویژه"];
@@ -28,7 +28,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let Some(named) = super::named(message, arg) else {
         return false;
     };
-    if !can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::VIP).await {
         return true;
     }
 

@@ -1,7 +1,7 @@
 use grammers_client::message::{InputMessage, Message};
 use grammers_client::session::types::{PeerAuth, PeerId, PeerRef};
 
-use super::{Ctx, can_manage, esc};
+use super::{Ctx, esc};
 
 pub const CHANNEL: &str = "log_channel";
 
@@ -259,7 +259,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     };
 
     if CLEAR.contains(&text) {
-        if !can_manage(ctx, message).await {
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
         ctx.settings.set_value(chat, CHANNEL, "").await;
@@ -274,7 +274,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }) else {
         return false;
     };
-    if !can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
 

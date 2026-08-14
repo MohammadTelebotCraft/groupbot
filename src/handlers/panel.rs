@@ -4,8 +4,8 @@ use grammers_client::update::CallbackQuery;
 use super::locks::LOCKS;
 use super::style::{Colour, choice, data as coloured, toggle};
 use super::{
-    Ctx, answers, betrayal, can_manage, captcha, flood, join, lists, log, notice, raid, setting,
-    strict, tempmedia, warns, welcome,
+    Ctx, answers, betrayal, captcha, flood, join, limits, lists, log, notice, raid,
+    setting, strict, tempmedia, warns, welcome,
 };
 
 const OPEN: &[&str] = &["پنل", "تنظیمات", "پنل ربات"];
@@ -31,7 +31,7 @@ fn strict_title(ctx: &Ctx, chat: i64) -> String {
 }
 
 async fn to_private(ctx: &Ctx, message: &Message) -> bool {
-    if !can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
     let (Some(chat), Ok(Some(user)), Some(opener)) = (
@@ -139,7 +139,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     if !OPEN.contains(&text) {
         return false;
     }
-    if !can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
@@ -270,6 +270,15 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
         return;
     }
 
+    if action.starts_with(limits::MODE) && super::owner(ctx, chat) != Some(opener) {
+        let _ = query
+            .answer()
+            .alert("محدودیت مدیران فقط از مالک ربات پذیرفته می شود.")
+            .send()
+            .await;
+        return;
+    }
+
     let action = match setting::apply(ctx, chat, action).await {
         Some(section) => section,
         None => action,
@@ -308,6 +317,14 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
                 temp_media_title(ctx, chat),
                 temp_media_markup(ctx, chat, opener),
             )
+        }
+        "lim" => (limits_title(ctx, chat), limits_markup(ctx, chat, opener)),
+        picked if picked.starts_with("lim:") => {
+            if let Some(cap) = limits::find(&picked["lim:".len()..]) {
+                let deny = !ctx.settings.is_locked(chat, cap.key);
+                ctx.settings.set(chat, cap.key, deny).await;
+            }
+            (limits_title(ctx, chat), limits_markup(ctx, chat, opener))
         }
         "ls" => (LISTS_TITLE.to_owned(), lists_markup(chat, opener)),
         "s" => (strict_title(ctx, chat), strict_markup(ctx, chat, opener)),
@@ -504,6 +521,11 @@ async fn list_callback(ctx: &Ctx, query: &CallbackQuery, rest: &str, chat: i64, 
     let Some(kind) = lists::Kind::from_action(kind_name) else {
         return;
     };
+
+    if !limits::permits(ctx, chat, opener, kind.cap()) {
+        limits::refuse(query, kind.cap()).await;
+        return;
+    }
     let Ok(Some(chat_ref)) = query.peer_ref().await else {
         return;
     };
@@ -1197,7 +1219,7 @@ fn section(label: &str, target: Vec<u8>, on: bool) -> Button {
 }
 
 fn advanced_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
-    ReplyMarkup::from_buttons(&[
+    let mut rows = vec![
         vec![Button::data("🛡  امنیت و ورود  ›", payload(opener, chat, "sec"))],
         vec![Button::data("💬  پیام و پاسخ  ›", payload(opener, chat, "msg"))],
         vec![Button::data("🧹  پاکسازی و زمان  ›", payload(opener, chat, "tm"))],
@@ -1207,11 +1229,62 @@ fn advanced_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             payload(opener, chat, "lg"),
             log::channel_id(ctx, chat).is_some(),
         )],
-        vec![
-            Button::data("‹ بازگشت", payload(opener, chat, "root")),
-            Button::data("بستن", payload(opener, chat, "close")),
-        ],
-    ])
+    ];
+
+    if super::owner(ctx, chat) == Some(opener) {
+        rows.push(vec![section(
+            "🔑  محدودیت مدیران",
+            payload(opener, chat, "lim"),
+            ctx.settings.is_locked(chat, limits::MODE),
+        )]);
+    }
+    rows.push(vec![
+        Button::data("‹ بازگشت", payload(opener, chat, "root")),
+        Button::data("بستن", payload(opener, chat, "close")),
+    ]);
+    ReplyMarkup::from_buttons(&rows)
+}
+
+fn limits_title(ctx: &Ctx, chat: i64) -> String {
+    let closed: Vec<&str> = limits::CAPS
+        .iter()
+        .filter(|cap| ctx.settings.is_locked(chat, cap.key))
+        .map(|cap| cap.label)
+        .collect();
+    format!(
+        "<b>پنل مدیریت</b> › <b>محدودیت مدیران</b>\n\n\
+         وضعیت · <b>{}</b>\n\
+         بسته · <b>{}</b>\n\n\
+         <i>این محدودیت ها روی مالک ربات اعمال نمی شود.</i>",
+        if ctx.settings.is_locked(chat, limits::MODE) {
+            "روشن"
+        } else {
+            "خاموش"
+        },
+        if closed.is_empty() {
+            "هیچ کدام".to_owned()
+        } else {
+            closed.join("، ")
+        }
+    )
+}
+
+fn limits_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
+    let mut rows = rows_for(ctx, chat, opener, "lim_on");
+    rows.extend(limits::CAPS.chunks(2).map(|pair| {
+        pair.iter()
+            .map(|cap| {
+                let open = !ctx.settings.is_locked(chat, cap.key);
+                toggle(
+                    format!("{}  {}", if open { "✓" } else { "✗" }, cap.label),
+                    payload(opener, chat, &format!("{}:{}", limits::MODE, cap.name)),
+                    open,
+                )
+            })
+            .collect()
+    }));
+    rows.push(vec![Button::data("‹ بازگشت", payload(opener, chat, "adv"))]);
+    ReplyMarkup::from_buttons(&rows)
 }
 
 fn security_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
@@ -1475,7 +1548,7 @@ mod tests {
         const PAGES: &[&str] = &[
             "root", "locks", "adv", "sec", "msg", "tm", "ls", "s", "rd", "sp", "bt", "fl",
             "wn", "cp", "nt", "an", "wc", "ng", "sl", "jn", "ad", "gp", "gr", "lg", "dr",
-            "ap", "tmed", "close", "page", "in", "on", "off", "ng_toggle", "ap_toggle",
+            "ap", "tmed", "lim", "close", "page", "in", "on", "off", "ng_toggle", "ap_toggle",
             "dr_toggle", "dr_now", "lg_off", "jn_off", "wc_off",
         ];
 

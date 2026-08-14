@@ -3,7 +3,7 @@ use grammers_client::session::types::PeerRef;
 use grammers_client::tl;
 
 use super::restrict::{self, Action};
-use super::{Ctx, can_manage, esc, filters, join, vip};
+use super::{Ctx, esc, filters, join, vip};
 
 const SHOW: &[(&str, Kind)] = &[
     ("لیست بن", Kind::Ban),
@@ -37,7 +37,7 @@ pub async fn command(ctx: &Ctx, message: &Message) -> bool {
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
-    if !can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, kind.cap()).await {
         return true;
     }
     let Ok(Some(chat_ref)) = message.peer_ref().await else {
@@ -108,6 +108,16 @@ impl Kind {
             "answer" => Some(Self::Answer),
             "free" => Some(Self::Exempt),
             _ => None,
+        }
+    }
+
+    pub fn cap(self) -> &'static super::limits::Cap {
+        match self {
+            Self::Ban => super::limits::BAN,
+            Self::Mute => super::limits::MUTE,
+            Self::Vip => super::limits::VIP,
+            Self::Exempt => super::limits::EXEMPT,
+            Self::Filter | Self::Answer => super::limits::SET,
         }
     }
 

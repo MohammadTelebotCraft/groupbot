@@ -37,7 +37,7 @@ async fn tag(ctx: &Ctx, message: &Message, text: &str) -> bool {
     else {
         return false;
     };
-    if !super::can_manage(ctx, message).await {
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
