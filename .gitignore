@@ -1,0 +1,12 @@
+/target
+.env
+*.session
+*.session-journal
+*.session-wal
+*.session-shm
+groupbot.data
+groupbot.data.imported
+groupbot.locks
+*.sql.gz
+*.md
+!README.md

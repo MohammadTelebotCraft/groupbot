@@ -1,0 +1,17 @@
+[Unit]
+Description=groupbot — Telegram group management bot
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/GroupManagement/groupbot
+EnvironmentFile=/home/ubuntu/GroupManagement/groupbot/.env
+Environment=LOG=info
+ExecStart=/home/ubuntu/GroupManagement/groupbot/target/release/groupbot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

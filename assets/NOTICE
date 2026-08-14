@@ -1,0 +1,8 @@
+NotoColorEmoji.ttf is Noto Color Emoji, from the Google Noto Fonts
+project, licensed under the SIL Open Font License 1.1.
+
+    Source:  https://github.com/googlefonts/noto-emoji
+    License: https://scripts.sil.org/OFL
+
+It is compiled into the binary with include_bytes! and used only to
+render the captcha images.

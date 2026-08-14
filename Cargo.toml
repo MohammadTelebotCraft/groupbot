@@ -1,0 +1,16 @@
+[package]
+name = "groupbot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+grammers-client = { path = "../grammers/grammers-client", features = ["html", "parse_invite_link"] }
+grammers-session = { path = "../grammers/grammers-session", features = ["sqlite-storage"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "signal", "sync"] }
+log = "0.4"
+simple_logger = { version = "5", default-features = false, features = ["colors"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+cosmic-text = "0.19.0"
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
+base64 = "0.22"

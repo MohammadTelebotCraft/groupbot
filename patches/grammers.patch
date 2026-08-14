@@ -1,0 +1,233 @@
+diff --git a/grammers-client/src/client/auth.rs b/grammers-client/src/client/auth.rs
+index d4d10ee..038aa03 100644
+--- a/grammers-client/src/client/auth.rs
++++ b/grammers-client/src/client/auth.rs
+@@ -60,6 +60,17 @@ pub struct LoginToken {
+     pub(crate) phone_code_hash: String,
+ }
+ 
++/// One step of a QR login: what to do next.
++pub enum QrLogin {
++    /// Nobody has scanned it (yet). Render `token` as a `tg://login?token=<base64url>` QR
++    /// code and step again — before `expires`, after which Telegram issues a new token.
++    Waiting { token: Vec<u8>, expires: i32 },
++    /// Scanned, and the account has a cloud password. Finish with [`Client::check_password`].
++    PasswordRequired(PasswordToken),
++    /// Scanned and accepted; the session is now authorized.
++    Success(User),
++}
++
+ /// Password token needed to complete a 2FA login.
+ #[derive(Debug)]
+ pub struct PasswordToken {
+@@ -213,6 +224,63 @@ impl Client {
+         }
+     }
+ 
++    /// One step of signing in by QR code, the way the mobile apps scan a desktop login.
++    ///
++    /// Call it in a loop: while it returns [`QrLogin::Waiting`], show the token as a QR code
++    /// and call again a second or two later (the token is re-exported once it expires).
++    ///
++    /// Telegram only ever tells us "not yet" by handing back a token again, so polling is
++    /// the whole protocol; there is nothing to wait on.
++    pub async fn qr_login_step(&self, api_hash: &str) -> Result<QrLogin, InvocationError> {
++        let request = tl::functions::auth::ExportLoginToken {
++            api_id: self.0.api_id,
++            api_hash: api_hash.to_string(),
++            except_ids: Vec::new(),
++        };
++        let result = match self.invoke(&request).await {
++            Ok(result) => result,
++            Err(InvocationError::Rpc(err)) if err.name.contains("SESSION_PASSWORD_NEEDED") => {
++                return Ok(QrLogin::PasswordRequired(
++                    self.get_password_information().await?,
++                ));
++            }
++            Err(err) => return Err(err),
++        };
++        self.qr_login_result(result).await
++    }
++
++    async fn qr_login_result(
++        &self,
++        result: tl::enums::auth::LoginToken,
++    ) -> Result<QrLogin, InvocationError> {
++        match result {
++            tl::enums::auth::LoginToken::Token(token) => Ok(QrLogin::Waiting {
++                token: token.token,
++                expires: token.expires,
++            }),
++            // The account lives in another data centre: move there and hand the token over.
++            tl::enums::auth::LoginToken::MigrateTo(migrate) => {
++                let old_dc_id = self.0.session.home_dc_id()?;
++                self.0.handle.disconnect_from_dc(old_dc_id);
++                self.0.session.set_home_dc_id(migrate.dc_id).await?;
++                let imported = self
++                    .invoke(&tl::functions::auth::ImportLoginToken {
++                        token: migrate.token,
++                    })
++                    .await?;
++                Box::pin(self.qr_login_result(imported)).await
++            }
++            tl::enums::auth::LoginToken::Success(success) => match success.authorization {
++                tl::enums::auth::Authorization::Authorization(auth) => {
++                    Ok(QrLogin::Success(self.complete_login(auth).await?))
++                }
++                tl::enums::auth::Authorization::SignUpRequired(_) => {
++                    Err(InvocationError::Dropped)
++                }
++            },
++        }
++    }
++
+     /// Requests the login code for the account associated to the given phone
+     /// number via another Telegram application or SMS.
+     ///
+diff --git a/grammers-client/src/client/mod.rs b/grammers-client/src/client/mod.rs
+index e75f4b9..06162c5 100644
+--- a/grammers-client/src/client/mod.rs
++++ b/grammers-client/src/client/mod.rs
+@@ -20,7 +20,7 @@ mod messages;
+ mod net;
+ mod updates;
+ 
+-pub use auth::{LoginToken, PasswordToken, SignInError};
++pub use auth::{LoginToken, PasswordToken, QrLogin, SignInError};
+ pub use bots::{InlineResult, InlineResultIter};
+ pub use chats::{ParticipantIter, ParticipantPermissions, ProfilePhotoIter};
+ pub(crate) use client::ClientInner;
+diff --git a/grammers-client/src/lib.rs b/grammers-client/src/lib.rs
+index d9a6bc6..269a708 100644
+--- a/grammers-client/src/lib.rs
++++ b/grammers-client/src/lib.rs
+@@ -95,7 +95,7 @@ pub mod peer;
+ pub mod update;
+ pub(crate) mod utils;
+ 
+-pub use client::{Client, SignInError};
++pub use client::{Client, QrLogin, SignInError};
+ pub use grammers_mtsender::{self as sender, InvocationError, SenderPool};
+ pub use grammers_session as session;
+ pub use grammers_tl_types as tl;
+diff --git a/grammers-mtsender/src/sender.rs b/grammers-mtsender/src/sender.rs
+index 619eda2..707a713 100644
+--- a/grammers-mtsender/src/sender.rs
++++ b/grammers-mtsender/src/sender.rs
+@@ -455,11 +455,17 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+                 // Check if the original request targeted a channel (e.g. channels.deleteMessages).
+                 // If so, the pts belongs to that channel, not the common/user pts sequence.
+                 let channel_id = self.peek_request(msg_id).and_then(|request| {
++                    // Functions serialize their constructor identifier, but the generated
++                    // `deserialize` does not consume it: it starts reading fields right away.
++                    // Passing the body as-is would therefore feed the function's own identifier
++                    // to `InputChannel`, which rejects it, and the channel pts would silently be
++                    // applied to `Key::Common`, gapping it forever.
++                    let body = request.body.strip_prefix(
++                        &<tl::functions::channels::DeleteMessages as tl::Identifiable>::CONSTRUCTOR_ID
++                            .to_le_bytes(),
++                    )?;
+                     let request =
+-                        match tl::functions::channels::DeleteMessages::from_bytes(&request.body) {
+-                            Ok(r) => r,
+-                            Err(_) => return None,
+-                        };
++                        tl::functions::channels::DeleteMessages::from_bytes(body).ok()?;
+ 
+                     match request.channel {
+                         tl::enums::InputChannel::Channel(c) => Some((c.channel_id, request.id)),
+@@ -467,12 +473,18 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+                     }
+                 });
+                 if let Some((channel_id, message_ids)) = channel_id {
++                    log::debug!(
++                        "affectedMessages pts {} applied to channel {}",
++                        affected.pts,
++                        channel_id
++                    );
+                     updates.push(UpdatesLike::AffectedChannelMessages {
+                         affected,
+                         channel_id,
+                         message_ids,
+                     });
+                 } else {
++                    log::debug!("affectedMessages pts {} applied to Common", affected.pts);
+                     updates.push(UpdatesLike::AffectedMessages(affected));
+                 }
+                 return;
+diff --git a/grammers-mtsender/tests/lib.rs b/grammers-mtsender/tests/lib.rs
+index cfd2608..d012f32 100644
+--- a/grammers-mtsender/tests/lib.rs
++++ b/grammers-mtsender/tests/lib.rs
+@@ -142,3 +142,36 @@ fn test_connection_through_proxy() {
+         socks5_task.await.unwrap(); // also make sure proxy finished handling a single connection cleanly
+     });
+ }
++
++/// A serialized function body starts with the function's own constructor identifier, but the
++/// generated `deserialize` starts reading fields immediately. Parsing a request body without
++/// skipping those four bytes therefore fails, which once made `channels.deleteMessages`
++/// responses apply a channel pts to the common sequence and gap it permanently.
++#[test]
++fn function_body_needs_its_constructor_id_skipped() {
++    use grammers_tl_types::{Deserializable, Identifiable, Serializable, enums, functions, types};
++
++    let request = functions::channels::DeleteMessages {
++        channel: enums::InputChannel::Channel(types::InputChannel {
++            channel_id: 1234,
++            access_hash: 5678,
++        }),
++        id: vec![42],
++    };
++    let body = request.to_bytes();
++
++    assert!(
++        functions::channels::DeleteMessages::from_bytes(&body).is_err(),
++        "if functions ever start consuming their own id, drop the strip_prefix in sender.rs"
++    );
++
++    let rest = body
++        .strip_prefix(&functions::channels::DeleteMessages::CONSTRUCTOR_ID.to_le_bytes())
++        .expect("body must begin with the function's constructor id");
++    let parsed = functions::channels::DeleteMessages::from_bytes(rest).unwrap();
++    assert!(matches!(
++        parsed.channel,
++        enums::InputChannel::Channel(types::InputChannel { channel_id: 1234, .. })
++    ));
++    assert_eq!(parsed.id, vec![42]);
++}
+diff --git a/grammers-session/src/storages/sqlite.rs b/grammers-session/src/storages/sqlite.rs
+index f5b2c5a..ac59400 100644
+--- a/grammers-session/src/storages/sqlite.rs
++++ b/grammers-session/src/storages/sqlite.rs
+@@ -209,6 +209,30 @@ impl SqliteSession {
+     pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self, SqliteSessionError> {
+         let conn = libsql::Builder::new_local(path).build().await?.connect()?;
+         let db = Database(conn);
++
++        // Peer rows are written from the task that reads updates, and libsql's local
++        // connection is synchronous, so every write holds that task — and with it every
++        // chat — for as long as the commit takes. On the default rollback journal at
++        // `synchronous = FULL` one row costs a journal write, two fsyncs and an unlink;
++        // in WAL it is an append. The session is a cache of what Telegram just said, so
++        // `NORMAL` (durable across a crash of the process, not of the machine) is the
++        // right trade: a lost peer row is re-learned from the next update it appears in.
++        for pragma in [
++            "PRAGMA journal_mode = WAL",
++            "PRAGMA synchronous = NORMAL",
++            "PRAGMA busy_timeout = 5000",
++        ] {
++            match db
++                .fetch_one(pragma, named_params![], |row| row.get_value(0))
++                .await
++            {
++                Ok(mode) => log::debug!("session {pragma} -> {mode:?}"),
++                // Not fatal: a filesystem that refuses WAL (a network mount, or the
++                // in-memory database the tests use) still works, only slower.
++                Err(e) => log::warn!("session {pragma} failed: {e}"),
++            }
++        }
++
+         db.init().await?;
+ 
+         let home_dc = db
