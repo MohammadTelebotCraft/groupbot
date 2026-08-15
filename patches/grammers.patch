@@ -459,7 +459,7 @@ index 68bb840..26d3e77 100644
 +    );
 +}
 diff --git a/grammers-session/src/storages/sqlite.rs b/grammers-session/src/storages/sqlite.rs
-index f5b2c5a..05071f7 100644
+index f5b2c5a..6c009d6 100644
 --- a/grammers-session/src/storages/sqlite.rs
 +++ b/grammers-session/src/storages/sqlite.rs
 @@ -30,10 +30,64 @@ struct Cache {
@@ -527,7 +527,82 @@ index f5b2c5a..05071f7 100644
  }
  
  #[derive(Debug)]
-@@ -209,6 +263,30 @@ impl SqliteSession {
+@@ -160,6 +214,74 @@ impl Database {
+         Ok(())
+     }
+ 
++    /// Keeps `peer_info` from growing without end, once per open.
++    ///
++    /// The table gains a row for every peer the account has ever been handed, and an account
++    /// in tens of thousands of groups is handed every member of every one of them. Nothing
++    /// ever removed a row, so the file grew until it was measured in gigabytes — copied by
++    /// every backup, and deepening the B-tree that the update task queries per message.
++    ///
++    /// **Only users are dropped.** `peer_id` is the bot-API dialog id, so groups and channels
++    /// are the negative ones, and those must be kept: losing a channel's access hash is losing
++    /// the ability to reach the chat at all, and there is no update that re-teaches it. They
++    /// are bounded by how many groups the account is in, which is the bound the rest of the
++    /// design already accepts. A dropped user is re-learned from the next update carrying them.
++    ///
++    /// Done at open rather than on a timer: it is a whole-table sort, it is only ever needed
++    /// after a long run, and startup is the one moment nothing is waiting on this connection.
++    async fn bound_peers(&self) {
++        /// Roughly a hundred megabytes of rows and index, which is far more than the working
++        /// set of even a very large shard.
++        const KEEP_USERS: i64 = 2_000_000;
++
++        self.bound_peers_to(KEEP_USERS).await
++    }
++
++    async fn bound_peers_to(&self, keep: i64) {
++        // Additive and idempotent, so it does not disturb the versioned migration chain.
++        // The error on a second run is "duplicate column name", which is the success case.
++        let _ = self
++            .0
++            .execute("ALTER TABLE peer_info ADD COLUMN seen INTEGER", params![])
++            .await;
++
++        let over: Option<i64> = match self
++            .fetch_one(
++                "SELECT COUNT(*) FROM peer_info WHERE peer_id > 0",
++                params![],
++                |row| row.get(0),
++            )
++            .await
++        {
++            Ok(count) => count,
++            Err(e) => {
++                log::warn!("session: could not count peers: {e}");
++                return;
++            }
++        };
++        if over.unwrap_or(0) <= keep {
++            return;
++        }
++
++        // Rows written before the column existed sort first and go first, which is right:
++        // they are the oldest.
++        match self
++            .0
++            .execute(
++                "DELETE FROM peer_info
++                  WHERE peer_id > 0
++                    AND peer_id NOT IN (
++                        SELECT peer_id FROM peer_info WHERE peer_id > 0
++                         ORDER BY seen DESC LIMIT :keep)",
++                named_params! {":keep": keep},
++            )
++            .await
++        {
++            Ok(dropped) => log::info!("session: forgot {dropped} long unused peers"),
++            Err(e) => log::warn!("session: could not bound peers: {e}"),
++        }
++    }
++
+     async fn begin_transaction(&self) -> libsql::Result<libsql::Transaction> {
+         self.0.transaction().await
+     }
+@@ -209,7 +331,32 @@ impl SqliteSession {
      pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self, SqliteSessionError> {
          let conn = libsql::Builder::new_local(path).build().await?.connect()?;
          let db = Database(conn);
@@ -556,9 +631,11 @@ index f5b2c5a..05071f7 100644
 +        }
 +
          db.init().await?;
++        db.bound_peers().await;
  
          let home_dc = db
-@@ -243,6 +321,7 @@ impl SqliteSession {
+             .fetch_one("SELECT * FROM dc_home LIMIT 1", named_params![], |row| {
+@@ -243,6 +390,7 @@ impl SqliteSession {
                  home_dc,
                  dc_options,
              }),
@@ -566,7 +643,7 @@ index f5b2c5a..05071f7 100644
          })
      }
  }
-@@ -328,98 +407,63 @@ impl Session for SqliteSession {
+@@ -328,98 +476,63 @@ impl Session for SqliteSession {
  
      fn peer(&self, peer: PeerId) -> BoxFuture<'_, Result<Option<PeerInfo>, SqliteSessionError>> {
          Box::pin(async move {
@@ -639,24 +716,14 @@ index f5b2c5a..05071f7 100644
 -                existing_peer
 -            } else {
 -                peer
+-            };
 +            let key = peer.id().bot_api_dialog_id_unchecked();
 +            let known = self
 +                .peers
 +                .lock()
 +                .map_err(|_| SqliteSessionError::Poisoned)?
 +                .get(key);
-+
-+            // The whole point. `extend_info` only fills in what is missing, so a peer already
-+            // known in full produces no change — which is every message after the first for
-+            // that peer, and it costs no database round trip at all.
-+            let against = match known {
-+                Some(known) => Some(known),
-+                // A miss reads the row, exactly as before: the database may hold a hash learned
-+                // in an earlier run, and a partial update must not clobber it. The read
-+                // populates the cache too, so this happens once per peer per process.
-+                None => self.peer_from_db_cached(peer.id(), key).await?,
-             };
--
+ 
 -            let db = self.database.lock().await;
 -            let stmt =
 -                db.0.prepare("INSERT OR REPLACE INTO peer_info VALUES (:peer_id, :hash, :subtype)")
@@ -668,6 +735,16 @@ index f5b2c5a..05071f7 100644
 -                        (true, false) => Some(PeerSubtype::UserBot),
 -                        (false, true) => Some(PeerSubtype::UserSelf),
 -                        (false, false) => None,
++            // The whole point. `extend_info` only fills in what is missing, so a peer already
++            // known in full produces no change — which is every message after the first for
++            // that peer, and it costs no database round trip at all.
++            let against = match known {
++                Some(known) => Some(known),
++                // A miss reads the row, exactly as before: the database may hold a hash learned
++                // in an earlier run, and a partial update must not clobber it. The read
++                // populates the cache too, so this happens once per peer per process.
++                None => self.peer_from_db_cached(peer.id(), key).await?,
++            };
 +            let merged = match against {
 +                Some(against) => {
 +                    let mut merged = against.clone();
@@ -711,7 +788,7 @@ index f5b2c5a..05071f7 100644
              Ok(())
          })
      }
-@@ -572,6 +616,119 @@ impl Session for SqliteSession {
+@@ -572,6 +685,133 @@ impl Session for SqliteSession {
      }
  }
  
@@ -791,9 +868,15 @@ index f5b2c5a..05071f7 100644
 +        let peer = peer.clone();
 +        Box::pin(async move {
 +            let db = self.database.lock().await;
-+            let stmt =
-+                db.0.prepare("INSERT OR REPLACE INTO peer_info VALUES (:peer_id, :hash, :subtype)")
-+                    .await?;
++            // Named columns rather than positional, because `seen` is added by an idempotent
++            // ALTER and a `VALUES` list would break the moment the column order moved.
++            let stmt = db
++                .0
++                .prepare(
++                    "INSERT OR REPLACE INTO peer_info (peer_id, hash, subtype, seen)
++                     VALUES (:peer_id, :hash, :subtype, :seen)",
++                )
++                .await?;
 +            let subtype = match peer {
 +                PeerInfo::User { bot, is_self, .. } => {
 +                    match (bot.unwrap_or_default(), is_self.unwrap_or_default()) {
@@ -814,6 +897,14 @@ index f5b2c5a..05071f7 100644
 +            let mut params = vec![];
 +            let peer_id = peer.id().bot_api_dialog_id_unchecked();
 +            params.push((":peer_id".to_owned(), peer_id));
++            // What the bound at open orders by. A write is the only moment the peer is known
++            // to be in use, so it is the only honest stamp available without writing on reads.
++            params.push((
++                ":seen".to_owned(),
++                std::time::SystemTime::now()
++                    .duration_since(std::time::UNIX_EPOCH)
++                    .map_or(0, |since| since.as_secs() as i64),
++            ));
 +            let hash = peer.auth().unwrap_or_default().hash();
 +            if peer.auth().is_some() {
 +                params.push((":hash".to_owned(), hash));
@@ -831,7 +922,7 @@ index f5b2c5a..05071f7 100644
  #[cfg(test)]
  mod tests {
      use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
-@@ -698,4 +855,81 @@ mod tests {
+@@ -698,4 +938,137 @@ mod tests {
              }
          );
      }
@@ -911,5 +1002,61 @@ index f5b2c5a..05071f7 100644
 +            known,
 +            "and it comes back off disk"
 +        );
++    }
++
++    #[test]
++    fn peer_bound_keeps_chats_and_drops_only_the_oldest_users() {
++        tokio::runtime::Builder::new_current_thread()
++            .enable_all()
++            .build()
++            .unwrap()
++            .block_on(do_peer_bound_keeps_chats_and_drops_only_the_oldest_users());
++    }
++
++    /// Losing a channel's access hash loses the ability to reach the chat, and no update ever
++    /// re-teaches it; a user is re-learned from the next message carrying them. So the bound
++    /// has to tell them apart, and it has to drop the least recently written users first.
++    async fn do_peer_bound_keeps_chats_and_drops_only_the_oldest_users() {
++        let path = std::env::temp_dir().join("grammers-peer-bound-test.session");
++        let _ = std::fs::remove_file(&path);
++        let session = SqliteSession::open(&path).await.unwrap();
++
++        {
++            let db = session.database.lock().await;
++            for (id, seen) in [
++                (-1001_i64, 1_i64),
++                (-1002, 2),
++                (10, 5),
++                (11, 10),
++                (12, 15),
++                (13, 20),
++            ] {
++                db.0.execute(
++                    "INSERT OR REPLACE INTO peer_info (peer_id, hash, subtype, seen) \
++                     VALUES (:peer_id, 7, NULL, :seen)",
++                    named_params! {":peer_id": id, ":seen": seen},
++                )
++                .await
++                .unwrap();
++            }
++
++            db.bound_peers_to(2).await;
++
++            let ids: Vec<i64> = db
++                .fetch_all("SELECT peer_id FROM peer_info", named_params![], |row| {
++                    Ok(row.get::<i64>(0)?)
++                })
++                .await
++                .unwrap();
++
++            assert!(ids.contains(&-1001), "a channel is never dropped");
++            assert!(ids.contains(&-1002), "a channel is never dropped");
++            assert!(ids.contains(&13), "the newest user stays");
++            assert!(ids.contains(&12), "the second newest user stays");
++            assert!(!ids.contains(&11), "an older user goes");
++            assert!(!ids.contains(&10), "the oldest user goes");
++        }
++
++        let _ = std::fs::remove_file(&path);
 +    }
  }

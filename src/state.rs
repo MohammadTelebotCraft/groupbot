@@ -135,9 +135,14 @@ fn indexed_slot(key: &str) -> Option<(usize, &str)> {
 
 impl Settings {
     pub async fn connect(url: &str) -> Result<Self> {
+        let size = std::env::var("DB_POOL")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10)
+            .clamp(2, 64);
         let pool = PgPoolOptions::new()
-            .max_connections(32)
-            .min_connections(4)
+            .max_connections(size)
+            .min_connections(2)
             .acquire_timeout(std::time::Duration::from_secs(5))
             .idle_timeout(std::time::Duration::from_secs(600))
             .connect(url)
