@@ -5,8 +5,8 @@ use super::{Ctx};
 
 pub const PREFIX: &str = "pack:";
 
-const LOCK: &[&str] = &["قفل پک", "قفل پک ایموجی", "قفل استیکرپک"];
-const UNLOCK: &[&str] = &["بازکردن پک", "باز کردن پک", "حذف پک", "آنلاک پک"];
+pub const LOCK: &[&str] = &["قفل پک", "قفل پک ایموجی", "قفل استیکرپک"];
+pub const UNLOCK: &[&str] = &["بازکردن پک", "باز کردن پک", "حذف پک", "آنلاک پک"];
 
 fn key(set: i64) -> String {
     format!("{PREFIX}{set}")

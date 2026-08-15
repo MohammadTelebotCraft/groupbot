@@ -12,6 +12,7 @@ pub async fn handle(ctx: &Ctx, query: &CallbackQuery) {
 
     let chat = data
         .strip_prefix("p:")
+        .or_else(|| data.strip_prefix("h:"))
         .and_then(|rest| rest.split(':').nth(1))
         .and_then(|chat| chat.parse::<i64>().ok())
         .unwrap_or(here);
@@ -71,6 +72,11 @@ pub async fn handle(ctx: &Ctx, query: &CallbackQuery) {
     }
     if let Some(payload) = data.strip_prefix("a:") {
         super::promote::on_callback(ctx, query, payload, chat).await;
+        return;
+    }
+
+    if let Some(action) = data.strip_prefix("h:") {
+        super::panel::on_help(ctx, query, action).await;
         return;
     }
     if let Some(action) = data.strip_prefix("p:") {

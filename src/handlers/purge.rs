@@ -3,7 +3,7 @@ use grammers_client::update::CallbackQuery;
 
 use super::{Ctx};
 
-const ALL: &[&str] = &["حذف همه", "پاکسازی همه", "حذف کل پیام ها"];
+pub const ALL: &[&str] = &["حذف همه", "پاکسازی همه", "حذف کل پیام ها"];
 
 pub const AUTO_AT: &str = "auto_purge_at";
 
@@ -15,7 +15,7 @@ pub const AUTO_COUNT_RANGE: (u32, u32) = (0, 100_000);
 pub const AUTO_DEFAULT_AT: u32 = 4 * 60;
 pub const AUTO_DEFAULT_COUNT: u32 = 1_000;
 
-const COMMANDS: &[&str] = &["حذف", "پاکسازی", "پاک کن"];
+pub const COMMANDS: &[&str] = &["حذف", "پاکسازی", "پاک کن"];
 
 const MAX: i32 = 1000;
 

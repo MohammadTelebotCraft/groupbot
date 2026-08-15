@@ -7,9 +7,9 @@ use grammers_client::session::types::{PeerId, PeerRef};
 use super::Ctx;
 
 const START: &[&str] = &["ورود کلینر", "لاگین کلینر", "کلینر"];
-const ADD: &[&str] = &["افزودن کلینر", "اضافه کردن کلینر", "نصب کلینر"];
-const WIPE: &[&str] = &["حذف پیام", "حذف پیام ها", "پاکسازی پیام"];
-const SWEEP: &[&str] = &["پاکسازی", "پاک کردن همه"];
+pub const ADD: &[&str] = &["افزودن کلینر", "اضافه کردن کلینر", "نصب کلینر"];
+pub const WIPE: &[&str] = &["حذف پیام", "حذف پیام ها", "پاکسازی پیام"];
+pub const SWEEP: &[&str] = &["پاکسازی", "پاک کردن همه"];
 
 const SWEEP_MAX: usize = 3_000;
 

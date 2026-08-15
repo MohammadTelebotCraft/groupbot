@@ -2,8 +2,8 @@ use grammers_client::message::Message;
 
 use super::{Ctx};
 
-const ADD: &[&str] = &["ویژه", "افزودن ویژه", "تنظیم ویژه"];
-const REMOVE: &[&str] = &["حذف ویژه", "لغو ویژه"];
+pub const ADD: &[&str] = &["ویژه", "افزودن ویژه", "تنظیم ویژه"];
+pub const REMOVE: &[&str] = &["حذف ویژه", "لغو ویژه"];
 
 pub const PREFIX: &str = "vip:";
 

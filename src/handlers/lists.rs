@@ -5,7 +5,7 @@ use grammers_client::tl;
 use super::restrict::{self, Action};
 use super::{Ctx, esc, filters, join, vip};
 
-const SHOW: &[(&str, Kind)] = &[
+pub const SHOW: &[(&str, Kind)] = &[
     ("لیست بن", Kind::Ban),
     ("لیست سیک", Kind::Ban),
     ("لیست سکوت", Kind::Mute),
@@ -16,7 +16,7 @@ const SHOW: &[(&str, Kind)] = &[
     ("لیست معاف", Kind::Exempt),
 ];
 
-const CLEAR: &[(&str, Kind)] = &[
+pub const CLEAR: &[(&str, Kind)] = &[
     ("پاکسازی لیست بن", Kind::Ban),
     ("پاکسازی لیست سیک", Kind::Ban),
     ("پاکسازی لیست سکوت", Kind::Mute),

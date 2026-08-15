@@ -4,7 +4,7 @@ use grammers_client::message::{InputMessage, Message};
 
 use super::Ctx;
 
-const COMMANDS: &[&str] = &["پینگ", "ping", "وضعیت ربات", "سرعت"];
+pub const COMMANDS: &[&str] = &["پینگ", "ping", "وضعیت ربات", "سرعت"];
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     if !COMMANDS.contains(&message.text().trim()) {

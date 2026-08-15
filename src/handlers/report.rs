@@ -4,7 +4,7 @@ use grammers_client::update::CallbackQuery;
 
 use super::{Ctx, esc, name_of};
 
-const COMMANDS: &[&str] = &["گزارش", "ریپورت", "report", "!report"];
+pub const COMMANDS: &[&str] = &["گزارش", "ریپورت", "report", "!report"];
 
 const ANCHOR: &str = "\u{2063}";
 

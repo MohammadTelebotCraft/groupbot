@@ -10,6 +10,7 @@ pub mod config;
 pub mod extras;
 pub mod filters;
 pub mod flood;
+pub mod help;
 pub mod join;
 pub mod limits;
 pub mod lists;
@@ -688,7 +689,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
     if message.peer_id().kind() == PeerKind::User {
         let _ = cleaner::take_password(ctx, message).await
             || config::start(ctx, message).await
-            || config::help(message).await
+            || config::help(ctx, message).await
             || cleaner::handle(ctx, message).await
             || panel::handle_private(ctx, message).await;
         return;
@@ -1209,6 +1210,7 @@ mod tests {
             include_str!("extras.rs"),
             include_str!("filters.rs"),
             include_str!("flood.rs"),
+            include_str!("help.rs"),
             include_str!("limits.rs"),
             include_str!("lists.rs"),
             include_str!("locks.rs"),

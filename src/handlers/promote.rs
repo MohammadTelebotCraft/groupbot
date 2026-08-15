@@ -6,10 +6,10 @@ use grammers_client::update::CallbackQuery;
 
 use super::{Ctx, bot_admin_key, esc, is_owner, sender_is_creator};
 
-const COMMANDS: &[&str] = &["افزودن ادمین", "ادمین کن", "اضافه کردن ادمین"];
-const DEMOTE: &[&str] = &["حذف ادمین", "عزل ادمین", "برکناری ادمین"];
-const TAG: &[&str] = &["تنظیم تگ", "تنظیم مقام"];
-const TAG_CLEAR: &[&str] = &["حذف تگ", "حذف مقام"];
+pub const COMMANDS: &[&str] = &["افزودن ادمین", "ادمین کن", "اضافه کردن ادمین"];
+pub const DEMOTE: &[&str] = &["حذف ادمین", "عزل ادمین", "برکناری ادمین"];
+pub const TAG: &[&str] = &["تنظیم تگ", "تنظیم مقام"];
+pub const TAG_CLEAR: &[&str] = &["حذف تگ", "حذف مقام"];
 
 const TAG_MAX: usize = 16;
 

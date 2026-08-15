@@ -13,8 +13,8 @@ pub const EVEN_ADMINS: &str = "bot_even_admins";
 
 pub const ALLOWED: &str = "botok:";
 
-const ALLOW: &[&str] = &["ربات مجاز", "افزودن ربات مجاز"];
-const DISALLOW: &[&str] = &["حذف ربات مجاز", "لغو ربات مجاز"];
+pub const ALLOW: &[&str] = &["ربات مجاز", "افزودن ربات مجاز"];
+pub const DISALLOW: &[&str] = &["حذف ربات مجاز", "لغو ربات مجاز"];
 
 pub fn allow_key(user: i64) -> String {
     format!("{ALLOWED}{user}")

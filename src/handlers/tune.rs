@@ -2,7 +2,7 @@ use grammers_client::message::Message;
 
 use super::{Ctx, betrayal, captcha, flood, numbers_in, warns};
 
-const SETTINGS: &[(&str, &str)] = &[
+pub const SETTINGS: &[(&str, &str)] = &[
     ("اخطار", "warns"),
     ("احراز", "captcha"),
     ("احراز هویت", "captcha"),
@@ -11,7 +11,7 @@ const SETTINGS: &[(&str, &str)] = &[
     ("اعلان", "notice"),
 ];
 
-const COMMANDS: &[&str] = &["تنظیم", "ست"];
+pub const COMMANDS: &[&str] = &["تنظیم", "ست"];
 
 pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
     let text = view.digits();

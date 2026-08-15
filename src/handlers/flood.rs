@@ -43,9 +43,9 @@ pub async fn set(ctx: &Ctx, chat: i64, key: &str, value: u32) {
     ctx.settings.set_value(chat, key, &value.to_string()).await;
 }
 
-pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
-    const COMMANDS: &[&str] = &["ضد رگبار", "ضدرگبار", "ضد فلاد"];
+pub const COMMANDS: &[&str] = &["ضد رگبار", "ضدرگبار", "ضد فلاد"];
 
+pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
     let text = view.digits();
     let Some(rest) = COMMANDS.iter().find_map(|command| {
         let rest = text.strip_prefix(command)?;

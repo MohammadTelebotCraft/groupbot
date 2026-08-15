@@ -4,13 +4,13 @@ use grammers_client::update::CallbackQuery;
 use super::locks::LOCKS;
 use super::style::{Colour, choice, data as coloured, toggle};
 use super::{
-    Ctx, answers, betrayal, captcha, flood, join, limits, lists, log, notice, raid,
+    Ctx, answers, betrayal, captcha, flood, help, join, limits, lists, log, notice, raid,
     setting, strict, tempmedia, warns, welcome,
 };
 
-const OPEN: &[&str] = &["پنل", "تنظیمات", "پنل ربات"];
+pub const OPEN: &[&str] = &["پنل", "تنظیمات", "پنل ربات"];
 
-const TO_PRIVATE: &[&str] = &["پنل پیوی", "پنل پی وی", "پنل خصوصی"];
+pub const TO_PRIVATE: &[&str] = &["پنل پیوی", "پنل پی وی", "پنل خصوصی"];
 
 const ROOT_TITLE: &str = "<b>پنل مدیریت</b>\n\nبخشی را باز کنید.";
 
@@ -173,12 +173,12 @@ fn rows_for(ctx: &Ctx, chat: i64, opener: i64, id: &str) -> Vec<Vec<Button>> {
     }
 }
 
-fn built(ctx: &Ctx, chat: i64, opener: i64, ids: &[&str], back: &str) -> ReplyMarkup {
+fn built(ctx: &Ctx, chat: i64, opener: i64, ids: &[&str], back: &str, here: &str) -> ReplyMarkup {
     let mut rows: Vec<Vec<Button>> = Vec::new();
     for id in ids {
         rows.extend(rows_for(ctx, chat, opener, id));
     }
-    rows.push(vec![Button::data("‹ بازگشت", payload(opener, chat, back))]);
+    rows.push(back_row(opener, chat, back, here));
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -231,8 +231,105 @@ fn parse_number(text: &str) -> Option<u32> {
     text.parse().ok()
 }
 
+const PAGES: &[&str] = &[
+    "root", "locks", "adv", "sec", "msg", "tm", "ls", "s", "rd", "sp", "bt", "fl",
+    "wn", "cp", "nt", "an", "wc", "ng", "sl", "jn", "ad", "gp", "gr", "lg", "dr",
+    "ap", "tmed", "lim", "close", "page", "in", "on", "off", "ng_toggle", "ap_toggle",
+    "dr_toggle", "dr_now", "lg_off", "jn_off", "wc_off",
+];
+
+pub fn is_page(action: &str) -> bool {
+    PAGES.contains(&action)
+}
+
 fn payload(opener: i64, chat: i64, action: &str) -> Vec<u8> {
     format!("p:{opener}:{chat}:{action}").into_bytes()
+}
+
+fn help_payload(opener: i64, chat: i64, topic: &str) -> Vec<u8> {
+    format!("h:{opener}:{chat}:{topic}").into_bytes()
+}
+
+fn back_row(opener: i64, chat: i64, back: &str, here: &str) -> Vec<Button> {
+    let mut row = vec![Button::data("‹ بازگشت", payload(opener, chat, back))];
+    if help::find(here).is_some() {
+        row.push(Button::data(
+            "؟  راهنما",
+            help_payload(opener, chat, here),
+        ));
+    }
+    row
+}
+
+pub async fn on_help(ctx: &Ctx, query: &CallbackQuery, payload_text: &str) {
+    let mut parts = payload_text.splitn(3, ':');
+    let (Some(opener), Some(chat), Some(topic)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return;
+    };
+    let (Ok(opener), Ok(chat)) = (opener.parse::<i64>(), chat.parse::<i64>()) else {
+        return;
+    };
+    if query.sender_id().bare_id() != Some(opener) {
+        let _ = query
+            .answer()
+            .alert("این پنل را شخص دیگری باز کرده است. خودتان «پنل» را بفرستید.")
+            .send()
+            .await;
+        return;
+    }
+    let _ = ctx;
+
+    if topic == help::INDEX_ID {
+        let _ = query
+            .answer()
+            .edit(
+                InputMessage::new()
+                    .html(help::index())
+                    .reply_markup(index_markup(opener, chat)),
+            )
+            .await;
+        return;
+    }
+
+    let Some(found) = help::find(topic) else {
+        return;
+    };
+
+    let back = match is_page(topic) {
+        true => payload(opener, chat, topic),
+        false => help_payload(opener, chat, help::INDEX_ID),
+    };
+    let _ = query
+        .answer()
+        .edit(
+            InputMessage::new()
+                .html(help::page(found))
+                .reply_markup(ReplyMarkup::from_buttons(&[vec![Button::data(
+                    "‹ بازگشت",
+                    back,
+                )]])),
+        )
+        .await;
+}
+
+pub fn index_markup(opener: i64, chat: i64) -> ReplyMarkup {
+    let mut rows: Vec<Vec<Button>> = help::INDEX
+        .chunks(2)
+        .map(|pair| {
+            pair.iter()
+                .filter_map(|id| help::find(id))
+                .map(|topic| {
+                    Button::data(
+                        format!("{}  {}", topic.icon, topic.title),
+                        help_payload(opener, chat, topic.id),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    rows.push(vec![Button::data("بستن", payload(opener, chat, "close"))]);
+    ReplyMarkup::from_buttons(&rows)
 }
 
 pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
@@ -578,7 +675,10 @@ fn root_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
         )],
         vec![Button::data("⚙️  تنظیمات پیشرفته  ›", payload(opener, chat, "adv"))],
         vec![Button::data("📋  لیست ها  ›", payload(opener, chat, "ls"))],
-        vec![Button::data("بستن", payload(opener, chat, "close"))],
+        vec![
+            Button::data("؟  راهنما", help_payload(opener, chat, help::INDEX_ID)),
+            Button::data("بستن", payload(opener, chat, "close")),
+        ],
     ])
 }
 
@@ -596,7 +696,7 @@ fn lists_markup(chat: i64, opener: i64) -> ReplyMarkup {
             Button::data("🎫  لیست معاف", payload(opener, chat, "l:free")),
             Button::data("💬  لیست پاسخ", payload(opener, chat, "l:answer")),
         ],
-        vec![Button::data("‹ بازگشت", payload(opener, chat, "root"))],
+        back_row(opener, chat, "root", "ls"),
     ])
 }
 
@@ -612,7 +712,7 @@ fn raid_title(ctx: &Ctx, chat: i64) -> String {
 }
 
 fn raid_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
-    built(ctx, chat, opener, &["rd_on", "rd_lim", "rd_win", "rd_time"], "sec")
+    built(ctx, chat, opener, &["rd_on", "rd_lim", "rd_win", "rd_time"], "sec", "rd")
 }
 
 fn strict_causes(ctx: &Ctx, chat: i64) -> Vec<(&'static str, &'static str)> {
@@ -667,7 +767,7 @@ fn strict_picks_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
                 .collect()
         })
         .collect();
-    rows.push(vec![Button::data("‹ بازگشت", payload(opener, chat, "s"))]);
+    rows.push(back_row(opener, chat, "s", "sp"));
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -702,7 +802,7 @@ fn strict_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
     for id in ["s_lim", "s_time", "s_act"] {
         rows.extend(rows_for(ctx, chat, opener, id));
     }
-    rows.push(vec![Button::data("\u{2039} بازگشت", payload(opener, chat, "root"))]);
+    rows.push(back_row(opener, chat, "root", "s"));
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -721,7 +821,7 @@ fn betrayal_title(ctx: &Ctx, chat: i64) -> String {
 }
 
 fn betrayal_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
-    built(ctx, chat, opener, &["bt_on", "bt_lim", "bt_win", "bt_act"], "sec")
+    built(ctx, chat, opener, &["bt_on", "bt_lim", "bt_win", "bt_act"], "sec", "bt")
 }
 
 fn flood_title(ctx: &Ctx, chat: i64) -> String {
@@ -740,7 +840,7 @@ fn flood_title(ctx: &Ctx, chat: i64) -> String {
 }
 
 fn flood_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
-    built(ctx, chat, opener, &["fl_on", "fl_lim", "fl_win", "fl_act"], "sec")
+    built(ctx, chat, opener, &["fl_on", "fl_lim", "fl_win", "fl_act"], "sec", "fl")
 }
 
 fn night_title(ctx: &Ctx, chat: i64) -> String {
@@ -786,7 +886,7 @@ fn night_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             payload(opener, chat, "ng_toggle"),
             on,
         )],
-        vec![Button::data("‹ بازگشت", payload(opener, chat, "tm"))],
+        back_row(opener, chat, "tm", "ng"),
     ])
 }
 
@@ -871,7 +971,7 @@ fn slow_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
                 .collect()
         })
         .collect();
-    rows.push(vec![Button::data("‹ بازگشت", payload(opener, chat, "tm"))]);
+    rows.push(back_row(opener, chat, "tm", "sl"));
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -923,7 +1023,7 @@ fn welcome_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             payload(opener, chat, "wc_off"),
             Colour::Danger,
         )],
-        vec![Button::data("‹ بازگشت", payload(opener, chat, "msg"))],
+        back_row(opener, chat, "msg", "wc"),
     ])
 }
 
@@ -989,7 +1089,7 @@ fn auto_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             .collect()
     }));
     rows.push(custom_row(opener, chat, "apc", count));
-    rows.push(vec![Button::data("‹ بازگشت", payload(opener, chat, "tm"))]);
+    rows.push(back_row(opener, chat, "tm", "ap"));
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -1036,7 +1136,7 @@ fn report_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
         "📤  ارسال آزمایشی",
         payload(opener, chat, "dr_now"),
     )]);
-    rows.push(vec![Button::data("‹ بازگشت", payload(opener, chat, "tm"))]);
+    rows.push(back_row(opener, chat, "tm", "dr"));
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -1056,7 +1156,7 @@ pub fn rights_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             )]
         })
         .collect();
-    rows.push(vec![Button::data("‹ بازگشت", payload(opener, chat, "adv"))]);
+    rows.push(back_row(opener, chat, "adv", "gr"));
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -1079,7 +1179,7 @@ fn log_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             Colour::Danger,
         )]);
     }
-    rows.push(vec![Button::data("‹ بازگشت", payload(opener, chat, "adv"))]);
+    rows.push(back_row(opener, chat, "adv", "lg"));
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -1096,7 +1196,7 @@ fn prompt_title(ctx: &Ctx, chat: i64) -> String {
 }
 
 fn prompt_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
-    built(ctx, chat, opener, &["gpe", "gpt"], "sec")
+    built(ctx, chat, opener, &["gpe", "gpt"], "sec", "gp")
 }
 
 fn adds_title(ctx: &Ctx, chat: i64) -> String {
@@ -1116,7 +1216,7 @@ fn adds_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
         Button::data("\u{1F4E3}  اعلان شرط", payload(opener, chat, "gp")),
         Button::data("\u{1F3AB}  لیست معاف", payload(opener, chat, "l:free")),
     ]);
-    rows.push(vec![Button::data("\u{2039} بازگشت", payload(opener, chat, "sec"))]);
+    rows.push(back_row(opener, chat, "sec", "ad"));
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -1149,7 +1249,7 @@ fn join_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             Button::data("📣  اعلان شرط", payload(opener, chat, "gp")),
             Button::data("🎫  لیست معاف", payload(opener, chat, "l:free")),
         ],
-        vec![Button::data("‹ بازگشت", payload(opener, chat, "sec"))],
+        back_row(opener, chat, "sec", "jn"),
     ])
 }
 
@@ -1166,7 +1266,7 @@ fn answers_title(ctx: &Ctx, chat: i64) -> String {
 fn answers_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
     let mut rows = rows_for(ctx, chat, opener, "an_act");
     rows.push(vec![Button::data("لیست پاسخ ها", payload(opener, chat, "l:answer"))]);
-    rows.push(vec![Button::data("\u{2039} بازگشت", payload(opener, chat, "msg"))]);
+    rows.push(back_row(opener, chat, "msg", "an"));
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -1186,7 +1286,7 @@ fn notice_title(ctx: &Ctx, chat: i64) -> String {
 }
 
 fn notice_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
-    built(ctx, chat, opener, &["nt_on", "nt_t"], "msg")
+    built(ctx, chat, opener, &["nt_on", "nt_t"], "msg", "nt")
 }
 
 fn captcha_title(ctx: &Ctx, chat: i64) -> String {
@@ -1205,7 +1305,7 @@ fn captcha_title(ctx: &Ctx, chat: i64) -> String {
 }
 
 fn captcha_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
-    built(ctx, chat, opener, &["cp_on", "cp_t", "cp_n", "cp_act"], "sec")
+    built(ctx, chat, opener, &["cp_on", "cp_t", "cp_n", "cp_act"], "sec", "cp")
 }
 
 fn warns_title(ctx: &Ctx, chat: i64) -> String {
@@ -1219,7 +1319,7 @@ fn warns_title(ctx: &Ctx, chat: i64) -> String {
 }
 
 fn warns_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
-    built(ctx, chat, opener, &["wn_lim", "wn_act"], "sec")
+    built(ctx, chat, opener, &["wn_lim", "wn_act"], "sec", "wn")
 }
 
 fn section(label: &str, target: Vec<u8>, on: bool) -> Button {
@@ -1295,7 +1395,7 @@ fn limits_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             })
             .collect()
     }));
-    rows.push(vec![Button::data("‹ بازگشت", payload(opener, chat, "adv"))]);
+    rows.push(back_row(opener, chat, "adv", "lim"));
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -1339,7 +1439,7 @@ fn security_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             ctx.settings.is_locked(chat, betrayal::MODE),
         )],
         vec![Button::data("⚠️  اخطار  ›", payload(opener, chat, "wn"))],
-        vec![Button::data("‹ بازگشت", payload(opener, chat, "adv"))],
+        back_row(opener, chat, "adv", "sec"),
     ])
 }
 
@@ -1368,7 +1468,7 @@ fn messages_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             payload(opener, chat, "rk_on"),
             ctx.settings.is_locked(chat, super::stats::RANKS),
         )],
-        vec![Button::data("‹ بازگشت", payload(opener, chat, "adv"))],
+        back_row(opener, chat, "adv", "msg"),
     ])
 }
 
@@ -1393,7 +1493,7 @@ fn timing_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             payload(opener, chat, "tmed"),
             ctx.settings.is_locked(chat, tempmedia::MODE),
         )],
-        vec![Button::data("‹ بازگشت", payload(opener, chat, "adv"))],
+        back_row(opener, chat, "adv", "tm"),
     ])
 }
 
@@ -1445,7 +1545,7 @@ fn temp_media_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
     }));
     rows.extend(rows_for(ctx, chat, opener, "tmed_min"));
     rows.extend(rows_for(ctx, chat, opener, "tmed_who"));
-    rows.push(vec![Button::data("‹ بازگشت", payload(opener, chat, "tm"))]);
+    rows.push(back_row(opener, chat, "tm", "tmed"));
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -1495,7 +1595,7 @@ fn locks_markup(ctx: &Ctx, chat: i64, opener: i64, page: usize) -> ReplyMarkup {
         coloured("🔒  قفل همه", payload(opener, chat, "on"), Colour::Danger),
         coloured("🔓  باز کردن همه", payload(opener, chat, "off"), Colour::Success),
     ]);
-    rows.push(vec![Button::data("‹ بازگشت", payload(opener, chat, "root"))]);
+    rows.push(back_row(opener, chat, "root", "locks"));
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -1557,13 +1657,6 @@ mod tests {
 
     #[test]
     fn no_lock_key_shadows_a_panel_action() {
-        const PAGES: &[&str] = &[
-            "root", "locks", "adv", "sec", "msg", "tm", "ls", "s", "rd", "sp", "bt", "fl",
-            "wn", "cp", "nt", "an", "wc", "ng", "sl", "jn", "ad", "gp", "gr", "lg", "dr",
-            "ap", "tmed", "lim", "close", "page", "in", "on", "off", "ng_toggle", "ap_toggle",
-            "dr_toggle", "dr_now", "lg_off", "jn_off", "wc_off",
-        ];
-
         for declared in setting::SETTINGS {
             assert!(
                 PAGES.contains(&declared.section),

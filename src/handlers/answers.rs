@@ -6,8 +6,8 @@ pub const PREFIX: &str = "answer:";
 
 pub const AUDIENCE: &str = "answer_audience";
 
-const ADD: &[&str] = &["تنظیم پاسخ", "افزودن پاسخ", "پاسخ"];
-const REMOVE: &[&str] = &["حذف پاسخ", "پاک پاسخ"];
+pub const ADD: &[&str] = &["تنظیم پاسخ", "افزودن پاسخ", "پاسخ"];
+pub const REMOVE: &[&str] = &["حذف پاسخ", "پاک پاسخ"];
 
 const SEPARATOR: char = '|';
 

@@ -31,8 +31,8 @@ pub const RIGHTS: &[Right] = &[
 
 const OPEN_WORDS: &[&str] = &["باز", "آزاد", "روشن"];
 const CLOSED_WORDS: &[&str] = &["بسته", "قفل", "خاموش"];
-const SHOW: &[&str] = &["اختیارات گروه", "اختیارات", "مجوزها", "مجوزهای گروه"];
-const SET: &[&str] = &["اختیار", "مجوز"];
+pub const SHOW: &[&str] = &["اختیارات گروه", "اختیارات", "مجوزها", "مجوزهای گروه"];
+pub const SET: &[&str] = &["اختیار", "مجوز"];
 
 pub fn key_of(right: &str) -> String {
     format!("{PREFIX}{right}")

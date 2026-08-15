@@ -11,9 +11,9 @@ const DEFAULT_LIMIT: u32 = 3;
 pub const LIMIT_RANGE: (u32, u32) = (1, 100);
 pub const LIMIT_PRESETS: &[u32] = &[2, 3, 5, 7, 10];
 
-const WARN: &[&str] = &["اخطار", "وارن"];
-const UNWARN: &[&str] = &["حذف اخطار", "پاک اخطار", "رفع اخطار"];
-const SHOW: &[&str] = &["اخطارها", "لیست اخطار"];
+pub const WARN: &[&str] = &["اخطار", "وارن"];
+pub const UNWARN: &[&str] = &["حذف اخطار", "پاک اخطار", "رفع اخطار"];
+pub const SHOW: &[&str] = &["اخطارها", "لیست اخطار"];
 
 pub fn limit(ctx: &Ctx, chat: i64) -> u32 {
     ctx.settings

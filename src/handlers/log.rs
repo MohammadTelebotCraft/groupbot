@@ -15,8 +15,8 @@ pub const KINDS: &[(&str, &str)] = &[
     ("log_join", "ورود و خروج"),
 ];
 
-const SET: &[&str] = &["تنظیم لاگ", "تنظیم کانال لاگ", "لاگ"];
-const CLEAR: &[&str] = &["حذف لاگ", "خاموش لاگ", "حذف کانال لاگ"];
+pub const SET: &[&str] = &["تنظیم لاگ", "تنظیم کانال لاگ", "لاگ"];
+pub const CLEAR: &[&str] = &["حذف لاگ", "خاموش لاگ", "حذف کانال لاگ"];
 
 pub fn channel(ctx: &Ctx, chat: i64) -> Option<PeerRef> {
     let stored = ctx.settings.value(chat, CHANNEL)?;

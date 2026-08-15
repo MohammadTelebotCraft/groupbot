@@ -6,8 +6,8 @@ use super::{Ctx, esc, name_of};
 
 pub const PREFIX: &str = "filter:";
 
-const ADD: &[&str] = &["فیلتر کلمه", "افزودن فیلتر", "اضافه کردن فیلتر", "فیلتر"];
-const REMOVE: &[&str] = &["حذف فیلتر", "لغو فیلتر"];
+pub const ADD: &[&str] = &["فیلتر کلمه", "افزودن فیلتر", "اضافه کردن فیلتر", "فیلتر"];
+pub const REMOVE: &[&str] = &["حذف فیلتر", "لغو فیلتر"];
 
 const MAX_LEN: usize = 64;
 

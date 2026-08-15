@@ -24,13 +24,13 @@ pub const ADD_REQUIRED: &str = "add_required";
 pub const ADD_PRESETS: &[u32] = &[0, 1, 3, 5, 10, 20];
 pub const ADD_RANGE: (u32, u32) = (0, 1000);
 
-const SET: &[&str] = &["تنظیم عضویت اجباری", "عضویت اجباری"];
-const CLEAR: &[&str] = &["حذف عضویت اجباری", "خاموش عضویت اجباری"];
-const SET_ADD: &[&str] = &["تنظیم اد اجباری", "اد اجباری", "عضوگیری اجباری"];
-const SET_PROMPT: &[&str] = &["تنظیم اعلان شرط", "اعلان شرط"];
-const FREE_ADD: &[&str] = &["معاف", "تنظیم معاف", "افزودن معاف"];
-const FREE_REMOVE: &[&str] = &["حذف معاف", "لغو معاف"];
-const CLEAR_ADD: &[&str] = &["حذف اد اجباری", "خاموش اد اجباری"];
+pub const SET: &[&str] = &["تنظیم عضویت اجباری", "عضویت اجباری"];
+pub const CLEAR: &[&str] = &["حذف عضویت اجباری", "خاموش عضویت اجباری"];
+pub const SET_ADD: &[&str] = &["تنظیم اد اجباری", "اد اجباری", "عضوگیری اجباری"];
+pub const SET_PROMPT: &[&str] = &["تنظیم اعلان شرط", "اعلان شرط"];
+pub const FREE_ADD: &[&str] = &["معاف", "تنظیم معاف", "افزودن معاف"];
+pub const FREE_REMOVE: &[&str] = &["حذف معاف", "لغو معاف"];
+pub const CLEAR_ADD: &[&str] = &["حذف اد اجباری", "خاموش اد اجباری"];
 
 pub fn channel(ctx: &Ctx, chat: i64) -> Option<String> {
     ctx.settings

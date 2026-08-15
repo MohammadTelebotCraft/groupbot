@@ -14,7 +14,7 @@ pub enum Action {
 
 use Action::*;
 
-const COMMANDS: &[(&str, Action)] = &[
+pub const COMMANDS: &[(&str, Action)] = &[
     ("حذف سکوت", Unmute),
     ("حذف خفه", Unmute),
     ("حذف بن", Unban),

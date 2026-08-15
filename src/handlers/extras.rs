@@ -10,16 +10,16 @@ pub const NOTE: &str = "note:";
 pub const NIGHT: &str = "night";
 pub const NIGHT_STATE: &str = "night_state";
 
-const SHOW_RULES: &[&str] = &["قوانین", "قانون"];
-const SET_RULES: &[&str] = &["تنظیم قوانین", "تنظیم قانون"];
-const NOTE_CMD: &[&str] = &["یادداشت"];
-const NOTE_CLEAR: &[&str] = &["حذف یادداشت"];
-const PIN: &[&str] = &["سنجاق", "پین"];
-const PIN_QUIET: &[&str] = &["سنجاق بی صدا", "پین بی صدا"];
-const UNPIN: &[&str] = &["حذف سنجاق", "حذف پین", "برداشتن سنجاق"];
-const SLOW: &[&str] = &["اسلوموشن", "اسلومود", "کندی"];
-const NIGHT_CMD: &[&str] = &["قفل شب"];
-const TAG_ALL: &[&str] = &["تگ همه", "منشن همه", "فراخوان", "تگ", "منشن"];
+pub const SHOW_RULES: &[&str] = &["قوانین", "قانون"];
+pub const SET_RULES: &[&str] = &["تنظیم قوانین", "تنظیم قانون"];
+pub const NOTE_CMD: &[&str] = &["یادداشت"];
+pub const NOTE_CLEAR: &[&str] = &["حذف یادداشت"];
+pub const PIN: &[&str] = &["سنجاق", "پین"];
+pub const PIN_QUIET: &[&str] = &["سنجاق بی صدا", "پین بی صدا"];
+pub const UNPIN: &[&str] = &["حذف سنجاق", "حذف پین", "برداشتن سنجاق"];
+pub const SLOW: &[&str] = &["اسلوموشن", "اسلومود", "کندی"];
+pub const NIGHT_CMD: &[&str] = &["قفل شب"];
+pub const TAG_ALL: &[&str] = &["تگ همه", "منشن همه", "فراخوان", "تگ", "منشن"];
 
 const TAG_PER_MESSAGE: usize = 5;
 

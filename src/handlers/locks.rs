@@ -110,7 +110,7 @@ pub const MENTION: &str = "mention";
 pub const BOTCALL: &str = "botcall";
 pub const FORWARD_CHANNEL: &str = "forward_channel";
 pub const FORWARD_USER: &str = "forward_user";
-const STATUS: &[&str] = &["قفل ها", "قفلها", "لیست قفل", "وضعیت قفل"];
+pub const STATUS: &[&str] = &["قفل ها", "قفلها", "لیست قفل", "وضعیت قفل"];
 
 pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_>) -> bool {
     let text = view.text();

@@ -9,9 +9,9 @@ pub const TEXT: &str = "welcome_text";
 
 pub const MEDIA: &str = "welcome_media";
 
-const SET: &[&str] = &["تنظیم خوشامد", "خوشامد", "خوش امد"];
-const CLEAR: &[&str] = &["حذف خوشامد", "خاموش خوشامد"];
-const SHOW: &[&str] = &["نمایش خوشامد", "تست خوشامد"];
+pub const SET: &[&str] = &["تنظیم خوشامد", "خوشامد", "خوش امد"];
+pub const CLEAR: &[&str] = &["حذف خوشامد", "خاموش خوشامد"];
+pub const SHOW: &[&str] = &["نمایش خوشامد", "تست خوشامد"];
 
 const TAGS: &[(&str, &str)] = &[
     ("{نام}", "display name"),
