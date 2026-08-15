@@ -134,12 +134,6 @@ impl ChatState {
             && self.pending_numbers.lock().unwrap().is_empty()
             && self.counts.lock().unwrap().is_empty()
             && self.tallies.lock().unwrap().is_empty()
-            && self.messages.lock().unwrap().is_empty()
-            && self.removals.lock().unwrap().is_empty()
-            && self.members.lock().unwrap().is_empty()
-            && self.adds.lock().unwrap().is_empty()
-            && self.joined.lock().unwrap().is_empty()
-            && self.notices.lock().unwrap().is_empty()
     }
 }
 
@@ -1561,6 +1555,39 @@ mod tests {
 
         state.last_seen.store(now, Ordering::Relaxed);
         assert!(!state.evictable(IDLE, now));
+    }
+
+    #[test]
+    fn stale_cache_entries_do_not_pin_an_idle_chat() {
+        use super::ChatState;
+        use std::time::{Duration, Instant};
+
+        const IDLE: Duration = Duration::from_secs(3600);
+        let now = (IDLE.as_millis() as u64) * 3 / 2;
+
+        let state = ChatState::default();
+
+        state.messages.lock().unwrap().insert(7, vec![Instant::now()]);
+        state.removals.lock().unwrap().insert(7, vec![Instant::now()]);
+        state.members.lock().unwrap().insert(7, Instant::now());
+        state.adds.lock().unwrap().insert(7, (Instant::now(), 1));
+        state.notices.lock().unwrap().insert((2, 7), Instant::now());
+        state.joined.lock().unwrap().insert(1, Vec::new());
+
+        assert!(
+            state.evictable(IDLE, now),
+            "stale windows are caches, not work — they must not pin the chat forever"
+        );
+
+        state.logs.lock().unwrap().push("unsent".to_owned());
+        assert!(!state.evictable(IDLE, now));
+        state.logs.lock().unwrap().clear();
+
+        state.bump("joined");
+        assert!(!state.evictable(IDLE, now), "unflushed counters are work");
+        state.tallies.lock().unwrap().clear();
+
+        assert!(state.evictable(IDLE, now));
     }
 
     #[test]

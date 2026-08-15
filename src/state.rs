@@ -231,18 +231,34 @@ impl Settings {
             .await?;
         drop(conn);
 
-        let rows: Vec<(i64, String, String)> =
-            sqlx::query_as("SELECT chat_id, key, value FROM settings")
-                .fetch_all(&pool)
-                .await?;
+        const PAGE: i64 = 50_000;
 
         let mut cache: HashMap<i64, HashMap<String, String>> = HashMap::new();
         let mut index: HashMap<i64, ChatIndex> = HashMap::new();
-        for (chat, key, value) in rows {
-            if let Some((slot, rest)) = indexed_slot(&key) {
-                index.entry(chat).or_default()[slot].push(rest.into());
+        let (mut at_chat, mut at_key) = (i64::MIN, String::new());
+        loop {
+            let page: Vec<(i64, String, String)> = sqlx::query_as(
+                "SELECT chat_id, key, value FROM settings
+                 WHERE (chat_id, key) > ($1, $2)
+                 ORDER BY chat_id, key LIMIT $3",
+            )
+            .bind(at_chat)
+            .bind(&at_key)
+            .bind(PAGE)
+            .fetch_all(&pool)
+            .await?;
+
+            let Some((last_chat, last_key, _)) = page.last() else {
+                break;
+            };
+            (at_chat, at_key) = (*last_chat, last_key.clone());
+
+            for (chat, key, value) in page {
+                if let Some((slot, rest)) = indexed_slot(&key) {
+                    index.entry(chat).or_default()[slot].push(rest.into());
+                }
+                cache.entry(chat).or_default().insert(key, value);
             }
-            cache.entry(chat).or_default().insert(key, value);
         }
 
         Ok(Self {
