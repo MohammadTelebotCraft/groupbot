@@ -31,8 +31,8 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-        ctx.settings.set_value(chat, TEXT, "").await;
-        ctx.settings.set_value(chat, MEDIA, "").await;
+        ctx.settings.set(chat, TEXT, false).await;
+        ctx.settings.set(chat, MEDIA, false).await;
         let _ = message.reply("✗ خوشامد خاموش شد.").await;
         return true;
     }

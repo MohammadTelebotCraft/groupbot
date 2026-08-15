@@ -88,7 +88,11 @@ pub async fn set_required_adds(ctx: &Ctx, chat: i64, count: u64) {
 }
 
 pub async fn set_channel(ctx: &Ctx, chat: i64, name: &str) {
-    ctx.settings.set_value(chat, CHANNEL, name).await;
+    if name.is_empty() {
+        ctx.settings.set(chat, CHANNEL, false).await;
+    } else {
+        ctx.settings.set_value(chat, CHANNEL, name).await;
+    }
     sync_gate(ctx, chat).await;
 }
 
@@ -98,7 +102,12 @@ async fn sync_gate(ctx: &Ctx, chat: i64) {
 }
 
 pub async fn prime(ctx: &Ctx) {
-    for chat in ctx.settings.chats() {
+    let mut gated = ctx.settings.chats_with(CHANNEL).await;
+    gated.extend(ctx.settings.chats_with(ADD_REQUIRED).await);
+    gated.extend(ctx.settings.flagged_with(GATE).await);
+    gated.sort_unstable();
+    gated.dedup();
+    for chat in gated {
         sync_gate(ctx, chat).await;
     }
 }

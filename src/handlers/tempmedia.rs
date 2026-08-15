@@ -101,29 +101,38 @@ pub async fn watch(ctx: &Ctx, message: &Message, view: &View<'_>) {
     );
 }
 
-pub async fn sweep(ctx: &Ctx) {
+pub async fn sweep(ctx: &std::sync::Arc<Ctx>) {
     let writes = ctx.take_pending_writes();
     if !writes.is_empty() {
         ctx.settings.save_pending(writes).await;
     }
 
-    for (chat, ids) in ctx.take_due_media() {
-        let Some(chat_ref) = ctx.chat_ref(chat) else {
-            continue;
-        };
-        for chunk in ids.chunks(CHUNK) {
-            if let Err(e) = ctx.client.delete_messages(chat_ref, chunk).await {
-                eprintln!("temp media: could not delete in {chat}: {e}");
-                break;
-            }
-        }
+    let owner = std::sync::Arc::clone(ctx);
+    super::bounded(
+        ctx.take_due_media(),
+        super::FLEET_CONCURRENCY,
+        move |(chat, ids)| {
+            let ctx = std::sync::Arc::clone(&owner);
+            async move {
+                let Some(chat_ref) = ctx.chat_ref(chat) else {
+                    return;
+                };
+                for chunk in ids.chunks(CHUNK) {
+                    if let Err(e) = ctx.client.delete_messages(chat_ref, chunk).await {
+                        eprintln!("temp media: could not delete in {chat}: {e}");
+                        break;
+                    }
+                }
 
-        ctx.settings.drop_pending(chat, &ids).await;
-    }
+                ctx.settings.drop_pending(chat, &ids).await;
+            }
+        },
+    )
+    .await;
 }
 
 pub async fn restore(ctx: &Ctx) {
-    let rows = ctx.settings.load_pending().await;
+    let rows = ctx.settings.load_pending(unix_now()).await;
     if rows.is_empty() {
         return;
     }

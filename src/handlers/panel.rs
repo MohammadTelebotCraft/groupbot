@@ -89,17 +89,21 @@ pub async fn handle_private(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
-    let mut mine: Vec<(i64, String)> = Vec::new();
-    for chat in ctx.settings.chats() {
-        if super::owner(ctx, chat) != Some(user) && !super::is_bot_admin(ctx, chat, user) {
-            continue;
-        }
-        let name = ctx
-            .settings
-            .value(chat, super::TITLE)
-            .unwrap_or_else(|| chat.to_string());
-        mine.push((chat, name));
-    }
+    const PAGE: usize = 20;
+
+    let found = ctx.settings.panels_for(user, PAGE as i64 + 1).await;
+    let more = found.len() > PAGE;
+    let mine: Vec<(i64, String)> = found
+        .into_iter()
+        .take(PAGE)
+        .map(|chat| {
+            let name = ctx
+                .settings
+                .value(chat, super::TITLE)
+                .unwrap_or_else(|| chat.to_string());
+            (chat, name)
+        })
+        .collect();
 
     if mine.is_empty() {
         let _ = message
@@ -110,7 +114,6 @@ pub async fn handle_private(ctx: &Ctx, message: &Message) -> bool {
 
     let rows: Vec<Vec<Button>> = mine
         .iter()
-        .take(20)
         .map(|(chat, name)| {
             vec![Button::data(
                 format!("{}  ›", super::esc(name)),
@@ -118,12 +121,16 @@ pub async fn handle_private(ctx: &Ctx, message: &Message) -> bool {
             )]
         })
         .collect();
+    let shown = if more {
+        format!("{}+", mine.len())
+    } else {
+        mine.len().to_string()
+    };
     let _ = message
         .reply(
             InputMessage::new()
                 .html(format!(
-                    "<b>پنل مدیریت</b>\n\nگروه را انتخاب کنید ({}).",
-                    mine.len()
+                    "<b>پنل مدیریت</b>\n\nگروه را انتخاب کنید ({shown})."
                 ))
                 .reply_markup(ReplyMarkup::from_buttons(&rows)),
         )
@@ -580,7 +587,7 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
             (log::status(ctx, chat), log_markup(ctx, chat, opener))
         }
         "lg_off" => {
-            ctx.settings.set_value(chat, log::CHANNEL, "").await;
+            ctx.settings.set(chat, log::CHANNEL, false).await;
             ctx.settings.set(chat, log::ON, false).await;
             (log::status(ctx, chat), log_markup(ctx, chat, opener))
         }
@@ -589,8 +596,8 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
             (join_title(ctx, chat), join_markup(ctx, chat, opener))
         }
         "wc_off" => {
-            ctx.settings.set_value(chat, welcome::TEXT, "").await;
-            ctx.settings.set_value(chat, welcome::MEDIA, "").await;
+            ctx.settings.set(chat, welcome::TEXT, false).await;
+            ctx.settings.set(chat, welcome::MEDIA, false).await;
             (welcome_title(ctx, chat), welcome_markup(ctx, chat, opener))
         }
         pick if pick.starts_with("sp:") => {

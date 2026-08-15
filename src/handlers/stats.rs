@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use grammers_client::message::{InputMessage, Message};
 use grammers_client::session::types::PeerId;
 
@@ -29,8 +31,6 @@ pub fn week_of(day: u64) -> u64 {
 pub fn month_of(day: u64) -> u64 {
     day / 30
 }
-
-pub const TALLY: &str = "tally:";
 
 pub const DELETED: &str = "deleted";
 pub const JOINED: &str = "joined";
@@ -326,9 +326,8 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
             )
         }
         "hours" => {
-            let counts: Vec<u64> = (0..24)
-                .map(|hour| tally(ctx, chat, &format!("h{hour}"), day))
-                .collect();
+            let t = ctx.settings.tallies(chat, day).await;
+            let counts: Vec<u64> = HOURS.iter().map(|hour| of(&t, hour)).collect();
             let peak = counts.iter().copied().max().unwrap_or(0);
             let busiest = counts
                 .iter()
@@ -359,9 +358,10 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
             )
         }
         "kinds" => {
+            let t = ctx.settings.tallies(chat, day).await;
             let counts: Vec<(&str, u64)> = KINDS
                 .iter()
-                .map(|(key, label)| (*label, tally(ctx, chat, key, day)))
+                .map(|(key, label)| (*label, of(&t, key)))
                 .collect();
             let total: u64 = counts.iter().map(|(_, count)| count).sum::<u64>().max(1);
             let lines = counts
@@ -382,6 +382,7 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
         }
         "members" => {
             let adds = ctx.settings.board(chat, Period::Adds, 0, BOARD).await;
+            let t = ctx.settings.tallies(chat, day).await;
             format!(
                 "{head} › <b>اعضا</b>\n\n\
                  پیوستن امروز · <b>{}</b>\n\
@@ -389,38 +390,44 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
                  احراز هویت موفق · <b>{}</b>\n\
                  احراز هویت ناموفق · <b>{}</b>\n\n\
                  <b>بیشترین عضوگیری</b>\n{}",
-                tally(ctx, chat, JOINED, day),
-                tally(ctx, chat, LEFT, day),
-                tally(ctx, chat, CAPTCHA_PASSED, day),
-                tally(ctx, chat, CAPTCHA_FAILED, day),
+                of(&t, JOINED),
+                of(&t, LEFT),
+                of(&t, CAPTCHA_PASSED),
+                of(&t, CAPTCHA_FAILED),
                 leaderboard(&adds)
             )
         }
-        "mod" => format!(
-            "{head} › <b>مدیریت</b> (امروز)\n\n\
-             پیام های حذف شده · <b>{}</b>\n\
-             اخطارها · <b>{}</b>\n\
-             اخراج ها · <b>{}</b>\n\
-             سکوت ها · <b>{}</b>\n\
-             گزارش ها · <b>{}</b>\n\n\
-             قفل های فعال · <b>{}</b> از <b>{}</b>",
-            tally(ctx, chat, DELETED, day),
-            tally(ctx, chat, WARNED, day),
-            tally(ctx, chat, BANNED, day),
-            tally(ctx, chat, MUTED, day),
-            tally(ctx, chat, REPORTED, day),
-            super::locks::LOCKS
-                .iter()
-                .filter(|lock| ctx.settings.is_locked(chat, lock.key))
-                .count(),
-            super::locks::LOCKS.len(),
-        ),
+        "mod" => {
+            let t = ctx.settings.tallies(chat, day).await;
+            format!(
+                "{head} › <b>مدیریت</b> (امروز)\n\n\
+                 پیام های حذف شده · <b>{}</b>\n\
+                 اخطارها · <b>{}</b>\n\
+                 اخراج ها · <b>{}</b>\n\
+                 سکوت ها · <b>{}</b>\n\
+                 گزارش ها · <b>{}</b>\n\n\
+                 قفل های فعال · <b>{}</b> از <b>{}</b>",
+                of(&t, DELETED),
+                of(&t, WARNED),
+                of(&t, BANNED),
+                of(&t, MUTED),
+                of(&t, REPORTED),
+                super::locks::LOCKS
+                    .iter()
+                    .filter(|lock| ctx.settings.is_locked(chat, lock.key))
+                    .count(),
+                super::locks::LOCKS.len(),
+            )
+        }
         _ => {
             let (today_total, today_users) =
                 ctx.settings.board_totals(chat, Period::Today, day).await;
             let (all_total, members) = ctx.settings.board_totals(chat, Period::Total, 0).await;
-            let busiest = (0..24)
-                .map(|hour| (hour, tally(ctx, chat, &format!("h{hour}"), day)))
+            let t = ctx.settings.tallies(chat, day).await;
+            let busiest = HOURS
+                .iter()
+                .enumerate()
+                .map(|(hour, key)| (hour, of(&t, key)))
                 .max_by_key(|(_, count)| *count)
                 .filter(|(_, count)| *count > 0)
                 .map(|(hour, _)| format!("{hour:02}"))
@@ -434,8 +441,8 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
                  شلوغ ترین ساعت · <b>{busiest}</b>\n\
                  حذف شده امروز · <b>{}</b>\n\
                  پیوستن امروز · <b>{}</b>",
-                tally(ctx, chat, DELETED, day),
-                tally(ctx, chat, JOINED, day),
+                of(&t, DELETED),
+                of(&t, JOINED),
             )
         }
     }
@@ -575,31 +582,24 @@ fn kind_of(view: &super::locks::View<'_>) -> &'static str {
     }
 }
 
-pub fn tally(ctx: &Ctx, chat: i64, counter: &str, day: u64) -> u64 {
-    ctx.settings
-        .value(chat, &format!("{TALLY}{counter}"))
-        .and_then(|value| {
-            let (stored, count) = value.split_once('|')?;
-            (stored.parse::<u64>().ok()? == day).then(|| count.parse().ok())?
-        })
-        .unwrap_or(0)
+fn of(tallies: &HashMap<String, u64>, counter: &str) -> u64 {
+    tallies.get(counter).copied().unwrap_or(0)
 }
 
-pub async fn flush(ctx: &Ctx) {
+pub async fn flush(ctx: &std::sync::Arc<Ctx>) {
     let day = today();
-    let mut rows: Vec<(i64, String, String)> = Vec::new();
 
-    for ((chat, counter), added) in ctx.take_tallies() {
-        let total = tally(ctx, chat, counter, day) + added;
-        rows.push((chat, format!("{TALLY}{counter}"), format!("{day}|{total}")));
-    }
+    let (tallies, counts) = ctx.take_stats();
 
+    let rows: Vec<(i64, &'static str, u64)> = tallies
+        .into_iter()
+        .map(|((chat, counter), added)| (chat, counter, added))
+        .collect();
     if !rows.is_empty() {
-        ctx.settings.set_values(rows).await;
+        ctx.settings.add_tallies(&rows, day).await;
     }
 
-    let bumps: Vec<Bump> = ctx
-        .take_counts()
+    let bumps: Vec<Bump> = counts
         .into_iter()
         .map(|((chat, user), (added, name))| Bump {
             chat,
@@ -611,19 +611,32 @@ pub async fn flush(ctx: &Ctx) {
     if bumps.is_empty() {
         return;
     }
-    for bumped in ctx
+
+    let awards = ctx
         .settings
-        .bump(&bumps, day, week_of(day), month_of(day))
-        .await
-    {
-        award_rank(ctx, &bumped).await;
-    }
+        .bump(bumps, day, week_of(day), month_of(day))
+        .await;
+    let owner = std::sync::Arc::clone(ctx);
+    super::bounded(awards, super::FLEET_CAMPAIGNS, move |bumped| {
+        let ctx = std::sync::Arc::clone(&owner);
+        async move { award_rank(&ctx, &bumped).await }
+    })
+    .await;
 }
 
 pub async fn prune(ctx: &Ctx) {
-    match ctx.settings.forget_idle(today(), FORGET_DAYS).await {
-        0 => {}
-        dropped => println!("forgot {dropped} members quiet for {FORGET_DAYS}+ days"),
+    const BATCH: usize = 500;
+
+    let before = today().saturating_sub(FORGET_DAYS) as i64;
+    let chats = ctx.settings.chats();
+    let mut dropped = 0;
+    for batch in chats.chunks(BATCH) {
+        dropped += ctx.settings.forget_idle(batch, before).await;
+
+        tokio::task::yield_now().await;
+    }
+    if dropped > 0 {
+        println!("forgot {dropped} members quiet for {FORGET_DAYS}+ days");
     }
 }
 
@@ -712,14 +725,18 @@ pub async fn set_report_at(ctx: &Ctx, chat: i64, at: Option<u32>) {
                 .set_value(chat, REPORT_AT, &(at % 1440).to_string())
                 .await
         }
-        None => ctx.settings.set_value(chat, REPORT_AT, "").await,
+        None => {
+            ctx.settings.set(chat, REPORT_AT, false).await;
+        }
     }
 }
 
-pub async fn run_daily(ctx: &Ctx) {
+pub async fn run_daily(ctx: &std::sync::Arc<Ctx>) {
     let now = ((local_seconds() % 86_400) / 60) as u32;
     let day = today();
-    for chat in ctx.settings.chats() {
+
+    let mut due = Vec::new();
+    for chat in ctx.settings.chats_with(REPORT_AT).await {
         let Some(at) = report_at(ctx, chat).filter(|at| (0..=2).contains(&now.wrapping_sub(*at)))
         else {
             continue;
@@ -731,26 +748,35 @@ pub async fn run_daily(ctx: &Ctx) {
         let Some(chat_ref) = ctx.chat_ref(chat) else {
             continue;
         };
-
-        let body = daily_body(ctx, chat, day).await;
-        match ctx
-            .client
-            .send_message(chat_ref, InputMessage::new().html(body))
-            .await
-        {
-            Ok(_) => {
-                ctx.settings
-                    .set_value(chat, REPORT_DAY, &day.to_string())
-                    .await;
-            }
-            Err(e) => eprintln!("daily report: {chat}: {e}"),
-        }
+        due.push((chat, chat_ref));
     }
+
+    let owner = std::sync::Arc::clone(ctx);
+    super::bounded(due, super::FLEET_CONCURRENCY, move |(chat, chat_ref)| {
+        let ctx = std::sync::Arc::clone(&owner);
+        async move {
+            let body = daily_body(&ctx, chat, day).await;
+            match ctx
+                .client
+                .send_message(chat_ref, InputMessage::new().html(body))
+                .await
+            {
+                Ok(_) => {
+                    ctx.settings
+                        .set_value(chat, REPORT_DAY, &day.to_string())
+                        .await;
+                }
+                Err(e) => eprintln!("daily report: {chat}: {e}"),
+            }
+        }
+    })
+    .await;
 }
 
 pub async fn daily_body(ctx: &Ctx, chat: i64, day: u64) -> String {
     let ranked = ctx.settings.board(chat, Period::Today, day, BOARD).await;
     let (sent, active) = ctx.settings.board_totals(chat, Period::Today, day).await;
+    let t = ctx.settings.tallies(chat, day).await;
     format!(
         "<b>گزارش امروز</b>\n\n\
          پیام ها · <b>{sent}</b>\n\
@@ -762,12 +788,12 @@ pub async fn daily_body(ctx: &Ctx, chat: i64, day: u64) -> String {
          سکوت · <b>{}</b>\n\
          اخطار · <b>{}</b>\n\n\
          <b>پرچت های امروز</b>\n{}",
-        tally(ctx, chat, JOINED, day),
-        tally(ctx, chat, LEFT, day),
-        tally(ctx, chat, DELETED, day),
-        tally(ctx, chat, BANNED, day),
-        tally(ctx, chat, MUTED, day),
-        tally(ctx, chat, WARNED, day),
+        of(&t, JOINED),
+        of(&t, LEFT),
+        of(&t, DELETED),
+        of(&t, BANNED),
+        of(&t, MUTED),
+        of(&t, WARNED),
         leaderboard(&ranked),
     )
 }

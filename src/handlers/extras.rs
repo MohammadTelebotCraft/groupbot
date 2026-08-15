@@ -78,7 +78,10 @@ pub async fn set_night(ctx: &Ctx, chat: i64, window: Option<(u32, u32)>) {
                 .set_value(chat, NIGHT, &format!("{}|{}", from % 1440, to % 1440))
                 .await
         }
-        None => ctx.settings.set_value(chat, NIGHT, "").await,
+
+        None => {
+            ctx.settings.set(chat, NIGHT, false).await;
+        }
     }
 }
 
@@ -162,7 +165,7 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
             return true;
         };
         if let Some(user) = target.id.bare_id() {
-            ctx.settings.set_value(chat, &format!("{NOTE}{user}"), "").await;
+            ctx.settings.set(chat, &format!("{NOTE}{user}"), false).await;
         }
         let _ = message.reply(format!("✗ یادداشت {name} حذف شد.")).await;
         return true;
@@ -338,15 +341,15 @@ async fn pin(ctx: &Ctx, message: &Message, chat: i64, unpin: bool, quiet: bool) 
     true
 }
 
-pub async fn run_night(ctx: &Ctx) {
-    let now = (super::stats::local_seconds() % 86_400) / 60;
+pub async fn run_night(ctx: &std::sync::Arc<Ctx>) {
+    let now = ((super::stats::local_seconds() % 86_400) / 60) as u32;
 
-    for chat in ctx.settings.chats() {
+    let mut crossing = Vec::new();
+    for chat in ctx.settings.chats_with(NIGHT).await {
         let Some((from, to)) = night(ctx, chat) else {
             continue;
         };
 
-        let now = now as u32;
         let inside = if from <= to {
             (from..to).contains(&now)
         } else {
@@ -359,23 +362,36 @@ pub async fn run_night(ctx: &Ctx) {
         let Some(chat_ref) = ctx.chat_ref(chat) else {
             continue;
         };
-        if super::locks::set_group_lock(ctx, chat_ref, inside).await {
-            ctx.settings
-                .set_value(chat, NIGHT_STATE, if inside { "on" } else { "off" })
-                .await;
-            let _ = ctx
-                .client
-                .send_message(
-                    chat_ref,
-                    InputMessage::new().html(if inside {
-                        "<b>قفل شب</b>\n\nگروه تا صبح بسته شد."
-                    } else {
-                        "<b>قفل شب</b>\n\nگروه باز شد."
-                    }),
-                )
-                .await;
-        }
+        crossing.push((chat, chat_ref, inside));
     }
+
+    let owner = std::sync::Arc::clone(ctx);
+    super::bounded(
+        crossing,
+        super::FLEET_CONCURRENCY,
+        move |(chat, chat_ref, inside)| {
+            let ctx = std::sync::Arc::clone(&owner);
+            async move {
+                if super::locks::set_group_lock(&ctx, chat_ref, inside).await {
+                    ctx.settings
+                        .set_value(chat, NIGHT_STATE, if inside { "on" } else { "off" })
+                        .await;
+                    let _ = ctx
+                        .client
+                        .send_message(
+                            chat_ref,
+                            InputMessage::new().html(if inside {
+                                "<b>قفل شب</b>\n\nگروه تا صبح بسته شد."
+                            } else {
+                                "<b>قفل شب</b>\n\nگروه باز شد."
+                            }),
+                        )
+                        .await;
+                }
+            }
+        },
+    )
+    .await;
 }
 
 async fn tag_all(ctx: &Ctx, message: &Message, wanted: usize) {

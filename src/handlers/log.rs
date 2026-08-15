@@ -108,34 +108,43 @@ pub async fn write(ctx: &Ctx, chat: i64, kind: &str, entry: Entry<'_>) {
     ctx.queue_log(chat, lines.join("\n"));
 }
 
-pub async fn flush(ctx: &Ctx) {
+pub async fn flush(ctx: &std::sync::Arc<Ctx>) {
     const ROOM: usize = 3_500;
 
-    for (chat, entries) in ctx.take_logs() {
-        let Some(target) = channel(ctx, chat) else {
-            continue;
-        };
-        let title = ctx
-            .settings
-            .value(chat, super::TITLE)
-            .unwrap_or_else(|| chat.to_string());
-        let header = format!("<b>لاگ · {}</b> · <code>{chat}</code>", esc(&title));
+    let owner = std::sync::Arc::clone(ctx);
+    super::bounded(
+        ctx.take_logs(),
+        super::FLEET_CONCURRENCY,
+        move |(chat, entries)| {
+            let ctx = std::sync::Arc::clone(&owner);
+            async move {
+                let Some(target) = channel(&ctx, chat) else {
+                    return;
+                };
+                let title = ctx
+                    .settings
+                    .value(chat, super::TITLE)
+                    .unwrap_or_else(|| chat.to_string());
+                let header = format!("<b>لاگ · {}</b> · <code>{chat}</code>", esc(&title));
 
-        let mut batch = String::new();
-        for entry in entries {
-            if !batch.is_empty() && batch.chars().count() + entry.chars().count() > ROOM {
-                send(ctx, target, &header, &batch).await;
-                batch.clear();
+                let mut batch = String::new();
+                for entry in entries {
+                    if !batch.is_empty() && batch.chars().count() + entry.chars().count() > ROOM {
+                        send(&ctx, target, &header, &batch).await;
+                        batch.clear();
+                    }
+                    if !batch.is_empty() {
+                        batch.push_str("\n\n");
+                    }
+                    batch.push_str(&entry);
+                }
+                if !batch.is_empty() {
+                    send(&ctx, target, &header, &batch).await;
+                }
             }
-            if !batch.is_empty() {
-                batch.push_str("\n\n");
-            }
-            batch.push_str(&entry);
-        }
-        if !batch.is_empty() {
-            send(ctx, target, &header, &batch).await;
-        }
-    }
+        },
+    )
+    .await;
 }
 
 async fn send(ctx: &Ctx, target: PeerRef, header: &str, body: &str) {
@@ -262,7 +271,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-        ctx.settings.set_value(chat, CHANNEL, "").await;
+        ctx.settings.set(chat, CHANNEL, false).await;
         ctx.settings.set(chat, ON, false).await;
         let _ = message.reply("✗ کانال لاگ برداشته شد.").await;
         return true;

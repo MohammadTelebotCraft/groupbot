@@ -30,6 +30,10 @@ const TEMP_MEDIA_SWEEP: std::time::Duration = std::time::Duration::from_secs(30)
 
 const STATS_FLUSH: std::time::Duration = std::time::Duration::from_secs(60);
 
+const CHAT_SWEEP: std::time::Duration = std::time::Duration::from_secs(600);
+
+const CHAT_IDLE: std::time::Duration = std::time::Duration::from_secs(3600);
+
 const UPDATES_CHANNEL_CAPACITY: std::num::NonZeroUsize =
     std::num::NonZeroUsize::new(4096).unwrap();
 
@@ -113,7 +117,13 @@ async fn main() -> Result {
         let cleaner_ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
             let mut updates = match user_client
-                .stream_updates(user_updates, UpdatesConfiguration { catch_up: false })
+                .stream_updates(
+                    user_updates,
+                    UpdatesConfiguration {
+                        catch_up: false,
+                        drop_idle_channels: true,
+                    },
+                )
                 .await
             {
                 Ok(updates) => updates,
@@ -214,12 +224,31 @@ async fn main() -> Result {
         }
     });
 
+    let sweep_ctx = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(CHAT_SWEEP);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            match sweep_ctx.evict_idle(CHAT_IDLE) {
+                0 => {}
+                dropped => log::debug!("forgot the state of {dropped} quiet chats"),
+            }
+        }
+    });
+
     println!("running");
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_UPDATES));
     let mut tasks = JoinSet::new();
-    let mut updates = client
 
-        .stream_updates(updates, UpdatesConfiguration { catch_up: true })
+    let mut updates = client
+        .stream_updates(
+            updates,
+            UpdatesConfiguration {
+                catch_up: false,
+                drop_idle_channels: true,
+            },
+        )
         .await?;
     loop {
         while let Some(finished) = tasks.try_join_next() {

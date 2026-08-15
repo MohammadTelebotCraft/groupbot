@@ -13,6 +13,24 @@ const COUNTER_PREFIXES: &[&str] =
 
 type ChatIndex = [Vec<Box<str>>; INDEXED.len()];
 
+const INDEXES: &[&str] = &[
+
+    "CREATE INDEX IF NOT EXISTS pending_due ON pending_deletes (due_at)",
+
+    "CREATE INDEX IF NOT EXISTS settings_bot_admin ON settings (key) WHERE key LIKE 'admin:%'",
+    "CREATE INDEX IF NOT EXISTS settings_owner ON settings (value) WHERE key = 'owner'",
+
+    "CREATE INDEX IF NOT EXISTS settings_night ON settings (chat_id) WHERE key = 'night'",
+    "CREATE INDEX IF NOT EXISTS settings_report_at ON settings (chat_id) WHERE key = 'report_at'",
+    "CREATE INDEX IF NOT EXISTS settings_purge_at ON settings (chat_id) \
+     WHERE key = 'auto_purge_at'",
+    "CREATE INDEX IF NOT EXISTS settings_join_channel ON settings (chat_id) \
+     WHERE key = 'join_channel'",
+    "CREATE INDEX IF NOT EXISTS settings_add_required ON settings (chat_id) \
+     WHERE key = 'add_required'",
+    "CREATE INDEX IF NOT EXISTS settings_gate_on ON settings (chat_id) WHERE key = 'gate_on'",
+];
+
 pub type Idle = (Vec<(i64, String, u64)>, u64);
 
 type BumpedRow = (i64, i64, String, i64, i64);
@@ -118,9 +136,10 @@ fn indexed_slot(key: &str) -> Option<(usize, &str)> {
 impl Settings {
     pub async fn connect(url: &str) -> Result<Self> {
         let pool = PgPoolOptions::new()
-            .max_connections(20)
-            .min_connections(2)
-            .acquire_timeout(std::time::Duration::from_secs(10))
+            .max_connections(32)
+            .min_connections(4)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .idle_timeout(std::time::Duration::from_secs(600))
             .connect(url)
             .await?;
 
@@ -165,6 +184,18 @@ impl Settings {
         .await?;
 
         sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tallies (
+                chat_id BIGINT NOT NULL,
+                counter TEXT   NOT NULL,
+                day     BIGINT NOT NULL DEFAULT 0,
+                count   BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (chat_id, counter)
+            )",
+        )
+        .execute(&mut *conn)
+        .await?;
+
+        sqlx::query(
             "CREATE TABLE IF NOT EXISTS pending_deletes (
                 chat_id    BIGINT NOT NULL,
                 message_id INT    NOT NULL,
@@ -181,22 +212,24 @@ impl Settings {
             .execute(&mut *conn)
             .await?;
         }
+
+        for index in INDEXES {
+            sqlx::query(index).execute(&mut *conn).await?;
+        }
         Self::migrate_counters(&mut conn).await?;
         Self::migrate_per_user(&mut conn).await?;
+        Self::migrate_blank_notes(&mut conn).await?;
+        Self::migrate_tallies(&mut conn).await?;
         sqlx::query("SELECT pg_advisory_unlock($1)")
             .bind(SCHEMA_LOCK)
             .execute(&mut *conn)
             .await?;
         drop(conn);
 
-        let mut load = String::from("SELECT chat_id, key, value FROM settings");
-        for (at, prefix) in COUNTER_PREFIXES.iter().enumerate() {
-            load.push_str(if at == 0 { " WHERE " } else { " AND " });
-            load.push_str("key NOT LIKE '");
-            load.push_str(prefix);
-            load.push_str("%'");
-        }
-        let rows: Vec<(i64, String, String)> = sqlx::query_as(&load).fetch_all(&pool).await?;
+        let rows: Vec<(i64, String, String)> =
+            sqlx::query_as("SELECT chat_id, key, value FROM settings")
+                .fetch_all(&pool)
+                .await?;
 
         let mut cache: HashMap<i64, HashMap<String, String>> = HashMap::new();
         let mut index: HashMap<i64, ChatIndex> = HashMap::new();
@@ -322,6 +355,70 @@ impl Settings {
         Ok(())
     }
 
+    async fn migrate_tallies(conn: &mut sqlx::PgConnection) -> Result<()> {
+        const MARK: &str = "tallies_migrated";
+
+        let done = sqlx::query("SELECT 1 FROM settings WHERE chat_id = 0 AND key = $1")
+            .bind(MARK)
+            .fetch_optional(&mut *conn)
+            .await?;
+        if done.is_some() {
+            return Ok(());
+        }
+
+        let moved = sqlx::query(
+            "INSERT INTO tallies (chat_id, counter, day, count)
+             SELECT chat_id,
+                    substring(key from 7),
+                    CASE WHEN split_part(value, '|', 1) ~ '^[0-9]+$'
+                         THEN split_part(value, '|', 1)::bigint ELSE 0 END,
+                    CASE WHEN split_part(value, '|', 2) ~ '^[0-9]+$'
+                         THEN split_part(value, '|', 2)::bigint ELSE 0 END
+             FROM settings
+             WHERE key LIKE 'tally:%'
+             ON CONFLICT (chat_id, counter) DO NOTHING",
+        )
+        .execute(&mut *conn)
+        .await?;
+        if moved.rows_affected() > 0 {
+            println!("migrated {} tally rows into tallies", moved.rows_affected());
+        }
+
+        sqlx::query("DELETE FROM settings WHERE key LIKE 'tally:%'")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("INSERT INTO settings (chat_id, key) VALUES (0, $1) ON CONFLICT DO NOTHING")
+            .bind(MARK)
+            .execute(&mut *conn)
+            .await?;
+        Ok(())
+    }
+
+    async fn migrate_blank_notes(conn: &mut sqlx::PgConnection) -> Result<()> {
+        const MARK: &str = "notes_migrated";
+
+        let done = sqlx::query("SELECT 1 FROM settings WHERE chat_id = 0 AND key = $1")
+            .bind(MARK)
+            .fetch_optional(&mut *conn)
+            .await?;
+        if done.is_some() {
+            return Ok(());
+        }
+
+        let dropped = sqlx::query("DELETE FROM settings WHERE key LIKE 'note:%' AND value = ''")
+            .execute(&mut *conn)
+            .await?;
+        if dropped.rows_affected() > 0 {
+            println!("dropped {} cleared note rows", dropped.rows_affected());
+        }
+
+        sqlx::query("INSERT INTO settings (chat_id, key) VALUES (0, $1) ON CONFLICT DO NOTHING")
+            .bind(MARK)
+            .execute(&mut *conn)
+            .await?;
+        Ok(())
+    }
+
     pub async fn board(&self, chat: i64, period: Period, stamp: u64, limit: i64) -> Vec<Counter> {
         let count = period.count();
         let sql = match period.stamp() {
@@ -425,50 +522,76 @@ impl Settings {
         (idle, total.max(0) as u64)
     }
 
-    pub async fn bump(&self, bumps: &[Bump], day: u64, week: u64, month: u64) -> Vec<Bumped> {
-        const CHUNK: usize = 1_000;
-        let mut folded = Vec::new();
-        for batch in bumps.chunks(CHUNK) {
-            let (mut chats, mut users, mut names, mut added) =
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            for bump in batch {
-                chats.push(bump.chat);
-                users.push(bump.user);
-                names.push(bump.name.clone());
-                added.push(bump.added as i64);
-            }
-            let rows: Result<Vec<BumpedRow>> = sqlx::query_as(
-                "INSERT INTO counters
-                     (chat_id, user_id, name, total, today, day, week, week_at, month, month_at, seen)
-                 SELECT chat, member, who, added, added, $5, added, $6, added, $7, $5
-                 FROM UNNEST($1::bigint[], $2::bigint[], $3::text[], $4::bigint[])
-                      AS batch(chat, member, who, added)
-                 ON CONFLICT (chat_id, user_id) DO UPDATE SET
-                     name  = COALESCE(NULLIF(EXCLUDED.name, ''), counters.name),
-                     total = counters.total + EXCLUDED.total,
-                     today = CASE WHEN counters.day = EXCLUDED.day
-                                  THEN counters.today ELSE 0 END + EXCLUDED.today,
-                     day   = EXCLUDED.day,
-                     week  = CASE WHEN counters.week_at = EXCLUDED.week_at
-                                  THEN counters.week ELSE 0 END + EXCLUDED.week,
-                     week_at = EXCLUDED.week_at,
-                     month = CASE WHEN counters.month_at = EXCLUDED.month_at
-                                  THEN counters.month ELSE 0 END + EXCLUDED.month,
-                     month_at = EXCLUDED.month_at,
-                     seen  = EXCLUDED.seen
-                 RETURNING chat_id, user_id, name, total, awarded",
-            )
-            .bind(&chats)
-            .bind(&users)
-            .bind(&names)
-            .bind(&added)
-            .bind(day as i64)
-            .bind(week as i64)
-            .bind(month as i64)
-            .fetch_all(&self.pool)
-            .await;
+    pub async fn bump(&self, bumps: Vec<Bump>, day: u64, week: u64, month: u64) -> Vec<Bumped> {
+        const CHUNK: usize = 5_000;
 
-            match rows {
+        const AT_ONCE: usize = 4;
+        const FOLD: &str = "INSERT INTO counters
+                 (chat_id, user_id, name, total, today, day, week, week_at, month, month_at, seen)
+             SELECT chat, member, who, added, added, $5, added, $6, added, $7, $5
+             FROM UNNEST($1::bigint[], $2::bigint[], $3::text[], $4::bigint[])
+                  AS batch(chat, member, who, added)
+             ON CONFLICT (chat_id, user_id) DO UPDATE SET
+                 name  = COALESCE(NULLIF(EXCLUDED.name, ''), counters.name),
+                 total = counters.total + EXCLUDED.total,
+                 today = CASE WHEN counters.day = EXCLUDED.day
+                              THEN counters.today ELSE 0 END + EXCLUDED.today,
+                 day   = EXCLUDED.day,
+                 week  = CASE WHEN counters.week_at = EXCLUDED.week_at
+                              THEN counters.week ELSE 0 END + EXCLUDED.week,
+                 week_at = EXCLUDED.week_at,
+                 month = CASE WHEN counters.month_at = EXCLUDED.month_at
+                              THEN counters.month ELSE 0 END + EXCLUDED.month,
+                 month_at = EXCLUDED.month_at,
+                 seen  = EXCLUDED.seen
+             RETURNING chat_id, user_id, name, total, awarded";
+
+        type Batch = (Vec<i64>, Vec<i64>, Vec<String>, Vec<i64>);
+        let mut batches: Vec<Batch> = Vec::new();
+        let mut batch = Batch::default();
+        for bump in bumps {
+            batch.0.push(bump.chat);
+            batch.1.push(bump.user);
+            batch.2.push(bump.name);
+            batch.3.push(bump.added as i64);
+            if batch.0.len() == CHUNK {
+                batches.push(std::mem::take(&mut batch));
+            }
+        }
+        if !batch.0.is_empty() {
+            batches.push(batch);
+        }
+
+        let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(AT_ONCE));
+        let mut tasks = tokio::task::JoinSet::new();
+        for (chats, users, names, added) in batches {
+            let permit = std::sync::Arc::clone(&permits)
+                .acquire_owned()
+                .await
+                .expect("the bump semaphore is never closed");
+            let pool = self.pool.clone();
+            tasks.spawn(async move {
+                let _permit = permit;
+                let rows: Result<Vec<BumpedRow>> = sqlx::query_as(FOLD)
+                    .bind(&chats)
+                    .bind(&users)
+                    .bind(&names)
+                    .bind(&added)
+                    .bind(day as i64)
+                    .bind(week as i64)
+                    .bind(month as i64)
+                    .fetch_all(&pool)
+                    .await;
+                rows.unwrap_or_else(|e| {
+                    eprintln!("counters: bump of {} rows failed: {e}", chats.len());
+                    Vec::new()
+                })
+            });
+        }
+
+        let mut folded = Vec::new();
+        while let Some(done) = tasks.join_next().await {
+            match done {
                 Ok(rows) => folded.extend(rows.into_iter().map(
                     |(chat, user, name, total, awarded)| Bumped {
                         chat,
@@ -478,7 +601,7 @@ impl Settings {
                         awarded: awarded.max(0) as u64,
                     },
                 )),
-                Err(e) => eprintln!("counters: bump of {} rows failed: {e}", batch.len()),
+                Err(e) => eprintln!("counters: a bump chunk failed to run: {e}"),
             }
         }
         folded
@@ -687,10 +810,31 @@ impl Settings {
         }
     }
 
-    pub async fn load_pending(&self) -> Vec<(i64, i32, i64)> {
-        match sqlx::query_as("SELECT chat_id, message_id, due_at FROM pending_deletes")
-            .fetch_all(&self.pool)
+    pub async fn load_pending(&self, now: i64) -> Vec<(i64, i32, i64)> {
+        const STALE_PENDING: i64 = 2 * 86_400;
+        const MOST: i64 = 200_000;
+
+        let floor = now - STALE_PENDING;
+        match sqlx::query("DELETE FROM pending_deletes WHERE due_at < $1")
+            .bind(floor)
+            .execute(&self.pool)
             .await
+        {
+            Ok(done) if done.rows_affected() > 0 => {
+                println!("pending deletes: dropped {} long overdue", done.rows_affected());
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("pending deletes: could not drop the overdue: {e}"),
+        }
+
+        match sqlx::query_as(
+            "SELECT chat_id, message_id, due_at FROM pending_deletes
+             WHERE due_at >= $1 ORDER BY due_at LIMIT $2",
+        )
+        .bind(floor)
+        .bind(MOST)
+        .fetch_all(&self.pool)
+        .await
         {
             Ok(rows) => rows,
             Err(e) => {
@@ -700,10 +844,10 @@ impl Settings {
         }
     }
 
-    pub async fn forget_idle(&self, day: u64, days: u64) -> u64 {
-        match sqlx::query("DELETE FROM counters WHERE seen > 0 AND $1 - seen >= $2")
-            .bind(day as i64)
-            .bind(days as i64)
+    pub async fn forget_idle(&self, chats: &[i64], before: i64) -> u64 {
+        match sqlx::query("DELETE FROM counters WHERE chat_id = ANY($1) AND seen > 0 AND seen <= $2")
+            .bind(chats)
+            .bind(before)
             .execute(&self.pool)
             .await
         {
@@ -815,42 +959,95 @@ impl Settings {
         found
     }
 
-    pub async fn set_values(&self, rows: Vec<(i64, String, String)>) {
+    pub async fn add_tallies(&self, rows: &[(i64, &'static str, u64)], day: u64) {
         const CHUNK: usize = 1_000;
         for batch in rows.chunks(CHUNK) {
-            {
-                let mut cache = self.cache.write().unwrap();
-                for (chat, key, value) in batch {
-                    cache
-                        .entry(*chat)
-                        .or_default()
-                        .insert(key.clone(), value.clone());
-                }
-            }
-            for (chat, key, _) in batch {
-                self.reindex(*chat, key, true);
-            }
-
-            let (mut chats, mut keys, mut values) = (Vec::new(), Vec::new(), Vec::new());
-            for (chat, key, value) in batch {
+            let (mut chats, mut counters, mut added) = (Vec::new(), Vec::new(), Vec::new());
+            for (chat, counter, count) in batch {
                 chats.push(*chat);
-                keys.push(key.clone());
-                values.push(value.clone());
+                counters.push(*counter);
+                added.push(*count as i64);
             }
             let result = sqlx::query(
-                "INSERT INTO settings (chat_id, key, value)
-                 SELECT * FROM UNNEST($1::bigint[], $2::text[], $3::text[])
-                 ON CONFLICT (chat_id, key) DO UPDATE SET value = EXCLUDED.value",
+                "INSERT INTO tallies (chat_id, counter, day, count)
+                 SELECT chat, name, $4, added
+                 FROM UNNEST($1::bigint[], $2::text[], $3::bigint[]) AS batch(chat, name, added)
+                 ON CONFLICT (chat_id, counter) DO UPDATE SET
+                     count = CASE WHEN tallies.day = EXCLUDED.day
+                                  THEN tallies.count ELSE 0 END + EXCLUDED.count,
+                     day   = EXCLUDED.day",
             )
             .bind(&chats)
-            .bind(&keys)
-            .bind(&values)
+            .bind(&counters)
+            .bind(&added)
+            .bind(day as i64)
             .execute(&self.pool)
             .await;
             if let Err(e) = result {
-                eprintln!("settings batch write failed ({} rows): {e}", batch.len());
+                eprintln!("tallies: batch of {} rows failed: {e}", batch.len());
             }
         }
+    }
+
+    pub async fn tallies(&self, chat: i64, day: u64) -> HashMap<String, u64> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT counter, count FROM tallies WHERE chat_id = $1 AND day = $2 AND count > 0",
+        )
+        .bind(chat)
+        .bind(day as i64)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("tallies: read for {chat} failed: {e}");
+            Vec::new()
+        });
+        rows.into_iter()
+            .map(|(counter, count)| (counter, count.max(0) as u64))
+            .collect()
+    }
+
+    pub async fn chats_with(&self, key: &str) -> Vec<i64> {
+        let rows: Vec<(i64,)> =
+            sqlx::query_as("SELECT chat_id FROM settings WHERE key = $1 AND value <> ''")
+                .bind(key)
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("settings: chats with {key} failed: {e}");
+                    Vec::new()
+                });
+        rows.into_iter().map(|(chat,)| chat).collect()
+    }
+
+    pub async fn flagged_with(&self, flag: &str) -> Vec<i64> {
+        let rows: Vec<(i64,)> = sqlx::query_as("SELECT chat_id FROM settings WHERE key = $1")
+            .bind(flag)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("settings: chats flagged {flag} failed: {e}");
+                Vec::new()
+            });
+        rows.into_iter().map(|(chat,)| chat).collect()
+    }
+
+    pub async fn panels_for(&self, user: i64, limit: i64) -> Vec<i64> {
+        let rows: Vec<(i64,)> = sqlx::query_as(
+            "SELECT chat_id FROM settings WHERE key LIKE 'admin:%' AND key = $1
+             UNION
+             SELECT chat_id FROM settings WHERE key = 'owner' AND value = $2
+             LIMIT $3",
+        )
+        .bind(format!("admin:{user}"))
+        .bind(user.to_string())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("settings: panels for {user} failed: {e}");
+            Vec::new()
+        });
+        rows.into_iter().map(|(chat,)| chat).collect()
     }
 
     pub async fn ping(&self) -> Option<std::time::Duration> {
@@ -1018,6 +1215,230 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
+    async fn chats_with_only_lists_configured_chats() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let (on, off) = (-999_999_999_989, -999_999_999_988);
+
+        let settings = Settings::connect(&url).await.unwrap();
+        let both = vec![on, off];
+        let wipe = "DELETE FROM settings WHERE chat_id = ANY($1)";
+        sqlx::query(wipe).bind(&both).execute(&settings.pool).await.unwrap();
+
+        settings.set_value(on, "night", "1380|420").await;
+        settings.set_value(off, "night", "0|60").await;
+
+        let mut listed = settings.chats_with("night").await;
+        listed.retain(|chat| both.contains(chat));
+        listed.sort_unstable();
+        let mut want = both.clone();
+        want.sort_unstable();
+        assert_eq!(listed, want);
+
+        assert!(settings.set(off, "night", false).await);
+        let mut left = settings.chats_with("night").await;
+        left.retain(|chat| both.contains(chat));
+        assert_eq!(left, vec![on]);
+
+        settings.set(on, "gate_on", true).await;
+        assert!(!settings.chats_with("gate_on").await.contains(&on));
+        assert!(settings.flagged_with("gate_on").await.contains(&on));
+
+        sqlx::query(wipe).bind(&both).execute(&settings.pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn panels_for_finds_owned_and_admined_chats() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let (mine_by_flag, mine_by_owner, theirs) =
+            (-999_999_999_992, -999_999_999_991, -999_999_999_990);
+        let (me, them) = (7_i64, 9_i64);
+
+        let settings = Settings::connect(&url).await.unwrap();
+        let all = vec![mine_by_flag, mine_by_owner, theirs];
+        let wipe = "DELETE FROM settings WHERE chat_id = ANY($1)";
+        sqlx::query(wipe).bind(&all).execute(&settings.pool).await.unwrap();
+
+        settings.set(mine_by_flag, &format!("admin:{me}"), true).await;
+        settings.set_value(mine_by_owner, "owner", &me.to_string()).await;
+        settings.set_value(theirs, "owner", &them.to_string()).await;
+        settings.set(theirs, &format!("admin:{them}"), true).await;
+
+        let mut found = settings.panels_for(me, 21).await;
+        found.retain(|chat| all.contains(chat));
+        found.sort_unstable();
+        let mut mine = vec![mine_by_flag, mine_by_owner];
+        mine.sort_unstable();
+        assert_eq!(found, mine, "someone else's group must not be listed");
+
+        settings.set(mine_by_flag, &format!("admin:{me}"), false).await;
+        let mut left = settings.panels_for(me, 21).await;
+        left.retain(|chat| all.contains(chat));
+        assert_eq!(left, vec![mine_by_owner]);
+
+        sqlx::query(wipe).bind(&all).execute(&settings.pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn every_chunk_of_a_large_flush_lands() {
+        const ROWS: i64 = 12_001;
+
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let chat = -999_999_999_987;
+
+        let settings = Settings::connect(&url).await.unwrap();
+        let wipe = "DELETE FROM counters WHERE chat_id = $1";
+        sqlx::query(wipe).bind(chat).execute(&settings.pool).await.unwrap();
+
+        let bumps: Vec<Bump> = (1..=ROWS)
+            .map(|user| Bump {
+                chat,
+                user,
+                name: format!("member {user}"),
+                added: 2,
+            })
+            .collect();
+        let folded = settings.bump(bumps, 500, 71, 16).await;
+        assert_eq!(folded.len() as i64, ROWS, "every chunk has to come back");
+
+        let (total, members) = settings.board_totals(chat, Period::Total, 0).await;
+        assert_eq!(members as i64, ROWS);
+        assert_eq!(total as i64, ROWS * 2);
+
+        let again: Vec<Bump> = (1..=ROWS)
+            .map(|user| Bump {
+                chat,
+                user,
+                name: String::new(),
+                added: 1,
+            })
+            .collect();
+        settings.bump(again, 500, 71, 16).await;
+        assert_eq!(settings.board_totals(chat, Period::Total, 0).await.0 as i64, ROWS * 3);
+        assert_eq!(settings.name_of(chat, 1).await.as_deref(), Some("member 1"));
+
+        sqlx::query(wipe).bind(chat).execute(&settings.pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn forget_idle_only_touches_the_chats_it_is_given() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let (a, b) = (-999_999_999_994, -999_999_999_993);
+
+        let settings = Settings::connect(&url).await.unwrap();
+        let wipe = "DELETE FROM counters WHERE chat_id = ANY($1)";
+        let both = vec![a, b];
+        sqlx::query(wipe).bind(&both).execute(&settings.pool).await.unwrap();
+
+        let spoke = |chat, user| Bump {
+            chat,
+            user,
+            name: String::new(),
+            added: 1,
+        };
+
+        settings.bump(vec![spoke(a, 1)], 100, 14, 3).await;
+        settings.bump(vec![spoke(a, 2)], 200, 28, 6).await;
+        settings.bump(vec![spoke(b, 1)], 100, 14, 3).await;
+
+        let left = |chat: i64| {
+            let pool = settings.pool.clone();
+            async move {
+                sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM counters WHERE chat_id = $1")
+                    .bind(chat)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    .0
+            }
+        };
+
+        assert_eq!(settings.forget_idle(&[a], 150).await, 1);
+        assert_eq!(left(a).await, 1, "the member still talking must stay");
+        assert_eq!(left(b).await, 1, "a chat that was not named must be untouched");
+
+        assert_eq!(settings.forget_idle(&[b], 150).await, 1);
+        assert_eq!(left(b).await, 0);
+
+        sqlx::query(wipe).bind(&both).execute(&settings.pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn tallies_roll_over_in_the_write() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let chat = -999_999_999_995;
+        let (day, next) = (2_000, 2_001);
+
+        let settings = Settings::connect(&url).await.unwrap();
+        let wipe = "DELETE FROM tallies WHERE chat_id = $1";
+        sqlx::query(wipe).bind(chat).execute(&settings.pool).await.unwrap();
+
+        settings.add_tallies(&[(chat, "k_text", 3), (chat, "h9", 3)], day).await;
+        settings.add_tallies(&[(chat, "k_text", 5)], day).await;
+
+        let today = settings.tallies(chat, day).await;
+        assert_eq!(today.get("k_text").copied(), Some(8));
+        assert_eq!(today.get("h9").copied(), Some(3));
+
+        settings.add_tallies(&[(chat, "k_text", 4)], next).await;
+        let tomorrow = settings.tallies(chat, next).await;
+        assert_eq!(tomorrow.get("k_text").copied(), Some(4));
+
+        assert!(!tomorrow.contains_key("h9"));
+
+        let yesterday = settings.tallies(chat, day).await;
+        assert!(!yesterday.contains_key("k_text"));
+        assert_eq!(yesterday.get("h9").copied(), Some(3));
+
+        sqlx::query(wipe).bind(chat).execute(&settings.pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn clearing_a_valued_setting_removes_the_row() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let chat = -999_999_999_996;
+        let note = "note:7";
+
+        let settings = Settings::connect(&url).await.unwrap();
+        sqlx::query("DELETE FROM settings WHERE chat_id = $1")
+            .bind(chat)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+
+        settings.set_value(chat, note, "برای بعد").await;
+        assert_eq!(settings.value(chat, note).as_deref(), Some("برای بعد"));
+
+        assert!(settings.set(chat, note, false).await);
+        assert!(settings.value(chat, note).is_none());
+        assert!(!settings.is_locked(chat, note));
+
+        let left: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM settings WHERE chat_id = $1 AND key LIKE 'note:%'",
+        )
+        .bind(chat)
+        .fetch_one(&settings.pool)
+        .await
+        .unwrap();
+        assert_eq!(left.0, 0);
+
+        let reloaded = Settings::connect(&url).await.unwrap();
+        assert!(reloaded.value(chat, note).is_none());
+        assert!(!reloaded.is_locked(chat, note));
+
+        sqlx::query("DELETE FROM settings WHERE chat_id = $1")
+            .bind(chat)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn counters_roll_over() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let chat = -999_999_999_998;
@@ -1040,8 +1461,8 @@ mod tests {
         let both = |ali, sara| spoke(&[(1, "Ali", ali), (2, "Sara", sara)]);
         let ali = |count| spoke(&[(1, "Ali", count)]);
 
-        settings.bump(&both(5, 9), day, week, month).await;
-        settings.bump(&both(3, 1), day, week, month).await;
+        settings.bump(both(5, 9), day, week, month).await;
+        settings.bump(both(3, 1), day, week, month).await;
 
         let top = settings.board(chat, Period::Today, day, 10).await;
         assert_eq!(top.len(), 2);
@@ -1050,7 +1471,7 @@ mod tests {
         assert_eq!(settings.board_totals(chat, Period::Today, day).await, (18, 2));
         assert_eq!(settings.board_totals(chat, Period::Total, 0).await, (18, 2));
 
-        settings.bump(&ali(2), day + 1, week, month).await;
+        settings.bump(ali(2), day + 1, week, month).await;
 
         assert_eq!(settings.board_totals(chat, Period::Today, day + 1).await, (2, 1));
         let today = settings.board(chat, Period::Today, day + 1, 10).await;
@@ -1059,7 +1480,7 @@ mod tests {
         assert_eq!(settings.board_totals(chat, Period::Week, week).await, (20, 2));
         assert_eq!(settings.board_totals(chat, Period::Total, 0).await, (20, 2));
 
-        settings.bump(&ali(4), day + 8, week + 1, month).await;
+        settings.bump(ali(4), day + 8, week + 1, month).await;
         assert_eq!(settings.board_totals(chat, Period::Week, week + 1).await, (4, 1));
         assert_eq!(settings.board_totals(chat, Period::Month, month).await, (24, 2));
 

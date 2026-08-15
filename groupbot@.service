@@ -1,0 +1,17 @@
+[Unit]
+Description=groupbot shard %i
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/shards/%i
+EnvironmentFile=/home/ubuntu/shards/%i/.env
+Environment=LOG=info
+ExecStart=/home/ubuntu/GroupManagement/groupbot/target/release/groupbot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,3 +1,22 @@
+diff --git a/grammers-client/examples/echo.rs b/grammers-client/examples/echo.rs
+index 70f5960..c13e990 100644
+--- a/grammers-client/examples/echo.rs
++++ b/grammers-client/examples/echo.rs
+@@ -79,7 +79,13 @@ async fn async_main() -> Result {
+     // You can use `task::spawn` if you don't care about dropping unfinished handlers midway.
+     let mut handler_tasks = JoinSet::new();
+     let mut updates = client
+-        .stream_updates(updates, UpdatesConfiguration { catch_up: true })
++        .stream_updates(
++            updates,
++            UpdatesConfiguration {
++                catch_up: true,
++                ..Default::default()
++            },
++        )
+         .await?;
+     loop {
+         // Empty finished handlers (you could look at their return value here too.)
 diff --git a/grammers-client/src/client/auth.rs b/grammers-client/src/client/auth.rs
 index d4d10ee..038aa03 100644
 --- a/grammers-client/src/client/auth.rs
@@ -110,6 +129,48 @@ index d9a6bc6..269a708 100644
  pub use grammers_mtsender::{self as sender, InvocationError, SenderPool};
  pub use grammers_session as session;
  pub use grammers_tl_types as tl;
+diff --git a/grammers-mtsender/src/configuration.rs b/grammers-mtsender/src/configuration.rs
+index e27c257..b81e9f8 100644
+--- a/grammers-mtsender/src/configuration.rs
++++ b/grammers-mtsender/src/configuration.rs
+@@ -72,6 +72,22 @@ pub struct UpdatesConfiguration {
+     ///
+     /// By default, updates sent while the [`crate::UpdatesReceiver`] was offline are ignored.
+     pub catch_up: bool,
++
++    /// Should a channel that has produced no updates for a while be forgotten rather than have
++    /// its difference fetched?
++    ///
++    /// When a channel's deadline expires the receiver normally requests its difference, and it
++    /// does so one channel at a time, awaited inline, delivering no updates until the queue
++    /// empties. An account in tens of thousands of channels has most of them idle at any moment,
++    /// so that queue never drains and the stream stalls permanently.
++    ///
++    /// Forgetting the entry loses only the ability to *notice* a gap in a channel that has been
++    /// silent that long; the next update from it recreates the entry at its own `pts` and is
++    /// dispatched normally. Set it for clients that only act on live updates and would discard
++    /// anything the difference returned anyway.
++    ///
++    /// Off by default, which is the behaviour every other client expects.
++    pub drop_idle_channels: bool,
+ }
+ 
+ /// This trait controls how the [`SenderPoolRunner`] should behave when
+@@ -154,9 +170,12 @@ impl Default for ConnectionParams {
+ }
+ 
+ impl Default for UpdatesConfiguration {
+-    /// Returns an instance that will not catch up.
++    /// Returns an instance that will not catch up and keeps every channel's state.
+     fn default() -> Self {
+-        Self { catch_up: false }
++        Self {
++            catch_up: false,
++            drop_idle_channels: false,
++        }
+     }
+ }
+ 
 diff --git a/grammers-mtsender/src/sender.rs b/grammers-mtsender/src/sender.rs
 index 619eda2..707a713 100644
 --- a/grammers-mtsender/src/sender.rs
@@ -155,6 +216,26 @@ index 619eda2..707a713 100644
                      updates.push(UpdatesLike::AffectedMessages(affected));
                  }
                  return;
+diff --git a/grammers-mtsender/src/updates_receiver.rs b/grammers-mtsender/src/updates_receiver.rs
+index eaa5315..42db94a 100644
+--- a/grammers-mtsender/src/updates_receiver.rs
++++ b/grammers-mtsender/src/updates_receiver.rs
+@@ -91,13 +91,14 @@ impl UpdatesReceiver {
+         updates: mpsc::Receiver<UpdatesLike>,
+         configuration: UpdatesConfiguration,
+     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+-        let message_box = if configuration.catch_up {
++        let mut message_box = if configuration.catch_up {
+             MessageBoxes::load(session.updates_state().await?)
+         } else {
+             // If the user doesn't want to bother with catching up on previous update, start with
+             // pristine state instead.
+             MessageBoxes::new()
+         };
++        message_box.set_drop_idle_channels(configuration.drop_idle_channels);
+         // Don't bother getting pristine update state if we're not logged in.
+         let should_get_state =
+             message_box.is_empty() && session.peer(PeerId::self_user()).await?.is_some();
 diff --git a/grammers-mtsender/tests/lib.rs b/grammers-mtsender/tests/lib.rs
 index cfd2608..d012f32 100644
 --- a/grammers-mtsender/tests/lib.rs
@@ -196,11 +277,217 @@ index cfd2608..d012f32 100644
 +    ));
 +    assert_eq!(parsed.id, vec![42]);
 +}
+diff --git a/grammers-session/src/message_box/defs.rs b/grammers-session/src/message_box/defs.rs
+index eeeaf43..1ad231f 100644
+--- a/grammers-session/src/message_box/defs.rs
++++ b/grammers-session/src/message_box/defs.rs
+@@ -89,6 +89,10 @@ pub struct MessageBoxes {
+ 
+     /// Optimization field holding the closest deadline instant.
+     pub(super) next_deadline: Instant,
++
++    /// Whether a channel entry whose deadline expired should be dropped instead of having its
++    /// difference fetched. See [`crate::updates::MessageBoxes::set_drop_idle_channels`].
++    pub(super) drop_idle_channels: bool,
+ }
+ 
+ /// Represents the information needed to correctly handle a specific `tl::enums::Update`.
+diff --git a/grammers-session/src/message_box/mod.rs b/grammers-session/src/message_box/mod.rs
+index f7a1278..4d172c2 100644
+--- a/grammers-session/src/message_box/mod.rs
++++ b/grammers-session/src/message_box/mod.rs
+@@ -107,6 +107,7 @@ impl MessageBoxes {
+             seq: NO_SEQ,
+             getting_diff_for: Vec::new(),
+             next_deadline: next_updates_deadline(),
++            drop_idle_channels: false,
+         }
+     }
+ 
+@@ -149,9 +150,19 @@ impl MessageBoxes {
+             seq: state.seq,
+             getting_diff_for,
+             next_deadline: deadline,
++            drop_idle_channels: false,
+         }
+     }
+ 
++    /// Forget a channel entry when its deadline expires instead of fetching its difference.
++    ///
++    /// See [`grammers_mtsender::UpdatesConfiguration::drop_idle_channels`] for what this costs.
++    /// Only [`Key::Channel`] entries are ever dropped; the common and secondary boxes keep the
++    /// usual behaviour, so a gap in either is still resolved.
++    pub fn set_drop_idle_channels(&mut self, drop_idle_channels: bool) {
++        self.drop_idle_channels = drop_idle_channels;
++    }
++
+     fn entry(&self, key: Key) -> Option<&LiveEntry> {
+         self.entries
+             .binary_search_by_key(&key, |entry| entry.key)
+@@ -247,6 +258,23 @@ impl MessageBoxes {
+         }
+ 
+         if now >= self.next_deadline {
++            if self.drop_idle_channels {
++                // A channel that has been silent this long is forgotten rather than queued for
++                // its difference. Its next update recreates the entry at that update's own pts,
++                // so nothing is lost but the ability to notice a gap older than the timeout.
++                //
++                // The `getting_diff_for` clause is not optional: `get_channel_difference` and
++                // both of the apply/end paths panic on a key that is queued without a live
++                // entry. `check_deadlines` returns early while a difference is in flight, so it
++                // is unreachable today — one `||` is cheaper than trusting that it stays so.
++                //
++                // `retain` keeps the order, so `entries` stays sorted for `binary_search_by_key`.
++                self.entries.retain(|entry| {
++                    !matches!(entry.key, Key::Channel(_))
++                        || now < entry.effective_deadline()
++                        || self.getting_diff_for.contains(&entry.key)
++                });
++            }
+             self.getting_diff_for
+                 .extend(self.entries.iter().filter_map(|entry| {
+                     if now >= entry.effective_deadline() {
+diff --git a/grammers-session/src/message_box/tests.rs b/grammers-session/src/message_box/tests.rs
+index 68bb840..cef7032 100644
+--- a/grammers-session/src/message_box/tests.rs
++++ b/grammers-session/src/message_box/tests.rs
+@@ -629,3 +629,65 @@ fn test_process_socket_update_for_new_channel_dispatches_first_update() {
+         ))
+     );
+ }
++
++#[test]
++fn test_idle_channel_is_dropped_instead_of_fetching_its_difference() {
++    reset_time();
++    let mut message_boxes = MessageBoxes::new();
++    message_boxes.set_drop_idle_channels(true);
++    message_boxes.set_state(state(1, 1, 34, 34));
++    let (channel_id, pts) = (12, 34);
++    message_boxes.try_set_channel_state(channel_id, pts);
++
++    advance_time_by(NO_UPDATES_TIMEOUT);
++
++    // The channel is forgotten rather than queued, so the deadline moves on instead of the
++    // stream stalling behind one request per idle channel.
++    assert_eq!(message_boxes.check_deadlines(), Instant::now());
++    assert_eq!(message_boxes.get_channel_difference(), None);
++    assert_eq!(message_boxes.session_state().channels, Vec::new());
++
++    // The common box keeps the usual behaviour: a gap there is still resolved.
++    assert!(message_boxes.get_difference().is_some());
++    message_boxes.apply_difference(
++        tl::types::updates::DifferenceEmpty { date: 1, seq: 1 }.into(),
++    );
++
++    // And dropping the entry loses nothing: the next update recreates it and is dispatched.
++    // The zeroes are the "doesn't matter" sentinels, so the box keeps the date and seq it had.
++    let fresh = 78;
++    assert_eq!(
++        message_boxes.process_updates(channel_updates(channel_id, NO_DATE, NO_SEQ, fresh)),
++        Ok((
++            vec![(
++                channel_update(channel_id, fresh),
++                State {
++                    date: 1,
++                    seq: 1,
++                    message_box: Some(MessageBox::Channel {
++                        channel_id,
++                        pts: fresh
++                    })
++                }
++            )],
++            vec![],
++            vec![]
++        ))
++    );
++}
++
++#[test]
++fn test_idle_channel_is_kept_when_the_flag_is_off() {
++    reset_time();
++    let mut message_boxes = MessageBoxes::new();
++    message_boxes.try_set_channel_state(12, 34);
++
++    advance_time_by(NO_UPDATES_TIMEOUT);
++
++    assert_eq!(message_boxes.check_deadlines(), Instant::now());
++    assert_eq!(
++        message_boxes.get_channel_difference(),
++        Some(get_channel_difference(12, 34)),
++        "the default has to stay exactly what every other client expects"
++    );
++}
 diff --git a/grammers-session/src/storages/sqlite.rs b/grammers-session/src/storages/sqlite.rs
-index f5b2c5a..ac59400 100644
+index f5b2c5a..05071f7 100644
 --- a/grammers-session/src/storages/sqlite.rs
 +++ b/grammers-session/src/storages/sqlite.rs
-@@ -209,6 +209,30 @@ impl SqliteSession {
+@@ -30,10 +30,64 @@ struct Cache {
+     pub dc_options: HashMap<i32, DcOption>,
+ }
+ 
++/// The key a peer is cached under. `bot_api_dialog_id` answers `None` only for the self-user
++/// sentinel, whose row is found by subtype rather than by id, so it gets a key of its own.
++const SELF_PEER_KEY: i64 = i64::MIN;
++
++/// An in-memory cache in front of `peer_info`.
++///
++/// Every update batch carries the sender and the chat, and both are handed to `cache_peer` on
++/// the one task that reads updates — a `SELECT` and an `INSERT OR REPLACE` each, serialised on
++/// the database mutex, per message. Almost all of that is re-learning what is already known.
++///
++/// What makes the cache safe rather than merely fast is that [`PeerInfo::extend_info`] is
++/// monotone: it fills in fields it does not already hold and never overwrites one. The database
++/// merges the same way, so anything cached is what a read would have returned — every entry
++/// here came off disk, and a write forgets its key rather than guessing the normalised form
++/// the row will read back as.
++///
++/// Two generations rather than a real LRU. Inserts land in `hot`; when it fills, it becomes
++/// `cold` wholesale and a fresh `hot` starts, so the memory is bounded at twice the cap and a
++/// still-used entry is promoted back on its next hit.
++// ponytail: this is not the `clear()` anti-pattern — every row is still on disk, so a dropped
++// entry costs one `SELECT` and never data. Swap in a real LRU only if that refill measures.
++#[derive(Default)]
++struct PeerCache {
++    hot: HashMap<i64, PeerInfo>,
++    cold: HashMap<i64, PeerInfo>,
++}
++
++impl PeerCache {
++    /// About ten megabytes at the size a `PeerInfo` entry costs, doubled by the cold half.
++    const CAP: usize = 100_000;
++
++    fn get(&mut self, key: i64) -> Option<PeerInfo> {
++        if let Some(peer) = self.hot.get(&key) {
++            return Some(peer.clone());
++        }
++        let promoted = self.cold.remove(&key)?;
++        self.put(key, promoted.clone());
++        Some(promoted)
++    }
++
++    fn put(&mut self, key: i64, peer: PeerInfo) {
++        if self.hot.len() >= Self::CAP && !self.hot.contains_key(&key) {
++            self.cold = std::mem::take(&mut self.hot);
++        }
++        self.hot.insert(key, peer);
++    }
++
++    fn forget(&mut self, key: i64) {
++        self.hot.remove(&key);
++        self.cold.remove(&key);
++    }
++}
++
+ /// SQLite-based storage. This is the recommended option.
+ pub struct SqliteSession {
+     database: AsyncMutex<Database>,
+     cache: Mutex<Cache>,
++    peers: Mutex<PeerCache>,
+ }
+ 
+ #[derive(Debug)]
+@@ -209,6 +263,30 @@ impl SqliteSession {
      pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self, SqliteSessionError> {
          let conn = libsql::Builder::new_local(path).build().await?.connect()?;
          let db = Database(conn);
@@ -231,3 +518,358 @@ index f5b2c5a..ac59400 100644
          db.init().await?;
  
          let home_dc = db
+@@ -243,6 +321,7 @@ impl SqliteSession {
+                 home_dc,
+                 dc_options,
+             }),
++            peers: Mutex::new(PeerCache::default()),
+         })
+     }
+ }
+@@ -328,98 +407,63 @@ impl Session for SqliteSession {
+ 
+     fn peer(&self, peer: PeerId) -> BoxFuture<'_, Result<Option<PeerInfo>, SqliteSessionError>> {
+         Box::pin(async move {
+-            let db = self.database.lock().await;
+-            let map_row = |row: libsql::Row| {
+-                let subtype = row.get::<Option<i64>>(2)?.map(|s| s as u8);
+-                Ok(match peer.kind() {
+-                    PeerKind::User => PeerInfo::User {
+-                        id: PeerId::user_unchecked(row.get::<i64>(0)?).bare_id_unchecked(),
+-                        auth: row.get::<Option<i64>>(1)?.map(PeerAuth::from_hash),
+-                        bot: subtype.map(|s| s & PeerSubtype::UserBot as u8 != 0),
+-                        is_self: subtype.map(|s| s & PeerSubtype::UserSelf as u8 != 0),
+-                    },
+-                    PeerKind::Chat => PeerInfo::Chat {
+-                        id: peer.bare_id_unchecked(),
+-                    },
+-                    PeerKind::Channel => PeerInfo::Channel {
+-                        id: peer.bare_id_unchecked(),
+-                        auth: row.get::<Option<i64>>(1)?.map(PeerAuth::from_hash),
+-                        kind: subtype.and_then(|s| {
+-                            if (s & PeerSubtype::Gigagroup as u8) == PeerSubtype::Gigagroup as u8 {
+-                                Some(ChannelKind::Gigagroup)
+-                            } else if s & PeerSubtype::Broadcast as u8 != 0 {
+-                                Some(ChannelKind::Broadcast)
+-                            } else if s & PeerSubtype::Megagroup as u8 != 0 {
+-                                Some(ChannelKind::Megagroup)
+-                            } else {
+-                                None
+-                            }
+-                        }),
+-                    },
+-                })
+-            };
++            let key = peer.bot_api_dialog_id().unwrap_or(SELF_PEER_KEY);
++            if let Some(known) = self
++                .peers
++                .lock()
++                .map_err(|_| SqliteSessionError::Poisoned)?
++                .get(key)
++            {
++                return Ok(Some(known));
++            }
+ 
+-            Ok(if let Some(peer_id) = peer.bot_api_dialog_id() {
+-                db.fetch_one(
+-                    "SELECT * FROM peer_info WHERE peer_id = :peer_id LIMIT 1",
+-                    named_params! {":peer_id": peer_id},
+-                    map_row,
+-                )
+-                .await?
+-            } else {
+-                db.fetch_one(
+-                    "SELECT * FROM peer_info WHERE subtype & :type LIMIT 1",
+-                    named_params! {":type": PeerSubtype::UserSelf as i64},
+-                    map_row,
+-                )
+-                .await?
+-            })
++            // A miss is not cached. It costs one `SELECT`, and caching it would need an
++            // invalidation rule where there is otherwise none.
++            self.peer_from_db_cached(peer, key).await
+         })
+     }
+ 
+     fn cache_peer(&self, peer: &PeerInfo) -> BoxFuture<'_, Result<(), SqliteSessionError>> {
+         let peer = peer.clone();
+         Box::pin(async move {
+-            let peer = if let Some(mut existing_peer) = self.peer(peer.id()).await? {
+-                existing_peer.extend_info(&peer);
+-                existing_peer
+-            } else {
+-                peer
++            let key = peer.id().bot_api_dialog_id_unchecked();
++            let known = self
++                .peers
++                .lock()
++                .map_err(|_| SqliteSessionError::Poisoned)?
++                .get(key);
++
++            // The whole point. `extend_info` only fills in what is missing, so a peer already
++            // known in full produces no change — which is every message after the first for
++            // that peer, and it costs no database round trip at all.
++            let against = match known {
++                Some(known) => Some(known),
++                // A miss reads the row, exactly as before: the database may hold a hash learned
++                // in an earlier run, and a partial update must not clobber it. The read
++                // populates the cache too, so this happens once per peer per process.
++                None => self.peer_from_db_cached(peer.id(), key).await?,
+             };
+-
+-            let db = self.database.lock().await;
+-            let stmt =
+-                db.0.prepare("INSERT OR REPLACE INTO peer_info VALUES (:peer_id, :hash, :subtype)")
+-                    .await?;
+-            let subtype = match peer {
+-                PeerInfo::User { bot, is_self, .. } => {
+-                    match (bot.unwrap_or_default(), is_self.unwrap_or_default()) {
+-                        (true, true) => Some(PeerSubtype::UserSelfBot),
+-                        (true, false) => Some(PeerSubtype::UserBot),
+-                        (false, true) => Some(PeerSubtype::UserSelf),
+-                        (false, false) => None,
++            let merged = match against {
++                Some(against) => {
++                    let mut merged = against.clone();
++                    merged.extend_info(&peer);
++                    if merged == against {
++                        return Ok(());
+                     }
++                    merged
+                 }
+-                PeerInfo::Chat { .. } => None,
+-                PeerInfo::Channel { kind, .. } => kind.map(|kind| match kind {
+-                    ChannelKind::Megagroup => PeerSubtype::Megagroup,
+-                    ChannelKind::Broadcast => PeerSubtype::Broadcast,
+-                    ChannelKind::Gigagroup => PeerSubtype::Gigagroup,
+-                    ChannelKind::Community => PeerSubtype::Community,
+-                }),
++                None => peer,
+             };
+-            let mut params = vec![];
+-            let peer_id = peer.id().bot_api_dialog_id_unchecked();
+-            params.push((":peer_id".to_owned(), peer_id));
+-            let hash = peer.auth().unwrap_or_default().hash();
+-            if peer.auth().is_some() {
+-                params.push((":hash".to_owned(), hash));
+-            }
+-            let subtype = subtype.map(|s| s as i64);
+-            if subtype.is_some() {
+-                params.push((":subtype".to_owned(), subtype.unwrap()));
+-            }
+-            stmt.execute(params).await?;
++
++            self.write_peer(&merged).await?;
++            // Forgotten rather than stored: the row is normalised on the way in and out — a
++            // subtype of "bot" reads back as `is_self: Some(false)` where the merge left it
++            // `None` — so the only value guaranteed to match a future read is the one the
++            // database gives. The next read repopulates it in that canonical form.
++            self.peers
++                .lock()
++                .map_err(|_| SqliteSessionError::Poisoned)?
++                .forget(key);
+             Ok(())
+         })
+     }
+@@ -572,6 +616,119 @@ impl Session for SqliteSession {
+     }
+ }
+ 
++impl SqliteSession {
++    /// Reads a peer off disk and remembers it under `key`, in the form the database gives back.
++    async fn peer_from_db_cached(
++        &self,
++        peer: PeerId,
++        key: i64,
++    ) -> Result<Option<PeerInfo>, SqliteSessionError> {
++        let found = self.peer_from_db(peer).await?;
++        if let Some(found) = &found {
++            self.peers
++                .lock()
++                .map_err(|_| SqliteSessionError::Poisoned)?
++                .put(key, found.clone());
++        }
++        Ok(found)
++    }
++
++    fn peer_from_db(
++        &self,
++        peer: PeerId,
++    ) -> BoxFuture<'_, Result<Option<PeerInfo>, SqliteSessionError>> {
++        Box::pin(async move {
++            let db = self.database.lock().await;
++            let map_row = |row: libsql::Row| {
++                let subtype = row.get::<Option<i64>>(2)?.map(|s| s as u8);
++                Ok(match peer.kind() {
++                    PeerKind::User => PeerInfo::User {
++                        id: PeerId::user_unchecked(row.get::<i64>(0)?).bare_id_unchecked(),
++                        auth: row.get::<Option<i64>>(1)?.map(PeerAuth::from_hash),
++                        bot: subtype.map(|s| s & PeerSubtype::UserBot as u8 != 0),
++                        is_self: subtype.map(|s| s & PeerSubtype::UserSelf as u8 != 0),
++                    },
++                    PeerKind::Chat => PeerInfo::Chat {
++                        id: peer.bare_id_unchecked(),
++                    },
++                    PeerKind::Channel => PeerInfo::Channel {
++                        id: peer.bare_id_unchecked(),
++                        auth: row.get::<Option<i64>>(1)?.map(PeerAuth::from_hash),
++                        kind: subtype.and_then(|s| {
++                            if (s & PeerSubtype::Gigagroup as u8) == PeerSubtype::Gigagroup as u8 {
++                                Some(ChannelKind::Gigagroup)
++                            } else if s & PeerSubtype::Broadcast as u8 != 0 {
++                                Some(ChannelKind::Broadcast)
++                            } else if s & PeerSubtype::Megagroup as u8 != 0 {
++                                Some(ChannelKind::Megagroup)
++                            } else {
++                                None
++                            }
++                        }),
++                    },
++                })
++            };
++
++            Ok(if let Some(peer_id) = peer.bot_api_dialog_id() {
++                db.fetch_one(
++                    "SELECT * FROM peer_info WHERE peer_id = :peer_id LIMIT 1",
++                    named_params! {":peer_id": peer_id},
++                    map_row,
++                )
++                .await?
++            } else {
++                db.fetch_one(
++                    "SELECT * FROM peer_info WHERE subtype & :type LIMIT 1",
++                    named_params! {":type": PeerSubtype::UserSelf as i64},
++                    map_row,
++                )
++                .await?
++            })
++        })
++    }
++
++    /// Writes an already-merged peer out. Nothing is read here — the merge happened above.
++    fn write_peer(&self, peer: &PeerInfo) -> BoxFuture<'_, Result<(), SqliteSessionError>> {
++        let peer = peer.clone();
++        Box::pin(async move {
++            let db = self.database.lock().await;
++            let stmt =
++                db.0.prepare("INSERT OR REPLACE INTO peer_info VALUES (:peer_id, :hash, :subtype)")
++                    .await?;
++            let subtype = match peer {
++                PeerInfo::User { bot, is_self, .. } => {
++                    match (bot.unwrap_or_default(), is_self.unwrap_or_default()) {
++                        (true, true) => Some(PeerSubtype::UserSelfBot),
++                        (true, false) => Some(PeerSubtype::UserBot),
++                        (false, true) => Some(PeerSubtype::UserSelf),
++                        (false, false) => None,
++                    }
++                }
++                PeerInfo::Chat { .. } => None,
++                PeerInfo::Channel { kind, .. } => kind.map(|kind| match kind {
++                    ChannelKind::Megagroup => PeerSubtype::Megagroup,
++                    ChannelKind::Broadcast => PeerSubtype::Broadcast,
++                    ChannelKind::Gigagroup => PeerSubtype::Gigagroup,
++                    ChannelKind::Community => PeerSubtype::Community,
++                }),
++            };
++            let mut params = vec![];
++            let peer_id = peer.id().bot_api_dialog_id_unchecked();
++            params.push((":peer_id".to_owned(), peer_id));
++            let hash = peer.auth().unwrap_or_default().hash();
++            if peer.auth().is_some() {
++                params.push((":hash".to_owned(), hash));
++            }
++            let subtype = subtype.map(|s| s as i64);
++            if subtype.is_some() {
++                params.push((":subtype".to_owned(), subtype.unwrap()));
++            }
++            stmt.execute(params).await?;
++            Ok(())
++        })
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+@@ -698,4 +855,81 @@ mod tests {
+             }
+         );
+     }
++
++    #[test]
++    fn peer_cache_merges_and_survives_eviction() {
++        tokio::runtime::Builder::new_current_thread()
++            .enable_all()
++            .build()
++            .unwrap()
++            .block_on(do_peer_cache_merges_and_survives_eviction());
++    }
++
++    /// Elision is what makes the cache worth having, and also the one way it could lose
++    /// information: skipping the write when the merge really did learn something new.
++    async fn do_peer_cache_merges_and_survives_eviction() {
++        let session = SqliteSession::open(":memory:").await.unwrap();
++        let id = 4_242;
++
++        // First half of what is known about this user: it is a bot, but with no hash yet.
++        session
++            .cache_peer(&PeerInfo::User {
++                id,
++                auth: None,
++                bot: Some(true),
++                is_self: None,
++            })
++            .await
++            .unwrap();
++
++        // Second half, from a different update: the hash, and nothing about being a bot.
++        session
++            .cache_peer(&PeerInfo::User {
++                id,
++                auth: Some(PeerAuth::from_hash(99)),
++                bot: None,
++                is_self: None,
++            })
++            .await
++            .unwrap();
++
++        let peer = PeerId::user(id).unwrap();
++        let known = session.peer(peer).await.unwrap().unwrap();
++        assert_eq!(
++            known,
++            PeerInfo::User {
++                id,
++                auth: Some(PeerAuth::from_hash(99)),
++                bot: Some(true),
++                is_self: Some(false),
++            },
++            "both halves have to survive the merge"
++        );
++
++        // Re-caching what is already known has to be free — it is every message after the first
++        // for this peer. A write forgets the key, so the entry still being there is the proof
++        // that no write happened.
++        assert!(session.peers.lock().unwrap().get(id).is_some());
++        session.cache_peer(&known).await.unwrap();
++        assert!(
++            session.peers.lock().unwrap().get(id).is_some(),
++            "re-caching a fully known peer must not touch the database"
++        );
++        assert_eq!(session.peer(peer).await.unwrap().unwrap(), known);
++
++        // Past the cap the entry is evicted from both generations, and the answer is still
++        // right because the database is the authority and a miss just costs one query.
++        for other in 0..(PeerCache::CAP as i64 * 2 + 1) {
++            session.peers.lock().unwrap().put(id + 1 + other, known.clone());
++        }
++        {
++            let mut cache = session.peers.lock().unwrap();
++            assert!(cache.get(id).is_none(), "the entry is gone from memory");
++        }
++        assert_eq!(
++            session.peer(peer).await.unwrap().unwrap(),
++            known,
++            "and it comes back off disk"
++        );
++    }
+ }

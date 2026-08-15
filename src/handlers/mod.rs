@@ -48,12 +48,17 @@ use grammers_client::Client;
 use grammers_client::message::Message;
 use grammers_client::peer::Peer;
 use grammers_client::update::Update;
-use grammers_client::session::types::{PeerId, PeerKind, PeerRef};
+use grammers_client::session::types::{PeerAuth, PeerId, PeerKind, PeerRef};
 
 use crate::state::Settings;
 
 #[derive(Default)]
 pub struct ChatState {
+    chat: i64,
+    dirty: Arc<Dirty>,
+
+    last_seen: AtomicU64,
+
     peer: RwLock<Option<PeerRef>>,
 
     admins: RwLock<Option<(Instant, HashSet<i64>)>>,
@@ -80,19 +85,30 @@ pub struct ChatState {
 
 impl ChatState {
     pub fn bump(&self, counter: &'static str) {
-        *self.tallies.lock().unwrap().entry(counter).or_insert(0) += 1;
+        let mut counters = self.tallies.lock().unwrap();
+        let was_empty = counters.is_empty();
+        *counters.entry(counter).or_insert(0) += 1;
+        if was_empty {
+            Dirty::mark(&self.dirty.stats, self.chat);
+        }
     }
 
     pub fn count(&self, user: i64, name: impl FnOnce() -> String, tallies: [&'static str; 2]) {
-        self.counts
-            .lock()
-            .unwrap()
-            .entry(user)
-            .or_insert_with(|| (0, name()))
-            .0 += 1;
+        {
+            let mut counts = self.counts.lock().unwrap();
+            let was_empty = counts.is_empty();
+            counts.entry(user).or_insert_with(|| (0, name())).0 += 1;
+            if was_empty {
+                Dirty::mark(&self.dirty.stats, self.chat);
+            }
+        }
         let mut counters = self.tallies.lock().unwrap();
+        let was_empty = counters.is_empty();
         for counter in tallies {
             *counters.entry(counter).or_insert(0) += 1;
+        }
+        if was_empty {
+            Dirty::mark(&self.dirty.stats, self.chat);
         }
     }
 
@@ -103,6 +119,46 @@ impl ChatState {
             .await
             .expect("the per-chat semaphore is never closed")
     }
+
+    fn is_quiet(&self, idle: Duration, now: u64) -> bool {
+        now.saturating_sub(self.last_seen.load(Ordering::Relaxed)) >= idle.as_millis() as u64
+    }
+
+    fn evictable(&self, idle: Duration, now: u64) -> bool {
+        if !self.is_quiet(idle, now) {
+            return false;
+        }
+        self.logs.lock().unwrap().is_empty()
+            && self.temp_media.lock().unwrap().is_empty()
+            && self.captchas.lock().unwrap().is_empty()
+            && self.pending_numbers.lock().unwrap().is_empty()
+            && self.counts.lock().unwrap().is_empty()
+            && self.tallies.lock().unwrap().is_empty()
+            && self.messages.lock().unwrap().is_empty()
+            && self.removals.lock().unwrap().is_empty()
+            && self.members.lock().unwrap().is_empty()
+            && self.adds.lock().unwrap().is_empty()
+            && self.joined.lock().unwrap().is_empty()
+            && self.notices.lock().unwrap().is_empty()
+    }
+}
+
+#[derive(Default)]
+struct Dirty {
+    logs: std::sync::Mutex<Vec<i64>>,
+    media: std::sync::Mutex<Vec<i64>>,
+
+    stats: std::sync::Mutex<Vec<i64>>,
+}
+
+impl Dirty {
+    fn mark(list: &std::sync::Mutex<Vec<i64>>, chat: i64) {
+        list.lock().unwrap().push(chat);
+    }
+
+    fn drain(list: &std::sync::Mutex<Vec<i64>>) -> Vec<i64> {
+        std::mem::take(&mut *list.lock().unwrap())
+    }
 }
 
 pub struct Ctx {
@@ -110,6 +166,8 @@ pub struct Ctx {
     pub settings: Arc<Settings>,
 
     chats: RwLock<HashMap<i64, Arc<ChatState>>>,
+
+    dirty: Arc<Dirty>,
 
     deleted: RwLock<HashMap<u64, (Instant, String)>>,
     next_deleted_key: AtomicU64,
@@ -137,6 +195,8 @@ pub struct Ctx {
     bios: RwLock<HashMap<i64, (Instant, bool)>>,
 
     bio_fetch: OnceLock<tokio::sync::Semaphore>,
+
+    bot_sweeps: OnceLock<tokio::sync::Semaphore>,
 }
 
 pub const NOTICE_EVERY: Duration = Duration::from_secs(120);
@@ -145,6 +205,10 @@ const DELETED_TTL: Duration = Duration::from_secs(3600);
 const DELETED_MAX: usize = 5_000;
 
 type PendingNumber = (Instant, &'static str);
+
+type Tallies = HashMap<(i64, &'static str), u64>;
+
+type Counts = HashMap<(i64, i64), (u64, String)>;
 
 const MEMBER_TRUST: Duration = Duration::from_secs(60);
 
@@ -169,12 +233,42 @@ const BIO_MAX: usize = 10_000;
 
 const BIO_FETCHES: usize = 4;
 
+pub const FLEET_CONCURRENCY: usize = 8;
+
+pub const FLEET_CAMPAIGNS: usize = 4;
+
+pub async fn bounded<T, F>(items: Vec<T>, cap: usize, run: impl Fn(T) -> F)
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let permits = Arc::new(tokio::sync::Semaphore::new(cap));
+    let mut tasks = tokio::task::JoinSet::new();
+    for item in items {
+        let permit = Arc::clone(&permits)
+            .acquire_owned()
+            .await
+            .expect("the fleet semaphore is never closed");
+        let work = run(item);
+        tasks.spawn(async move {
+            let _permit = permit;
+            work.await;
+        });
+    }
+    while let Some(done) = tasks.join_next().await {
+        if let Err(e) = done {
+            eprintln!("fleet job task failed: {e}");
+        }
+    }
+}
+
 impl Ctx {
     pub fn new(client: Client, settings: Arc<Settings>) -> Self {
         Self {
             client,
             settings,
             chats: RwLock::new(HashMap::new()),
+            dirty: Arc::default(),
             deleted: RwLock::new(HashMap::new()),
             next_deleted_key: AtomicU64::new(1),
             started: Instant::now(),
@@ -189,6 +283,7 @@ impl Ctx {
             last_armed: AtomicU64::new(0),
             bios: RwLock::new(HashMap::new()),
             bio_fetch: OnceLock::new(),
+            bot_sweeps: OnceLock::new(),
         }
     }
 
@@ -196,12 +291,19 @@ impl Ctx {
         if let Some(state) = self.chats.read().unwrap().get(&chat) {
             return Arc::clone(state);
         }
+        let dirty = Arc::clone(&self.dirty);
         Arc::clone(
             self.chats
                 .write()
                 .unwrap()
                 .entry(chat)
-                .or_default(),
+                .or_insert_with(|| {
+                    Arc::new(ChatState {
+                        chat,
+                        dirty,
+                        ..Default::default()
+                    })
+                }),
         )
     }
 
@@ -280,6 +382,14 @@ impl Ctx {
             .expect("the bio semaphore is never closed")
     }
 
+    pub async fn sweep_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.bot_sweeps
+            .get_or_init(|| tokio::sync::Semaphore::new(FLEET_CAMPAIGNS))
+            .acquire()
+            .await
+            .expect("the sweep semaphore is never closed")
+    }
+
     pub fn cached_adds(&self, chat: i64, user: i64) -> Option<u64> {
         self.peek(chat)?
             .adds
@@ -303,21 +413,37 @@ impl Ctx {
         const MAX_PER_CHAT: usize = 200;
         let state = self.state(chat);
         let mut entries = state.logs.lock().unwrap();
+        let was_empty = entries.is_empty();
         if entries.len() >= MAX_PER_CHAT {
             entries.remove(0);
         }
         entries.push(entry);
+        if was_empty {
+            Dirty::mark(&self.dirty.logs, chat);
+        }
     }
 
     pub fn queue_temp_media(&self, chat: i64, id: i32, due: Instant, due_at: i64) {
         let state = self.state(chat);
-        tempmedia::queue(&mut state.temp_media.lock().unwrap(), id, due);
+        {
+            let mut queue = state.temp_media.lock().unwrap();
+            let was_empty = queue.is_empty();
+            tempmedia::queue(&mut queue, id, due);
+            if was_empty {
+                Dirty::mark(&self.dirty.media, chat);
+            }
+        }
         self.pending_writes.lock().unwrap().push((chat, id, due_at));
     }
 
     pub fn restore_temp_media(&self, chat: i64, id: i32, due: Instant) {
         let state = self.state(chat);
-        tempmedia::queue(&mut state.temp_media.lock().unwrap(), id, due);
+        let mut queue = state.temp_media.lock().unwrap();
+        let was_empty = queue.is_empty();
+        tempmedia::queue(&mut queue, id, due);
+        if was_empty {
+            Dirty::mark(&self.dirty.media, chat);
+        }
     }
 
     pub fn take_pending_writes(&self) -> Vec<(i64, i32, i64)> {
@@ -326,20 +452,37 @@ impl Ctx {
 
     pub fn take_due_media(&self) -> Vec<(i64, Vec<i32>)> {
         let now = Instant::now();
-        self.awake()
-            .into_iter()
-            .filter_map(|(chat, state)| {
-                self.chat_ref(chat)?;
-                let due = tempmedia::drain_due(&mut state.temp_media.lock().unwrap(), now);
-                (!due.is_empty()).then_some((chat, due))
-            })
-            .collect()
+        let mut ready = Vec::new();
+        for chat in Dirty::drain(&self.dirty.media) {
+            let Some(state) = self.peek(chat) else {
+                continue;
+            };
+
+            if self.chat_ref(chat).is_none() {
+                Dirty::mark(&self.dirty.media, chat);
+                continue;
+            }
+            let due = {
+                let mut queue = state.temp_media.lock().unwrap();
+                let due = tempmedia::drain_due(&mut queue, now);
+
+                if !queue.is_empty() {
+                    Dirty::mark(&self.dirty.media, chat);
+                }
+                due
+            };
+            if !due.is_empty() {
+                ready.push((chat, due));
+            }
+        }
+        ready
     }
 
     pub fn take_logs(&self) -> Vec<(i64, Vec<String>)> {
-        self.awake()
+        Dirty::drain(&self.dirty.logs)
             .into_iter()
-            .filter_map(|(chat, state)| {
+            .filter_map(|chat| {
+                let state = self.peek(chat)?;
                 let queued = std::mem::take(&mut *state.logs.lock().unwrap());
                 (!queued.is_empty()).then_some((chat, queued))
             })
@@ -573,35 +716,65 @@ impl Ctx {
         (fetched.elapsed() < ADMIN_CACHE_TTL).then(|| admins.contains(&user))
     }
 
-    fn awake(&self) -> Vec<(i64, Arc<ChatState>)> {
-        self.chats
-            .read()
-            .unwrap()
-            .iter()
-            .map(|(chat, state)| (*chat, Arc::clone(state)))
-            .collect()
+    fn uptime_millis(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
     }
 
-    pub fn take_tallies(&self) -> HashMap<(i64, &'static str), u64> {
-        let mut all = HashMap::new();
-        for (chat, state) in self.awake() {
+    pub fn touch(&self, state: &ChatState) {
+        state.last_seen.store(self.uptime_millis(), Ordering::Relaxed);
+    }
+
+    pub fn evict_idle(&self, idle: Duration) -> usize {
+        let now = self.uptime_millis();
+        let quiet: Vec<(i64, Arc<ChatState>)> = {
+            let chats = self.chats.read().unwrap();
+            chats
+                .iter()
+                .filter(|(_, state)| state.is_quiet(idle, now))
+                .map(|(chat, state)| (*chat, Arc::clone(state)))
+                .collect()
+        };
+
+        let mut going: Vec<i64> = Vec::new();
+        for (chat, state) in quiet {
+            if !self.settings.is_locked(chat, bots::LOCK) && state.evictable(idle, now) {
+                going.push(chat);
+            }
+        }
+        if going.is_empty() {
+            return 0;
+        }
+
+        let mut chats = self.chats.write().unwrap();
+        let before = chats.len();
+        for chat in going {
+            if chats
+                .get(&chat)
+                .is_some_and(|state| Arc::strong_count(state) == 1 && state.is_quiet(idle, now))
+            {
+                chats.remove(&chat);
+            }
+        }
+        before - chats.len()
+    }
+
+    pub fn take_stats(&self) -> (Tallies, Counts) {
+        let mut tallies = HashMap::new();
+        let mut counts = HashMap::new();
+        for chat in Dirty::drain(&self.dirty.stats) {
+            let Some(state) = self.peek(chat) else {
+                continue;
+            };
             for (counter, count) in std::mem::take(&mut *state.tallies.lock().unwrap()) {
-                all.insert((chat, counter), count);
+                tallies.insert((chat, counter), count);
+            }
+            let mut per_user = state.counts.lock().unwrap();
+            let room = per_user.len();
+            for (user, count) in std::mem::replace(&mut *per_user, HashMap::with_capacity(room)) {
+                counts.insert((chat, user), count);
             }
         }
-        all
-    }
-
-    pub fn take_counts(&self) -> HashMap<(i64, i64), (u64, String)> {
-        let mut all = HashMap::new();
-        for (chat, state) in self.awake() {
-            let mut counts = state.counts.lock().unwrap();
-            let room = counts.len();
-            for (user, count) in std::mem::replace(&mut *counts, HashMap::with_capacity(room)) {
-                all.insert((chat, user), count);
-            }
-        }
-        all
+        (tallies, counts)
     }
 
     pub fn captcha_start(&self, chat: i64, user: i64, pending: captcha::Pending) {
@@ -621,8 +794,19 @@ impl Ctx {
         }
     }
 
-    pub fn chat_ref(&self, chat: i64) -> Option<PeerRef> {
+    fn live_ref(&self, chat: i64) -> Option<PeerRef> {
         *self.peek(chat)?.peer.read().unwrap()
+    }
+
+    pub fn chat_ref(&self, chat: i64) -> Option<PeerRef> {
+        if let Some(peer) = self.live_ref(chat) {
+            return Some(peer);
+        }
+        let hash = self.settings.value_parsed::<i64>(chat, HASH)?;
+        Some(PeerRef {
+            id: PeerId::from_bot_api_dialog_id(chat)?,
+            auth: PeerAuth::from_hash(hash),
+        })
     }
 
     pub fn forget_admins(&self, chat: i64) {
@@ -745,7 +929,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         return;
     };
 
-    if ctx.chat_ref(chat).is_none()
+    if ctx.live_ref(chat).is_none()
         && let Ok(Some(peer)) = message.peer_ref().await
     {
         ctx.remember_chat(chat, peer);
@@ -755,9 +939,15 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         {
             ctx.settings.set_value(chat, TITLE, title).await;
         }
+
+        let hash = peer.auth.hash();
+        if ctx.settings.value_parsed::<i64>(chat, HASH) != Some(hash) {
+            ctx.settings.set_value(chat, HASH, &hash.to_string()).await;
+        }
     }
 
     let state = ctx.state(chat);
+    ctx.touch(&state);
     let _slot = state.slot().await;
 
     if !state.swept_bots.load(Ordering::Relaxed)
@@ -766,6 +956,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
     {
         let ctx = Arc::clone(ctx);
         tokio::spawn(async move {
+            let _slot = ctx.sweep_slot().await;
             bots::sweep(&ctx, chat).await;
         });
     }
@@ -887,6 +1078,8 @@ fn age_seconds(message: &Message) -> i64 {
 }
 
 pub const TITLE: &str = "title";
+
+pub const HASH: &str = "hash";
 
 pub fn owner(ctx: &Ctx, chat: i64) -> Option<i64> {
     ctx.settings.value_parsed(chat, config::OWNER)
@@ -1198,6 +1391,92 @@ async fn permissions(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_queue_that_refills_during_a_drain_is_not_lost() {
+        use std::sync::Mutex;
+
+        const CHAT: i64 = 7;
+        let queue: Mutex<Vec<&str>> = Mutex::new(Vec::new());
+        let dirty: Mutex<Vec<i64>> = Mutex::new(Vec::new());
+
+        let push = |entry| {
+            let mut queued = queue.lock().unwrap();
+            let was_empty = queued.is_empty();
+            queued.push(entry);
+            if was_empty {
+                super::Dirty::mark(&dirty, CHAT);
+            }
+        };
+        let drain = || {
+            super::Dirty::drain(&dirty)
+                .into_iter()
+                .map(|_| std::mem::take(&mut *queue.lock().unwrap()))
+                .collect::<Vec<_>>()
+        };
+
+        push("one");
+        push("two");
+        assert_eq!(
+            dirty.lock().unwrap().len(),
+            1,
+            "a busy chat marks once per window, not once per entry"
+        );
+        assert_eq!(drain(), vec![vec!["one", "two"]]);
+
+        push("three");
+        assert_eq!(drain(), vec![vec!["three"]]);
+
+        assert!(drain().is_empty(), "a chat with nothing queued is never visited");
+    }
+
+    #[test]
+    fn a_stored_hash_rebuilds_the_peer_a_message_would_have_given() {
+        use grammers_client::session::types::{PeerAuth, PeerId, PeerRef};
+
+        for (chat, hash) in [(-1_001_234_567_890_i64, 8_123_456_789_i64), (-4_242, 0)] {
+            let stored = hash.to_string();
+            let parsed: i64 = stored.parse().unwrap();
+            let rebuilt = PeerRef {
+                id: PeerId::from_bot_api_dialog_id(chat).unwrap(),
+                auth: PeerAuth::from_hash(parsed),
+            };
+            assert_eq!(rebuilt.id.bot_api_dialog_id(), Some(chat));
+            assert_eq!(rebuilt.auth.hash(), hash);
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_never_exceeds_its_cap() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const CAP: usize = 4;
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let ran = Arc::new(AtomicUsize::new(0));
+
+        let (live_in, peak_in, ran_in) = (Arc::clone(&live), Arc::clone(&peak), Arc::clone(&ran));
+        super::bounded((0..100).collect(), CAP, move |_| {
+            let (live, peak, ran) = (
+                Arc::clone(&live_in),
+                Arc::clone(&peak_in),
+                Arc::clone(&ran_in),
+            );
+            async move {
+                let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                ran.fetch_add(1, Ordering::SeqCst);
+                live.fetch_sub(1, Ordering::SeqCst);
+            }
+        })
+        .await;
+
+        assert_eq!(ran.load(Ordering::SeqCst), 100, "every item has to run");
+        assert!(peak.load(Ordering::SeqCst) <= CAP, "the cap has to hold");
+        assert_eq!(live.load(Ordering::SeqCst), 0, "it has to wait for all of them");
+    }
+
+    #[test]
     fn digits_normalise_both_digit_sets_and_borrow_otherwise() {
         use super::digits;
         use std::borrow::Cow;
@@ -1229,6 +1508,74 @@ mod tests {
         assert_eq!(tallies.get("k_text"), Some(&1));
         assert_eq!(tallies.get("k_photo"), Some(&1));
         assert_eq!(tallies.get("h9"), Some(&2));
+        drop((counts, tallies));
+
+        assert!(
+            state.dirty.stats.lock().unwrap().len() <= 2,
+            "the mark is a transition, not a per-message write"
+        );
+    }
+
+    #[test]
+    fn a_chat_with_queued_work_is_never_evicted() {
+        use super::{ChatState, captcha};
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        const IDLE: Duration = Duration::from_secs(3600);
+
+        let now = (IDLE.as_millis() as u64) * 3 / 2;
+
+        let state = ChatState::default();
+        assert!(state.evictable(IDLE, now), "quiet and empty");
+
+        state.logs.lock().unwrap().push("a line".to_owned());
+        assert!(!state.evictable(IDLE, now));
+        state.logs.lock().unwrap().clear();
+
+        state.temp_media.lock().unwrap().push_back((Instant::now(), 1));
+        assert!(!state.evictable(IDLE, now));
+        state.temp_media.lock().unwrap().clear();
+
+        state.captchas.lock().unwrap().insert(
+            7,
+            captcha::Pending {
+                answer: 0,
+                message_id: 1,
+                started: Instant::now(),
+            },
+        );
+        assert!(!state.evictable(IDLE, now));
+        state.captchas.lock().unwrap().clear();
+
+        state.bump("joined");
+        assert!(!state.evictable(IDLE, now));
+        state.tallies.lock().unwrap().clear();
+
+        state.count(7, || "Ali".to_owned(), ["k_text", "h9"]);
+        assert!(!state.evictable(IDLE, now));
+        state.counts.lock().unwrap().clear();
+        state.tallies.lock().unwrap().clear();
+
+        assert!(state.evictable(IDLE, now), "emptied again, so it may go");
+
+        state.last_seen.store(now, Ordering::Relaxed);
+        assert!(!state.evictable(IDLE, now));
+    }
+
+    #[test]
+    fn a_flushed_chat_marks_itself_again_when_it_speaks() {
+        use super::{ChatState, Dirty};
+
+        let state = ChatState::default();
+        state.bump("joined");
+        assert_eq!(Dirty::drain(&state.dirty.stats), vec![state.chat]);
+
+        state.tallies.lock().unwrap().clear();
+        assert!(Dirty::drain(&state.dirty.stats).is_empty());
+
+        state.bump("left");
+        assert_eq!(Dirty::drain(&state.dirty.stats), vec![state.chat]);
     }
 
     #[test]

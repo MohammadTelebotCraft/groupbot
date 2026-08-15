@@ -40,14 +40,18 @@ pub async fn set_auto_at(ctx: &Ctx, chat: i64, at: Option<u32>) {
                 .set_value(chat, AUTO_AT, &(at % 1440).to_string())
                 .await
         }
-        None => ctx.settings.set_value(chat, AUTO_AT, "").await,
+        None => {
+            ctx.settings.set(chat, AUTO_AT, false).await;
+        }
     }
 }
 
 pub async fn run_auto(ctx: &std::sync::Arc<Ctx>) {
     let now = ((super::stats::local_seconds() % 86_400) / 60) as u32;
     let day = super::stats::today();
-    for chat in ctx.settings.chats() {
+
+    let mut due = Vec::new();
+    for chat in ctx.settings.chats_with(AUTO_AT).await {
         if !auto_at(ctx, chat).is_some_and(|at| (0..=2).contains(&now.wrapping_sub(at))) {
             continue;
         }
@@ -60,9 +64,13 @@ pub async fn run_auto(ctx: &std::sync::Arc<Ctx>) {
         let Some(chat_ref) = ctx.chat_ref(chat) else {
             continue;
         };
+        due.push((chat, chat_ref));
+    }
 
-        let ctx = std::sync::Arc::clone(ctx);
-        tokio::spawn(async move {
+    let owner = std::sync::Arc::clone(ctx);
+    super::bounded(due, super::FLEET_CAMPAIGNS, move |(chat, chat_ref)| {
+        let ctx = std::sync::Arc::clone(&owner);
+        async move {
         let ctx = &*ctx;
 
         let Ok(marker) = ctx
@@ -93,8 +101,9 @@ pub async fn run_auto(ctx: &std::sync::Arc<Ctx>) {
         let _ = marker
             .edit(InputMessage::new().html(format!("<b>پاکسازی خودکار</b>\n\n{done}")))
             .await;
-        });
-    }
+        }
+    })
+    .await;
 }
 
 pub async fn handle_all(ctx: &Ctx, message: &Message) -> bool {
