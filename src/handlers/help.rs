@@ -5,6 +5,15 @@ pub struct Cmd {
     pub does: &'static str,
 }
 
+pub struct Example {
+    pub typed: &'static str,
+    pub result: &'static str,
+}
+
+const fn eg(typed: &'static str, result: &'static str) -> Example {
+    Example { typed, result }
+}
+
 pub struct Topic {
     pub id: &'static str,
 
@@ -12,6 +21,7 @@ pub struct Topic {
     pub title: &'static str,
     pub intro: &'static str,
     pub commands: &'static [Cmd],
+    pub examples: &'static [Example],
 
     pub extra: Option<fn() -> String>,
 
@@ -49,6 +59,10 @@ pub const TOPICS: &[Topic] = &[
             cmd("بازکردن پک", "قفل آن پک را بر می دارد"),
             cmd("قفل سنجاق", "سنجاق را روی همین پیام نگه می دارد"),
         ],
+        examples: &[
+            eg("قفل عکس", "از این به بعد هر عکسی که فرستاده شود پاک می شود."),
+            eg("بازکردن عکس", "قفل برداشته می شود و عکس ها می مانند."),
+        ],
         extra: Some(lock_names),
         notes: &[
             "بازکردن، باز کردن، آنلاک و بازکن هر چهار به جای هم کار می کنند.",
@@ -76,6 +90,11 @@ pub const TOPICS: &[Topic] = &[
             cmd("معاف", "از عضویت اجباری و اد اجباری معاف می کند"),
             cmd("حذف معاف", "معافیت را بر می دارد"),
         ],
+        examples: &[
+            eg("سکوت 10 دقیقه", "روی پیام کاربر ریپلای کنید. ده دقیقه ساکت می شود."),
+            eg("بن @ali 1 روز", "علی یک روز اخراج می شود و بعد خودش می تواند برگردد."),
+            eg("حذف بن", "روی پیام یا با آیدی عددی، بن برداشته می شود."),
+        ],
         extra: None,
         notes: &[
             "واحدها: ثانیه، دقیقه، ساعت، روز، هفته، ماه.",
@@ -98,6 +117,10 @@ pub const TOPICS: &[Topic] = &[
             cmd("حذف تگ", "مقام نمایشی را بر می دارد"),
             cmd("لیست ادمین", "ادمین های گروه و ادمین های ربات"),
             cmd("کانفیگ", "ثبت مالک و روشن کردن تنظیمات پیشنهادی"),
+        ],
+        examples: &[
+            eg("ترفیع @ali", "علی ادمین ربات می شود؛ از قفل ها معاف است ولی دسترسی تلگرامش عوض نمی شود."),
+            eg("تنظیم تگ مدیر ارشد", "روی پیام ادمین ریپلای کنید. مقامش در تلگرام «مدیر ارشد» می شود."),
         ],
         extra: None,
         notes: &[
@@ -125,6 +148,10 @@ pub const TOPICS: &[Topic] = &[
             cmd("ربات مجاز", "یک ربات را از قفل ربات استثنا می کند"),
             cmd("حذف ربات مجاز", "آن استثنا را بر می دارد"),
         ],
+        examples: &[
+            eg("ضد رگبار 10 5", "هر کس بیش از ده پیام در پنج ثانیه بفرستد سکوت می شود."),
+            eg("تنظیم عضویت اجباری @mychannel", "تا عضو کانال نشود، پیامش پاک می شود."),
+        ],
         extra: None,
         notes: &[
             "ضد هجوم فقط از پنل روشن می شود.",
@@ -145,6 +172,10 @@ pub const TOPICS: &[Topic] = &[
             cmd("تنظیم پاسخ سلام = درود", "همان، بدون ریپلای"),
             cmd("حذف پاسخ سلام", "آن پاسخ را بر می دارد"),
             cmd("تنظیم اعلان 15", "اعلان حذف پس از ۱۵ ثانیه پاک شود؛ صفر یعنی هرگز"),
+        ],
+        examples: &[
+            eg("تنظیم خوشامد سلام {نام} به {گروه} خوش آمدی", "هر عضو تازه این را با نام خودش می گیرد."),
+            eg("تنظیم پاسخ سلام = درود بر شما", "هر کس «سلام» بنویسد، «درود بر شما» می گیرد."),
         ],
         extra: None,
         notes: &[
@@ -167,6 +198,10 @@ pub const TOPICS: &[Topic] = &[
             cmd("تنظیم گزارش روزانه 21", "خلاصه هر روز سر این ساعت در گروه"),
             cmd("حذف گزارش روزانه", "گزارش روزانه را خاموش می کند"),
         ],
+        examples: &[
+            eg("قفل شب 23 تا 7", "هر شب ساعت ۲۳ گروه بسته و ۷ صبح باز می شود."),
+            eg("اسلوموشن 30", "هر عضو هر سی ثانیه یک پیام می تواند بفرستد."),
+        ],
         extra: None,
         notes: &[
             "ساعت ها به وقت تهران است.",
@@ -180,6 +215,7 @@ pub const TOPICS: &[Topic] = &[
         title: "رسانه موقت",
         intro: "عکس و فیلم و استیکر و باقی رسانه ها پس از مدتی خودشان پاک می شوند. گروهی که رسانه انبار نمی کند، چیز کمتری برای گزارش شدن دارد.",
         commands: &[],
+        examples: &[],
         extra: Some(temp_media_kinds),
         notes: &[
             "این بخش دستور متنی ندارد و فقط از پنل تنظیم می شود.",
@@ -200,6 +236,7 @@ pub const TOPICS: &[Topic] = &[
             cmd("لیست معاف", "معاف های شرط ورود"),
             cmd("پاکسازی لیست بن", "کل آن لیست را خالی می کند"),
         ],
+        examples: &[],
         extra: None,
         notes: &["لیست سیک و لیست خفه همان لیست بن و لیست سکوت هستند."],
     },
@@ -213,6 +250,10 @@ pub const TOPICS: &[Topic] = &[
             cmd("فیلتر کلمه ممد", "همان"),
             cmd("حذف فیلتر ممد", "کلمه را بر می دارد"),
             cmd("لیست فیلتر", "کل لیست، با حذف تکی"),
+        ],
+        examples: &[
+            eg("افزودن فیلتر تبلیغ", "هر پیامی که «تبلیغ» داشته باشد پاک می شود."),
+            eg("حذف فیلتر تبلیغ", "آن کلمه از لیست بر می گردد."),
         ],
         extra: None,
         notes: &[
@@ -236,6 +277,11 @@ pub const TOPICS: &[Topic] = &[
             cmd("پاکسازی لینک", "همه پیام های دارای لینک"),
             cmd("افزودن کلینر", "کلینر را به گروه می آورد و ادمین می کند"),
         ],
+        examples: &[
+            eg("حذف 99", "نود و نه پیام آخر گروه پاک می شود."),
+            eg("پاکسازی عکس", "همه عکس های گروه از اول تا حالا پاک می شوند."),
+            eg("حذف پیام", "روی پیام کاربر ریپلای کنید. همه پیام هایش در گروه پاک می شود."),
+        ],
         extra: None,
         notes: &[
             "نوع های دیگر پاکسازی: مدیا · گیف · موزیک · مکان · مخاطب · نظرسنجی · ویدیو پیام",
@@ -256,6 +302,10 @@ pub const TOPICS: &[Topic] = &[
             cmd("تنظیم گزارش روزانه 21", "خلاصه هر روز سر ساعت ۲۱"),
             cmd("حذف گزارش روزانه", "گزارش روزانه را خاموش می کند"),
         ],
+        examples: &[
+            eg("امار", "داشبورد گروه با برترین ها، ساعت های شلوغ و نوع پیام ها."),
+            eg("اطلاعات", "روی پیام کاربر ریپلای کنید تا کارتش را ببینید."),
+        ],
         extra: None,
         notes: &[
             "«امار» و «اطلاعات» را همه می توانند بفرستند.",
@@ -271,6 +321,9 @@ pub const TOPICS: &[Topic] = &[
             cmd("اختیارات گروه", "وضعیت همه اختیارات"),
             cmd("اختیار عکس بسته", "یک اختیار را می بندد"),
             cmd("اختیار عکس باز", "همان را باز می کند"),
+        ],
+        examples: &[
+            eg("اختیار عکس بسته", "اعضای عادی دیگر عکس نمی فرستند؛ ادمین ها می فرستند."),
         ],
         extra: Some(rights_names),
         notes: &[
@@ -288,6 +341,7 @@ pub const TOPICS: &[Topic] = &[
             cmd("لاگ", "وضعیت فعلی کانال لاگ"),
             cmd("حذف لاگ", "کانال لاگ را بر می دارد"),
         ],
+        examples: &[],
         extra: Some(log_kinds),
         notes: &[
             "اول ربات را در کانال ادمین کنید.",
@@ -301,6 +355,7 @@ pub const TOPICS: &[Topic] = &[
         title: "محدودیت مدیران",
         intro: "ادمین بودن یک چیز است و اینکه به کدام دستورها دسترسی داشته باشد چیز دیگری. مالک می تواند هر کدام را جدا ببندد.",
         commands: &[],
+        examples: &[],
         extra: Some(capability_names),
         notes: &[
             "این بخش دستور متنی ندارد و فقط از پنل تنظیم می شود.",
@@ -314,6 +369,7 @@ pub const TOPICS: &[Topic] = &[
         title: "حالت سختگیرانه",
         intro: "به طور عادی پیامی که قفل بگیرد فقط پاک می شود. با این حالت، فرستنده اش هم پس از چند تخلف تنبیه می شود.",
         commands: &[],
+        examples: &[],
         extra: None,
         notes: &[
             "این بخش دستور متنی ندارد و فقط از پنل تنظیم می شود.",
@@ -330,6 +386,9 @@ pub const TOPICS: &[Topic] = &[
             cmd("ضد رگبار 10 5", "بیش از ۱۰ پیام در ۵ ثانیه"),
             cmd("تنظیم رگبار 10 5", "همان"),
         ],
+        examples: &[
+            eg("ضد رگبار 10 5", "بیش از ده پیام در پنج ثانیه یعنی سکوت یا بن."),
+        ],
         extra: None,
         notes: &["خاموش کردنش از دکمه بالای همین صفحه است."],
     },
@@ -339,6 +398,7 @@ pub const TOPICS: &[Topic] = &[
         title: "ضد هجوم",
         intro: "ورود ناگهانی چند عضو در یک بازه کوتاه یعنی هجوم؛ تازه واردها تا مدتی سکوت می شوند تا فرصت بررسی باشد.",
         commands: &[],
+        examples: &[],
         extra: None,
         notes: &[
             "این بخش دستور متنی ندارد و فقط از همین صفحه تنظیم می شود.",
@@ -351,6 +411,7 @@ pub const TOPICS: &[Topic] = &[
         title: "ضد خیانت ادمین",
         intro: "ادمینی که در مدت کوتاهی چند نفر را حذف کند، خودش عزل می شود. مالک ربات شامل آن نمی شود.",
         commands: &[cmd("تنظیم خیانت 5 10", "۵ حذف در ۱۰ دقیقه")],
+        examples: &[],
         extra: None,
         notes: &["می شود انتخاب کرد که فقط عزل شود یا عزل و بن."],
     },
@@ -360,6 +421,7 @@ pub const TOPICS: &[Topic] = &[
         title: "احراز هویت",
         intro: "عضو تازه تا وقتی ایموجی درست را از روی تصویر نزند ساکت می ماند. تصویر هر ایموجی یک بار ساخته می شود و بعد از آن از حافظه تلگرام می آید.",
         commands: &[cmd("تنظیم احراز 120", "مهلت پاسخ، به ثانیه")],
+        examples: &[],
         extra: None,
         notes: &["پس از پایان مهلت یا سکوت می ماند یا اخراج می شود؛ انتخابش در همین صفحه است."],
     },
@@ -373,6 +435,10 @@ pub const TOPICS: &[Topic] = &[
             cmd("حذف اخطار", "یک اخطار کم می کند"),
             cmd("اخطارها", "اخطارهای یک کاربر"),
             cmd("تنظیم اخطار 5", "سقف اخطار"),
+        ],
+        examples: &[
+            eg("اخطار", "روی پیام کاربر ریپلای کنید. یک اخطار می گیرد."),
+            eg("تنظیم اخطار 5", "در اخطار پنجم کار تعیین شده انجام می شود."),
         ],
         extra: None,
         notes: &["«وارن» هم همان اخطار است."],
@@ -388,6 +454,9 @@ pub const TOPICS: &[Topic] = &[
             cmd("حذف عضویت اجباری", "شرط را بر می دارد"),
             cmd("معاف", "یک کاربر را معاف می کند"),
         ],
+        examples: &[
+            eg("تنظیم عضویت اجباری @mychannel", "تا عضو نشود پیامش پاک می شود و دکمه عضویت می گیرد."),
+        ],
         extra: None,
         notes: &["ربات باید در آن کانال ادمین باشد تا بتواند عضویت را ببیند."],
     },
@@ -402,6 +471,9 @@ pub const TOPICS: &[Topic] = &[
             cmd("حذف اد اجباری", "شرط را بر می دارد"),
             cmd("معاف", "یک کاربر را معاف می کند"),
         ],
+        examples: &[
+            eg("تنظیم اد اجباری 5", "تا پنج نفر اضافه نکند اجازه نوشتن ندارد."),
+        ],
         extra: None,
         notes: &["عدد صفر یعنی خاموش."],
     },
@@ -411,6 +483,7 @@ pub const TOPICS: &[Topic] = &[
         title: "اعلان شرط",
         intro: "اعلانی که به کسی که هنوز شرط ورود را انجام نداده نشان داده می شود. هم فاصله بین اعلان ها و هم حذف خودکارشان قابل تنظیم است.",
         commands: &[cmd("تنظیم اعلان شرط 120 30", "هر ۱۲۰ ثانیه یک بار، حذف پس از ۳۰ ثانیه")],
+        examples: &[],
         extra: None,
         notes: &["فاصله صفر یعنی هر بار، و حذف صفر یعنی اعلان پاک نشود."],
     },
@@ -420,6 +493,7 @@ pub const TOPICS: &[Topic] = &[
         title: "اعلان حذف",
         intro: "وقتی قفلی پیامی را حذف می کند، ربات یک اعلان کوتاه می گذارد تا فرستنده بداند چرا. اعلان خودش هم پس از مدتی پاک می شود.",
         commands: &[cmd("تنظیم اعلان 15", "پاک شدن پس از ۱۵ ثانیه")],
+        examples: &[],
         extra: None,
         notes: &["صفر یعنی اعلان هرگز پاک نشود."],
     },
@@ -433,6 +507,9 @@ pub const TOPICS: &[Topic] = &[
             cmd("تنظیم پاسخ سلام = درود", "بدون ریپلای"),
             cmd("حذف پاسخ سلام", "آن پاسخ را بر می دارد"),
             cmd("لیست پاسخ", "همه پاسخ ها، با حذف تکی"),
+        ],
+        examples: &[
+            eg("تنظیم پاسخ قیمت = لیست قیمت در کانال است", "هر کس «قیمت» بنویسد این را می گیرد."),
         ],
         extra: None,
         notes: &[
@@ -451,6 +528,9 @@ pub const TOPICS: &[Topic] = &[
             cmd("نمایش خوشامد", "خوشامد فعلی"),
             cmd("حذف خوشامد", "خاموشش می کند"),
         ],
+        examples: &[
+            eg("تنظیم خوشامد سلام {نام}", "هر عضو تازه با نام خودش خوشامد می گیرد."),
+        ],
         extra: None,
         notes: &[
             "تگ ها: {نام} · {منشن} · {آیدی} · {یوزرنیم} · {گروه}",
@@ -467,6 +547,9 @@ pub const TOPICS: &[Topic] = &[
             cmd("قفل شب 23:30 تا 7:15", "با دقیقه"),
             cmd("قفل شب خاموش", "بر می دارد"),
         ],
+        examples: &[
+            eg("قفل شب 23:30 تا 7", "هر شب ۲۳:۳۰ بسته و ۷ صبح باز می شود."),
+        ],
         extra: None,
         notes: &["بستن و باز کردن از راه اختیارات گروه انجام می شود، پس ادمین ها همچنان می نویسند."],
     },
@@ -479,6 +562,7 @@ pub const TOPICS: &[Topic] = &[
             cmd("اسلوموشن 30", "هر ۳۰ ثانیه یک پیام"),
             cmd("اسلوموشن 0", "بر می دارد"),
         ],
+        examples: &[],
         extra: None,
         notes: &[
             "تلگرام فقط ۱۰، ۳۰، ۶۰، ۳۰۰، ۹۰۰ و ۳۶۰۰ ثانیه را قبول می کند؛ عدد دیگر به نزدیک ترین پایین تر می رود.",
@@ -491,6 +575,7 @@ pub const TOPICS: &[Topic] = &[
         title: "پاکسازی خودکار",
         intro: "هر روز سر ساعت مشخص، تعدادی از پیام های گروه پاک می شوند.",
         commands: &[],
+        examples: &[],
         extra: None,
         notes: &[
             "این بخش دستور متنی ندارد و فقط از همین صفحه تنظیم می شود.",
@@ -507,6 +592,7 @@ pub const TOPICS: &[Topic] = &[
             cmd("گزارش روزانه 21:30", "با دقیقه"),
             cmd("حذف گزارش روزانه", "خاموشش می کند"),
         ],
+        examples: &[],
         extra: None,
         notes: &["اگر فرستادن گزارش یک شب انجام نشود، تیک بعدی دوباره تلاش می کند."],
     },
@@ -516,6 +602,7 @@ pub const TOPICS: &[Topic] = &[
         title: "موارد تخلف",
         intro: "انتخاب اینکه کدام قفل ها در حالت سختگیرانه تخلف حساب شوند. باقی قفل ها فقط پیام را پاک می کنند.",
         commands: &[],
+        examples: &[],
         extra: None,
         notes: &[
             "این بخش دستور متنی ندارد و فقط از همین صفحه تنظیم می شود.",
@@ -542,6 +629,10 @@ pub const TOPICS: &[Topic] = &[
             cmd("حذف سنجاق", "سنجاق را بر می دارد"),
             cmd("تگ همه", "اعضا را دسته دسته صدا می زند"),
             cmd("تگ 30 بیاید", "۳۰ نفر، با این متن"),
+        ],
+        examples: &[
+            eg("تگ 30 بیایید", "سی نفر با متن «بیایید» صدا زده می شوند."),
+            eg("سنجاق", "روی پیام ریپلای کنید تا سنجاق شود."),
         ],
         extra: None,
         notes: &[
@@ -570,19 +661,25 @@ fn lock_names() -> String {
             .map(|lock| lock.names[0])
             .unwrap_or(key)
     }
-    let mut out = format!("<b>قفل ها</b> ({})\n", fa(locks::LOCKS.len()));
-    for (group, keys) in GROUPS {
-        let names: Vec<&str> = keys.iter().map(|key| name_of(key)).collect();
-        out.push_str(&format!("‹ <b>{group}</b> · {}\n", names.join(" · ")));
-    }
-    out
+    let lines: Vec<String> = GROUPS
+        .iter()
+        .map(|(group, keys)| {
+            let names: Vec<&str> = keys.iter().map(|key| name_of(key)).collect();
+            format!("<b>{group}</b> · {}", names.join(" · "))
+        })
+        .collect();
+    format!(
+        "\n<b>هر قفل</b> · {}\n{}",
+        fa(locks::LOCKS.len()),
+        quoted(&lines.join("\n\n"), true)
+    )
 }
 
 fn listed(heading: &str, names: &[&str]) -> String {
     format!(
-        "<b>{heading}</b> ({})\n‹ {}\n",
+        "\n<b>{heading}</b> · {}\n{}",
         fa(names.len()),
-        names.join(" · ")
+        quoted(&names.join("\n"), true)
     )
 }
 
@@ -610,6 +707,21 @@ pub fn find(id: &str) -> Option<&'static Topic> {
     TOPICS.iter().find(|topic| topic.id == id)
 }
 
+static RENDERED: std::sync::LazyLock<Vec<(&'static str, String)>> =
+    std::sync::LazyLock::new(|| {
+        TOPICS
+            .iter()
+            .map(|topic| (topic.id, page(topic)))
+            .collect()
+    });
+
+pub fn rendered(id: &str) -> Option<&'static str> {
+    RENDERED
+        .iter()
+        .find(|(topic, _)| *topic == id)
+        .map(|(_, page)| page.as_str())
+}
+
 fn fa(number: usize) -> String {
     number
         .to_string()
@@ -623,43 +735,67 @@ fn fa(number: usize) -> String {
 
 pub fn page(topic: &Topic) -> String {
     let mut out = format!(
-        "{} <b>راهنما</b> › <b>{}</b>\n\n{}",
+        "{} <b>راهنما</b> › <b>{}</b>\n\n{}\n",
         topic.icon, topic.title, topic.intro
     );
 
     if !topic.commands.is_empty() {
-        out.push_str(&format!("\n\n<b>دستورها</b> ({})\n", fa(topic.commands.len())));
-        for command in topic.commands {
-            out.push_str(&format!("<code>{}</code> · {}\n", command.form, command.does));
-        }
-        out.pop();
+        out.push_str(&format!("\n<b>دستورها</b> · {}\n", fa(topic.commands.len())));
+        let lines: Vec<String> = topic
+            .commands
+            .iter()
+            .map(|command| format!("<code>{}</code> · {}", command.form, command.does))
+            .collect();
+
+        out.push_str(&quoted(&lines.join("\n"), false));
     }
+
+    if !topic.examples.is_empty() {
+        out.push_str("\n<b>مثال</b>\n");
+        let blocks: Vec<String> = topic
+            .examples
+            .iter()
+            .map(|example| format!("<code>{}</code>\n{}", example.typed, example.result))
+            .collect();
+        out.push_str(&quoted(&blocks.join("\n\n"), false));
+    }
+
     if let Some(extra) = topic.extra {
-        out.push_str("\n\n");
-        out.push_str(extra().trim_end());
+        out.push_str(&extra());
     }
-    if !topic.notes.is_empty() {
-        out.push('\n');
-        for note in topic.notes {
-            out.push_str(&format!("\n<i>‹ {note}</i>"));
-        }
+
+    for note in topic.notes {
+        out.push_str(&format!("\n<i>‹ {note}</i>"));
     }
     out
+}
+
+fn quoted(body: &str, expandable: bool) -> String {
+    let tag = if expandable {
+        "<blockquote expandable>"
+    } else {
+        "<blockquote>"
+    };
+    format!("{tag}{body}</blockquote>\n")
 }
 
 pub fn index() -> String {
     let commands: usize = TOPICS.iter().map(|topic| topic.commands.len()).sum();
     format!(
-        "<b>راهنما</b>\n\n\
-         بخش ها · <b>{}</b>\n\
-         دستورها · <b>{}</b>\n\
-         قفل ها · <b>{}</b>\n\n\
-         یک بخش را بزنید تا دستورهایش را ببینید.\n\
-         هر دستور تک عرض نوشته شده و با یک تپ کپی می شود.\n\n\
-         <i>هدف هر دستور: ریپلای، یوزرنیم یا آیدی عددی</i>",
-        fa(INDEX.len()),
-        fa(commands),
-        fa(locks::LOCKS.len()),
+        "📖 <b>راهنما</b>\n\n\
+         یک بخش را بزنید تا دستورها، مثال ها و نکته هایش را ببینید.\n\n\
+         {}\n\
+         <i>‹ هر دستور تک عرض نوشته شده و با یک تپ کپی می شود.</i>\n\
+         <i>‹ هدف هر دستور: ریپلای، یوزرنیم یا آیدی عددی.</i>",
+        quoted(
+            &format!(
+                "بخش ها · <b>{}</b>\nدستورها · <b>{}</b>\nقفل ها · <b>{}</b>",
+                fa(INDEX.len()),
+                fa(commands),
+                fa(locks::LOCKS.len()),
+            ),
+            false,
+        ),
     )
 }
 
@@ -852,7 +988,13 @@ mod tests {
     #[test]
     fn payloads_fit_telegram() {
         for topic in TOPICS {
-            let longest = format!("h:{}:{}:{}", i64::MAX, i64::MIN, topic.id);
+            let longest = format!(
+                "h:{}:{}:{}:{}",
+                i64::MAX,
+                i64::MIN,
+                super::super::panel::FROM_PANEL,
+                topic.id
+            );
             assert!(longest.len() <= 64, "payload too long for {}", topic.id);
             assert!(!topic.id.contains(':'), "{} has a colon in its id", topic.id);
         }

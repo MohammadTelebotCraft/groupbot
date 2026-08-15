@@ -33,6 +33,11 @@ pub async fn handle(ctx: &Ctx, query: &CallbackQuery) {
         return;
     }
 
+    if let Some(action) = data.strip_prefix("h:") {
+        super::panel::on_help(ctx, query, action).await;
+        return;
+    }
+
     if !presser_can_manage(ctx, query, chat).await {
         let _ = query
             .answer()
@@ -72,11 +77,6 @@ pub async fn handle(ctx: &Ctx, query: &CallbackQuery) {
     }
     if let Some(payload) = data.strip_prefix("a:") {
         super::promote::on_callback(ctx, query, payload, chat).await;
-        return;
-    }
-
-    if let Some(action) = data.strip_prefix("h:") {
-        super::panel::on_help(ctx, query, action).await;
         return;
     }
     if let Some(action) = data.strip_prefix("p:") {

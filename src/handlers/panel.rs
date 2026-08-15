@@ -246,16 +246,31 @@ fn payload(opener: i64, chat: i64, action: &str) -> Vec<u8> {
     format!("p:{opener}:{chat}:{action}").into_bytes()
 }
 
-fn help_payload(opener: i64, chat: i64, topic: &str) -> Vec<u8> {
-    format!("h:{opener}:{chat}:{topic}").into_bytes()
+fn help_payload(opener: i64, chat: i64, action: &str) -> Vec<u8> {
+    format!("h:{opener}:{chat}:{action}").into_bytes()
+}
+
+pub const FROM_PANEL: &str = "p";
+
+fn help_topic(opener: i64, chat: i64, from_panel: bool, topic: &str) -> Vec<u8> {
+    let origin = if from_panel { FROM_PANEL } else { "i" };
+    help_payload(opener, chat, &format!("{origin}:{topic}"))
+}
+
+fn help_origin(action: &str) -> (bool, &str) {
+    match action.split_once(':') {
+        Some((FROM_PANEL, topic)) => (true, topic),
+        Some((_, topic)) => (false, topic),
+        None => (false, action),
+    }
 }
 
 fn back_row(opener: i64, chat: i64, back: &str, here: &str) -> Vec<Button> {
     let mut row = vec![Button::data("‹ بازگشت", payload(opener, chat, back))];
     if help::find(here).is_some() {
         row.push(Button::data(
-            "؟  راهنما",
-            help_payload(opener, chat, here),
+            "📖  راهنما",
+            help_topic(opener, chat, true, here),
         ));
     }
     row
@@ -263,7 +278,7 @@ fn back_row(opener: i64, chat: i64, back: &str, here: &str) -> Vec<Button> {
 
 pub async fn on_help(ctx: &Ctx, query: &CallbackQuery, payload_text: &str) {
     let mut parts = payload_text.splitn(3, ':');
-    let (Some(opener), Some(chat), Some(topic)) = (parts.next(), parts.next(), parts.next())
+    let (Some(opener), Some(chat), Some(action)) = (parts.next(), parts.next(), parts.next())
     else {
         return;
     };
@@ -280,7 +295,7 @@ pub async fn on_help(ctx: &Ctx, query: &CallbackQuery, payload_text: &str) {
     }
     let _ = ctx;
 
-    if topic == help::INDEX_ID {
+    if action == help::INDEX_ID {
         let _ = query
             .answer()
             .edit(
@@ -292,23 +307,29 @@ pub async fn on_help(ctx: &Ctx, query: &CallbackQuery, payload_text: &str) {
         return;
     }
 
-    let Some(found) = help::find(topic) else {
+    let (from_panel, topic) = help_origin(action);
+    let Some(found) = help::rendered(topic) else {
         return;
     };
 
-    let back = match is_page(topic) {
+    let back = match from_panel && is_page(topic) {
         true => payload(opener, chat, topic),
         false => help_payload(opener, chat, help::INDEX_ID),
     };
+    let mut row = vec![Button::data("‹ بازگشت", back)];
+
+    if from_panel {
+        row.push(Button::data(
+            "📖  فهرست",
+            help_payload(opener, chat, help::INDEX_ID),
+        ));
+    }
     let _ = query
         .answer()
         .edit(
             InputMessage::new()
-                .html(help::page(found))
-                .reply_markup(ReplyMarkup::from_buttons(&[vec![Button::data(
-                    "‹ بازگشت",
-                    back,
-                )]])),
+                .html(found)
+                .reply_markup(ReplyMarkup::from_buttons(&[row])),
         )
         .await;
 }
@@ -321,8 +342,8 @@ pub fn index_markup(opener: i64, chat: i64) -> ReplyMarkup {
                 .filter_map(|id| help::find(id))
                 .map(|topic| {
                     Button::data(
-                        format!("{}  {}", topic.icon, topic.title),
-                        help_payload(opener, chat, topic.id),
+                        format!("{}  {}  ›", topic.icon, topic.title),
+                        help_topic(opener, chat, false, topic.id),
                     )
                 })
                 .collect()
@@ -676,7 +697,7 @@ fn root_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
         vec![Button::data("⚙️  تنظیمات پیشرفته  ›", payload(opener, chat, "adv"))],
         vec![Button::data("📋  لیست ها  ›", payload(opener, chat, "ls"))],
         vec![
-            Button::data("؟  راهنما", help_payload(opener, chat, help::INDEX_ID)),
+            Button::data("📖  راهنما", help_payload(opener, chat, help::INDEX_ID)),
             Button::data("بستن", payload(opener, chat, "close")),
         ],
     ])
@@ -1687,5 +1708,19 @@ mod tests {
                 lock.key
             );
         }
+    }
+
+    #[test]
+    fn back_goes_where_the_reader_came_from() {
+        assert_eq!(help_origin("p:locks"), (true, "locks"));
+        assert!(is_page("locks"));
+
+        assert_eq!(help_origin("i:locks"), (false, "locks"));
+
+        assert_eq!(help_origin("i:usr"), (false, "usr"));
+        assert_eq!(help_origin("p:usr"), (true, "usr"));
+        assert!(!is_page("usr"), "usr has no panel page, so back must be the index");
+
+        assert_eq!(help_origin("locks"), (false, "locks"));
     }
 }
