@@ -92,6 +92,8 @@ pub const LOCKS: &[Lock] = &[
     Lock { key: SERVICE, names: &["سرویس", "سرویس تلگرام", "پیام سرویس"], matches: never },
 
     Lock { key: super::bots::LOCK, names: &["ربات", "بات"], matches: never },
+
+    Lock { key: super::biolink::LOCK, names: &["لینک در بایو", "لینک بایو", "بایو"], matches: never },
 ];
 
 const ALL: &[&str] = &["همه", "همه چیز", "کل"];
@@ -143,7 +145,7 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
 
     if let Some((on, name)) = parse(text) {
         if !can_manage(ctx, message).await {
-            return enforce(ctx, message, chat, false, view).await;
+            return moderate(ctx, message, chat, view).await;
         }
 
         if !super::limits::allowed(ctx, message, super::limits::SET) {
@@ -207,14 +209,30 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
         return true;
     }
 
-    enforce(ctx, message, chat, false, view).await
+    moderate(ctx, message, chat, view).await
+}
+
+async fn moderate(
+    ctx: &std::sync::Arc<Ctx>,
+    message: &Message,
+    chat: i64,
+    view: &View<'_>,
+) -> bool {
+    let bio = super::biolink::tripped(ctx, chat, message).await;
+    let forced = bio.then(|| lock(super::biolink::LOCK)).flatten();
+    let acted = enforce(ctx, message, chat, forced, view).await;
+
+    if acted && bio {
+        super::biolink::punish(ctx, message, chat).await;
+    }
+    acted
 }
 
 pub async fn on_edit(ctx: &std::sync::Arc<Ctx>, message: &Message) {
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return;
     };
-    let edits_locked = ctx.settings.is_locked(chat, EDIT);
+    let edits_locked = ctx.settings.is_locked(chat, EDIT).then(|| lock(EDIT)).flatten();
     let view = View::new(message);
     enforce(ctx, message, chat, edits_locked, &view).await;
 }
@@ -241,6 +259,10 @@ pub fn scan(ctx: &Ctx, chat: i64, view: &View<'_>) -> Option<&'static str> {
     tripped(ctx, chat, view).map(|lock| lock.names[0])
 }
 
+fn lock(key: &str) -> Option<&'static Lock> {
+    LOCKS.iter().find(|lock| lock.key == key)
+}
+
 fn tripped(ctx: &Ctx, chat: i64, view: &View<'_>) -> Option<&'static Lock> {
     let armed: Vec<&'static Lock> = ctx.settings.with_chat(chat, |settings| {
         LOCKS
@@ -255,13 +277,13 @@ async fn enforce(
     ctx: &std::sync::Arc<Ctx>,
     message: &Message,
     chat: i64,
-    forced: bool,
+    forced: Option<&'static Lock>,
     view: &View<'_>,
 ) -> bool {
     let filtered = super::filters::matches(ctx, chat, view);
     let banned_pack = super::packs::is_banned(ctx, chat, view);
-    let matched = tripped(ctx, chat, view);
-    if !forced && !filtered && !banned_pack && matched.is_none() {
+    let matched = tripped(ctx, chat, view).or(forced);
+    if matched.is_none() && !filtered && !banned_pack {
         return false;
     }
     if super::is_exempt(ctx, message).await {
@@ -276,11 +298,10 @@ async fn enforce(
     }
     ctx.bump(chat, super::stats::DELETED);
     let sender_name = super::name_of(message);
-    let reason_for_log = match (matched, filtered, banned_pack) {
-        (Some(lock), ..) => lock.names[0],
-        (None, true, _) => "فیلتر کلمه",
-        (None, false, true) => "پک استیکر",
-        (None, false, false) => "ویرایش",
+    let reason_for_log = match (matched, filtered) {
+        (Some(lock), _) => lock.names[0],
+        (None, true) => "فیلتر کلمه",
+        (None, false) => "پک استیکر",
     };
     super::log::write(
         ctx,
@@ -301,23 +322,17 @@ async fn enforce(
         },
     )
     .await;
-    let cause = match (matched, filtered, banned_pack) {
-        (Some(lock), ..) => lock.key,
-        (None, true, _) => super::strict::FILTER,
-        (None, false, true) => super::strict::PACK,
-        (None, false, false) => EDIT,
+    let cause = match (matched, filtered) {
+        (Some(lock), _) => lock.key,
+        (None, true) => super::strict::FILTER,
+        (None, false) => super::strict::PACK,
     };
     let chances = super::strict::punish(ctx, message, chat, cause).await;
 
     if filtered {
         super::filters::notify(ctx, message, chat, &text, chances).await;
     } else {
-        let reason = match (matched, banned_pack) {
-            (Some(lock), _) => lock.names[0],
-            (None, true) => "پک استیکر",
-            (None, false) => "ویرایش",
-        };
-        super::notice::send(ctx, message, chat, reason, chances).await;
+        super::notice::send(ctx, message, chat, reason_for_log, chances).await;
     }
     true
 }
@@ -528,7 +543,7 @@ fn markup_has_telegram_link(markup: &tl::enums::ReplyMarkup) -> bool {
         .any(|url| text_has_telegram_link(url))
 }
 
-fn text_has_link(text: &str) -> bool {
+pub(super) fn text_has_link(text: &str) -> bool {
     ["http://", "https://", "t.me/", "telegram.me/", "www."]
         .iter()
         .any(|needle| text.contains(needle))

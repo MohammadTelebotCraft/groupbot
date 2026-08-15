@@ -1,6 +1,7 @@
 pub mod answers;
 pub mod autoconfig;
 pub mod betrayal;
+pub mod biolink;
 pub mod bots;
 pub mod callbacks;
 pub mod captcha;
@@ -132,6 +133,10 @@ pub struct Ctx {
     pending_writes: std::sync::Mutex<Vec<(i64, i32, i64)>>,
 
     last_armed: AtomicU64,
+
+    bios: RwLock<HashMap<i64, (Instant, bool)>>,
+
+    bio_fetch: OnceLock<tokio::sync::Semaphore>,
 }
 
 pub const NOTICE_EVERY: Duration = Duration::from_secs(120);
@@ -158,6 +163,12 @@ const ADDS_TTL: Duration = Duration::from_secs(300);
 const PER_CHAT_MAX: usize = 20_000;
 const CAPTCHA_TTL: Duration = Duration::from_secs(900);
 
+const BIO_TTL: Duration = Duration::from_secs(600);
+
+const BIO_MAX: usize = 10_000;
+
+const BIO_FETCHES: usize = 4;
+
 impl Ctx {
     pub fn new(client: Client, settings: Arc<Settings>) -> Self {
         Self {
@@ -176,6 +187,8 @@ impl Ctx {
             join_refs: RwLock::new(HashMap::new()),
             pending_writes: std::sync::Mutex::new(Vec::new()),
             last_armed: AtomicU64::new(0),
+            bios: RwLock::new(HashMap::new()),
+            bio_fetch: OnceLock::new(),
         }
     }
 
@@ -232,6 +245,39 @@ impl Ctx {
         if let Some(state) = self.peek(chat) {
             state.members.lock().unwrap().remove(&user);
         }
+    }
+
+    pub fn claim_bio(&self, user: i64) -> Option<bool> {
+        let mut bios = self.bios.write().unwrap();
+        if let Some((at, seen)) = bios.get(&user)
+            && at.elapsed() < BIO_TTL
+        {
+            return Some(*seen);
+        }
+        if bios.len() >= BIO_MAX {
+            bios.retain(|_, (at, _)| at.elapsed() < BIO_TTL);
+        }
+        bios.insert(user, (Instant::now(), false));
+        None
+    }
+
+    pub fn remember_bio(&self, user: i64, has_link: bool) {
+        self.bios
+            .write()
+            .unwrap()
+            .insert(user, (Instant::now(), has_link));
+    }
+
+    pub fn forget_bio(&self, user: i64) {
+        self.bios.write().unwrap().remove(&user);
+    }
+
+    pub async fn bio_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.bio_fetch
+            .get_or_init(|| tokio::sync::Semaphore::new(BIO_FETCHES))
+            .acquire()
+            .await
+            .expect("the bio semaphore is never closed")
     }
 
     pub fn cached_adds(&self, chat: i64, user: i64) -> Option<u64> {
@@ -742,6 +788,8 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         )
     ) {
         state.bump(stats::JOINED);
+
+        let _ = biolink::tripped(ctx, chat, message).await;
         if let Some(grammers_client::tl::enums::MessageAction::ChatAddUser(action)) =
             message.action()
         {
@@ -1203,6 +1251,7 @@ mod tests {
         for file in [
             include_str!("mod.rs"),
             include_str!("betrayal.rs"),
+            include_str!("biolink.rs"),
             include_str!("bots.rs"),
             include_str!("callbacks.rs"),
             include_str!("captcha.rs"),

@@ -2,7 +2,7 @@ use grammers_client::message::Button;
 
 use super::style::{Colour, choice, data as coloured, toggle};
 use super::{
-    Ctx, betrayal, captcha, flood, join, limits, notice, purge, raid, strict, tempmedia, warns,
+    Ctx, betrayal, biolink, captcha, flood, join, limits, notice, purge, raid, strict, tempmedia, warns,
 };
 
 pub struct Pick {
@@ -286,6 +286,22 @@ pub const SETTINGS: &[Setting] = &[
         kind: Kind::Pick { options: MUTE_OR_BAN, default: "mute" },
     },
     Setting {
+        id: "bl_on", key: biolink::LOCK, label: "قفل لینک در بایو", section: "bl",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "bl_act", key: biolink::ACTION, label: "با متخلف", section: "bl",
+        kind: Kind::Pick {
+            options: &[
+                Pick { id: "bl_del", value: "del", label: "فقط حذف", danger: false },
+                Pick { id: "bl_mute", value: "mute", label: "سکوت", danger: false },
+                Pick { id: "bl_kick", value: "kick", label: "اخراج", danger: true },
+                Pick { id: "bl_ban", value: "ban", label: "بن", danger: true },
+            ],
+            default: "del",
+        },
+    },
+    Setting {
         id: "bt_act", key: betrayal::ACTION, label: "با ادمین", section: "bt",
         kind: Kind::Pick {
             options: &[
@@ -404,6 +420,11 @@ pub async fn apply(ctx: &Ctx, chat: i64, action: &str) -> Option<&'static str> {
             Kind::Flag if setting.id == action => {
                 let now_on = !ctx.settings.is_locked(chat, setting.key);
                 ctx.settings.set(chat, setting.key, now_on).await;
+
+                if super::locks::LOCKS.iter().any(|lock| lock.key == setting.key) {
+                    super::strict::sync_pick(ctx, chat, setting.key, now_on).await;
+                    super::bots::on_lock_set(ctx, chat, setting.key, now_on).await;
+                }
                 return Some(setting.section);
             }
             Kind::Pick { options, .. } => {

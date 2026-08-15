@@ -4,7 +4,7 @@ use grammers_client::update::CallbackQuery;
 use super::locks::LOCKS;
 use super::style::{Colour, choice, data as coloured, toggle};
 use super::{
-    Ctx, answers, betrayal, captcha, flood, help, join, limits, lists, log, notice, raid,
+    Ctx, answers, betrayal, biolink, captcha, flood, help, join, limits, lists, log, notice, raid,
     setting, strict, tempmedia, warns, welcome,
 };
 
@@ -234,7 +234,7 @@ fn parse_number(text: &str) -> Option<u32> {
 const PAGES: &[&str] = &[
     "root", "locks", "adv", "sec", "msg", "tm", "ls", "s", "rd", "sp", "bt", "fl",
     "wn", "cp", "nt", "an", "wc", "ng", "sl", "jn", "ad", "gp", "gr", "lg", "dr",
-    "ap", "tmed", "lim", "close", "page", "in", "on", "off", "ng_toggle", "ap_toggle",
+    "ap", "tmed", "lim", "bl", "close", "page", "in", "on", "off", "ng_toggle", "ap_toggle",
     "dr_toggle", "dr_now", "lg_off", "jn_off", "wc_off",
 ];
 
@@ -456,6 +456,7 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
         ),
         "bt" => (betrayal_title(ctx, chat), betrayal_markup(ctx, chat, opener)),
         "fl" => (flood_title(ctx, chat), flood_markup(ctx, chat, opener)),
+        "bl" => (biolink_title(ctx, chat), biolink_markup(ctx, chat, opener)),
         "wn" => (warns_title(ctx, chat), warns_markup(ctx, chat, opener)),
         "cp" => (captcha_title(ctx, chat), captcha_markup(ctx, chat, opener)),
         "nt" => (notice_title(ctx, chat), notice_markup(ctx, chat, opener)),
@@ -843,6 +844,20 @@ fn betrayal_title(ctx: &Ctx, chat: i64) -> String {
 
 fn betrayal_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
     built(ctx, chat, opener, &["bt_on", "bt_lim", "bt_win", "bt_act"], "sec", "bt")
+}
+
+fn biolink_title(ctx: &Ctx, chat: i64) -> String {
+    format!(
+        "<b>پنل مدیریت</b> › <b>لینک در بایو</b>\n\n\
+         عضوی که در بایوی پروفایلش لینک یا آیدی کانال دارد، پیامش حذف می شود.\n\n\
+         با متخلف · <b>{}</b>\n\n\
+         <i>بایو هر کاربر یک بار خوانده و ده دقیقه به خاطر سپرده می شود، پس اولین پیام هر کس رد می شود.</i>",
+        biolink::action_label(biolink::action_of(ctx, chat)),
+    )
+}
+
+fn biolink_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
+    built(ctx, chat, opener, &["bl_on", "bl_act"], "sec", "bl")
 }
 
 fn flood_title(ctx: &Ctx, chat: i64) -> String {
@@ -1458,6 +1473,11 @@ fn security_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             "🛡  ضد خیانت ادمین",
             payload(opener, chat, "bt"),
             ctx.settings.is_locked(chat, betrayal::MODE),
+        )],
+        vec![section(
+            "🪪  لینک در بایو",
+            payload(opener, chat, "bl"),
+            biolink::is_locked(ctx, chat),
         )],
         vec![Button::data("⚠️  اخطار  ›", payload(opener, chat, "wn"))],
         back_row(opener, chat, "adv", "sec"),

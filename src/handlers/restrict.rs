@@ -247,6 +247,13 @@ pub async fn apply(
         )
         .await;
     }
+
+    if done.is_ok()
+        && matches!(action, Unmute | Unban)
+        && let Some(user) = target.id.bare_id()
+    {
+        ctx.forget_bio(user);
+    }
     done
 }
 
