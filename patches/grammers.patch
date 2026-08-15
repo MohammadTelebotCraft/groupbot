@@ -293,7 +293,7 @@ index eeeaf43..1ad231f 100644
  
  /// Represents the information needed to correctly handle a specific `tl::enums::Update`.
 diff --git a/grammers-session/src/message_box/mod.rs b/grammers-session/src/message_box/mod.rs
-index f7a1278..4d172c2 100644
+index f7a1278..9ad91dc 100644
 --- a/grammers-session/src/message_box/mod.rs
 +++ b/grammers-session/src/message_box/mod.rs
 @@ -107,6 +107,7 @@ impl MessageBoxes {
@@ -324,7 +324,7 @@ index f7a1278..4d172c2 100644
      fn entry(&self, key: Key) -> Option<&LiveEntry> {
          self.entries
              .binary_search_by_key(&key, |entry| entry.key)
-@@ -247,6 +258,23 @@ impl MessageBoxes {
+@@ -247,6 +258,32 @@ impl MessageBoxes {
          }
  
          if now >= self.next_deadline {
@@ -333,15 +333,24 @@ index f7a1278..4d172c2 100644
 +                // its difference. Its next update recreates the entry at that update's own pts,
 +                // so nothing is lost but the ability to notice a gap older than the timeout.
 +                //
-+                // The `getting_diff_for` clause is not optional: `get_channel_difference` and
-+                // both of the apply/end paths panic on a key that is queued without a live
-+                // entry. `check_deadlines` returns early while a difference is in flight, so it
-+                // is unreachable today — one `||` is cheaper than trusting that it stays so.
++                // `possible_gap` is what makes this safe, and it is not optional. An entry with
++                // a gap is holding buffered updates that have not been dispatched yet, and its
++                // `effective_deadline` is the gap's own — half a second out, not fifteen
++                // minutes. Testing that deadline here would therefore delete a live channel
++                // moments after it gapped, discard the messages it was holding, and skip the
++                // difference that would have recovered the ones behind them. Idle means idle:
++                // no pending gap, and the plain deadline passed.
++                //
++                // The `getting_diff_for` clause guards the three paths that panic on a key
++                // queued without a live entry. `check_deadlines` returns early while a
++                // difference is in flight, so it is unreachable today — one `||` is cheaper
++                // than trusting that it stays so.
 +                //
 +                // `retain` keeps the order, so `entries` stays sorted for `binary_search_by_key`.
 +                self.entries.retain(|entry| {
 +                    !matches!(entry.key, Key::Channel(_))
-+                        || now < entry.effective_deadline()
++                        || entry.possible_gap.is_some()
++                        || now < entry.deadline
 +                        || self.getting_diff_for.contains(&entry.key)
 +                });
 +            }
@@ -349,10 +358,10 @@ index f7a1278..4d172c2 100644
                  .extend(self.entries.iter().filter_map(|entry| {
                      if now >= entry.effective_deadline() {
 diff --git a/grammers-session/src/message_box/tests.rs b/grammers-session/src/message_box/tests.rs
-index 68bb840..cef7032 100644
+index 68bb840..26d3e77 100644
 --- a/grammers-session/src/message_box/tests.rs
 +++ b/grammers-session/src/message_box/tests.rs
-@@ -629,3 +629,65 @@ fn test_process_socket_update_for_new_channel_dispatches_first_update() {
+@@ -629,3 +629,96 @@ fn test_process_socket_update_for_new_channel_dispatches_first_update() {
          ))
      );
  }
@@ -416,6 +425,37 @@ index 68bb840..cef7032 100644
 +        message_boxes.get_channel_difference(),
 +        Some(get_channel_difference(12, 34)),
 +        "the default has to stay exactly what every other client expects"
++    );
++}
++
++#[test]
++fn test_gapped_channel_is_never_dropped_as_idle() {
++    reset_time();
++    let mut message_boxes = MessageBoxes::new();
++    message_boxes.set_drop_idle_channels(true);
++    message_boxes.set_state(state(1, 1, 34, 34));
++    let channel_id = 12;
++    message_boxes.try_set_channel_state(channel_id, 34);
++
++    // An update that skips ahead is held back, waiting for the one in between.
++    assert_eq!(
++        message_boxes.process_updates(channel_updates(channel_id, NO_DATE, NO_SEQ, 37)),
++        Ok((Vec::new(), Vec::new(), Vec::new()))
++    );
++
++    // A gapped entry's effective deadline is the gap's own — half a second, not fifteen
++    // minutes. Dropping on that would throw the held update away and skip the difference
++    // that recovers what is missing, which is a command the user sent going unanswered.
++    advance_time_by(POSSIBLE_GAP_TIMEOUT * 2);
++    message_boxes.check_deadlines();
++    assert!(
++        message_boxes.get_channel_difference().is_some(),
++        "a gapped channel has to resolve its difference, not be forgotten"
++    );
++    assert_eq!(
++        message_boxes.session_state().channels,
++        vec![ChannelState { id: channel_id, pts: 34 }.into()],
++        "the entry has to still be there"
 +    );
 +}
 diff --git a/grammers-session/src/storages/sqlite.rs b/grammers-session/src/storages/sqlite.rs
