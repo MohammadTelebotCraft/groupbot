@@ -123,7 +123,7 @@ pub async fn flush(ctx: &Ctx) {
 
         let mut batch = String::new();
         for entry in entries {
-            if !batch.is_empty() && batch.len() + entry.len() > ROOM {
+            if !batch.is_empty() && batch.chars().count() + entry.chars().count() > ROOM {
                 send(ctx, target, &header, &batch).await;
                 batch.clear();
             }

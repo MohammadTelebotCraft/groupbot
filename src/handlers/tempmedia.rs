@@ -52,10 +52,9 @@ pub fn find(name: &str) -> Option<&'static Kind> {
 }
 
 pub fn minutes(ctx: &Ctx, chat: i64) -> u32 {
-    ctx.settings
-        .value_parsed(chat, MINUTES)
-        .unwrap_or(DEFAULT_MINUTES)
-        .clamp(MINUTES_RANGE.0, MINUTES_RANGE.1)
+    ctx.settings.with_chat(chat, |settings| {
+        settings.number(MINUTES, DEFAULT_MINUTES, MINUTES_RANGE)
+    })
 }
 
 pub fn reaches_everyone(ctx: &Ctx, chat: i64) -> bool {
@@ -81,12 +80,10 @@ pub async fn watch(ctx: &Ctx, message: &Message, view: &View<'_>) {
         if settings.is_locked(kind.key) {
             return None;
         }
-        let minutes = settings
-            .value(MINUTES)
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(DEFAULT_MINUTES)
-            .clamp(MINUTES_RANGE.0, MINUTES_RANGE.1);
-        Some((minutes, settings.value(AUDIENCE) == Some("all")))
+        Some((
+            settings.number(MINUTES, DEFAULT_MINUTES, MINUTES_RANGE),
+            settings.value(AUDIENCE) == Some("all"),
+        ))
     }) else {
         return;
     };

@@ -14,8 +14,10 @@ pub struct Lock {
 pub struct View<'a> {
     message: &'a Message,
     media: Option<Media>,
+    text: &'a str,
 
     lower: std::sync::OnceLock<String>,
+    digits: std::sync::OnceLock<std::borrow::Cow<'a, str>>,
 }
 
 impl<'a> View<'a> {
@@ -23,13 +25,23 @@ impl<'a> View<'a> {
         Self {
             message,
             media: message.media(),
+            text: message.text().trim(),
             lower: std::sync::OnceLock::new(),
+            digits: std::sync::OnceLock::new(),
         }
     }
 
     pub fn lower(&self) -> &str {
         self.lower
             .get_or_init(|| self.message.text().to_lowercase())
+    }
+
+    pub fn text(&self) -> &str {
+        self.text
+    }
+
+    pub fn digits(&self) -> &str {
+        self.digits.get_or_init(|| super::digits(self.text))
     }
 
     pub fn media(&self) -> Option<&Media> {
@@ -101,7 +113,7 @@ pub const FORWARD_USER: &str = "forward_user";
 const STATUS: &[&str] = &["قفل ها", "قفلها", "لیست قفل", "وضعیت قفل"];
 
 pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_>) -> bool {
-    let text = message.text().trim();
+    let text = view.text();
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
@@ -219,19 +231,24 @@ pub async fn service(ctx: &Ctx, message: &Message) {
     }
 }
 
-pub fn scan(ctx: &Ctx, chat: i64, message: &Message, view: &View<'_>) -> Option<&'static str> {
+pub fn scan(ctx: &Ctx, chat: i64, view: &View<'_>) -> Option<&'static str> {
     if super::filters::matches(ctx, chat, view) {
         return Some(super::strict::FILTER);
     }
-    if super::packs::is_banned(ctx, chat, message) {
+    if super::packs::is_banned(ctx, chat, view) {
         return Some(super::strict::PACK);
     }
-    ctx.settings.with_chat(chat, |settings| {
+    tripped(ctx, chat, view).map(|lock| lock.names[0])
+}
+
+fn tripped(ctx: &Ctx, chat: i64, view: &View<'_>) -> Option<&'static Lock> {
+    let armed: Vec<&'static Lock> = ctx.settings.with_chat(chat, |settings| {
         LOCKS
             .iter()
-            .find(|lock| settings.is_locked(lock.key) && (lock.matches)(view))
-            .map(|lock| lock.names[0])
-    })
+            .filter(|lock| settings.is_locked(lock.key))
+            .collect()
+    });
+    armed.into_iter().find(|lock| (lock.matches)(view))
 }
 
 async fn enforce(
@@ -242,12 +259,8 @@ async fn enforce(
     view: &View<'_>,
 ) -> bool {
     let filtered = super::filters::matches(ctx, chat, view);
-    let banned_pack = super::packs::is_banned(ctx, chat, message);
-    let matched = ctx.settings.with_chat(chat, |settings| {
-        LOCKS
-            .iter()
-            .find(|lock| settings.is_locked(lock.key) && (lock.matches)(view))
-    });
+    let banned_pack = super::packs::is_banned(ctx, chat, view);
+    let matched = tripped(ctx, chat, view);
     if !forced && !filtered && !banned_pack && matched.is_none() {
         return false;
     }
@@ -461,7 +474,7 @@ fn is_hashtag(view: &View) -> bool {
 
 fn has_inline_button(view: &View) -> bool {
     matches!(
-        view.message.reply_markup(),
+        markup_of(view),
         Some(tl::enums::ReplyMarkup::ReplyInlineMarkup(_))
     )
 }
@@ -495,6 +508,14 @@ fn markup_of<'a>(view: &'a View) -> Option<&'a tl::enums::ReplyMarkup> {
         tl::enums::Message::Message(message) => message.reply_markup.as_ref(),
         _ => None,
     }
+}
+
+fn fwd_of(raw: &tl::enums::Message) -> Option<&tl::types::MessageFwdHeader> {
+    let tl::enums::Message::Message(message) = raw else {
+        return None;
+    };
+    let tl::enums::MessageFwdHeader::Header(header) = message.fwd_from.as_ref()?;
+    Some(header)
 }
 
 fn markup_has_link(markup: &tl::enums::ReplyMarkup) -> bool {
@@ -570,11 +591,11 @@ fn is_mention(view: &View) -> bool {
 }
 
 fn is_forward_channel(view: &View) -> bool {
-    matches!(view.message.forward_header(), Some(tl::enums::MessageFwdHeader::Header(h)) if h.channel_post.is_some())
+    fwd_of(&view.message.raw).is_some_and(|header| header.channel_post.is_some())
 }
 
 fn is_forward_user(view: &View) -> bool {
-    matches!(view.message.forward_header(), Some(tl::enums::MessageFwdHeader::Header(h)) if h.channel_post.is_none())
+    fwd_of(&view.message.raw).is_some_and(|header| header.channel_post.is_none())
 }
 
 fn is_media(view: &View) -> bool {

@@ -38,7 +38,7 @@ pub mod toggles;
 pub mod tune;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -68,7 +68,8 @@ pub struct ChatState {
     tallies: std::sync::Mutex<HashMap<&'static str, u64>>,
     logs: std::sync::Mutex<Vec<String>>,
     temp_media: std::sync::Mutex<VecDeque<(Instant, i32)>>,
-    swept_bots: std::sync::Mutex<bool>,
+
+    swept_bots: AtomicBool,
     joined: std::sync::Mutex<HashMap<i32, Vec<Joined>>>,
     pending_numbers: std::sync::Mutex<HashMap<i64, PendingNumber>>,
 
@@ -76,6 +77,23 @@ pub struct ChatState {
 }
 
 impl ChatState {
+    pub fn bump(&self, counter: &'static str) {
+        *self.tallies.lock().unwrap().entry(counter).or_insert(0) += 1;
+    }
+
+    pub fn count(&self, user: i64, name: impl FnOnce() -> String, tallies: [&'static str; 2]) {
+        self.counts
+            .lock()
+            .unwrap()
+            .entry(user)
+            .or_insert_with(|| (0, name()))
+            .0 += 1;
+        let mut counters = self.tallies.lock().unwrap();
+        for counter in tallies {
+            *counters.entry(counter).or_insert(0) += 1;
+        }
+    }
+
     pub async fn slot(&self) -> tokio::sync::SemaphorePermit<'_> {
         self.inflight
             .get_or_init(|| tokio::sync::Semaphore::new(PER_CHAT_UPDATES))
@@ -242,16 +260,6 @@ impl Ctx {
             entries.remove(0);
         }
         entries.push(entry);
-    }
-
-    pub fn claim_bot_sweep(&self, chat: i64) -> bool {
-        let state = self.state(chat);
-        let mut claimed = state.swept_bots.lock().unwrap();
-        if *claimed {
-            return false;
-        }
-        *claimed = true;
-        true
     }
 
     pub fn queue_temp_media(&self, chat: i64, id: i32, due: Instant, due_at: i64) {
@@ -507,16 +515,8 @@ impl Ctx {
         *self.state(chat).peer.write().unwrap() = Some(peer);
     }
 
-    pub fn count_message(&self, chat: i64, user: i64, name: impl FnOnce() -> String) {
-        let state = self.state(chat);
-        let mut counts = state.counts.lock().unwrap();
-        let entry = counts.entry(user).or_insert_with(|| (0, name()));
-        entry.0 += 1;
-    }
-
     pub fn bump(&self, chat: i64, counter: &'static str) {
-        let state = self.state(chat);
-        *state.tallies.lock().unwrap().entry(counter).or_insert(0) += 1;
+        self.state(chat).bump(counter);
     }
 
     fn cached_admin(&self, chat: i64, user: i64) -> Option<bool> {
@@ -596,12 +596,19 @@ impl Ctx {
     }
 }
 
-pub async fn added_by_an_admin(ctx: &Ctx, chat_ref: PeerRef, chat: i64, actor: i64) -> bool {
-    owner(ctx, chat) == Some(actor)
-        || is_bot_admin(ctx, chat, actor)
+pub async fn is_admin(ctx: &Ctx, chat_ref: PeerRef, chat: i64, user: i64) -> bool {
+    owner(ctx, chat) == Some(user)
+        || is_bot_admin(ctx, chat, user)
         || chat_admins(ctx, chat_ref, chat)
             .await
-            .is_some_and(|admins| admins.contains(&actor))
+            .is_some_and(|admins| admins.contains(&user))
+}
+
+fn holds_the_group(participant: &grammers_client::peer::Participant) -> bool {
+    matches!(
+        participant.role,
+        grammers_client::peer::Role::Admin(_) | grammers_client::peer::Role::Creator(_)
+    )
 }
 
 pub async fn chat_admins(ctx: &Ctx, chat_ref: PeerRef, chat: i64) -> Option<HashSet<i64>> {
@@ -623,7 +630,9 @@ pub async fn chat_admins(ctx: &Ctx, chat_ref: PeerRef, chat: i64) -> Option<Hash
     loop {
         match participants.next().await {
             Ok(Some(participant)) => {
-                admins.insert(participant.user.id().bare_id_unchecked());
+                if holds_the_group(&participant) {
+                    admins.insert(participant.user.id().bare_id_unchecked());
+                }
             }
             Ok(None) => break,
             Err(e) => {
@@ -685,8 +694,11 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         return;
     }
 
-    if let Some(chat) = chat_id(message)
-        && ctx.chat_ref(chat).is_none()
+    let Some(chat) = chat_id(message) else {
+        return;
+    };
+
+    if ctx.chat_ref(chat).is_none()
         && let Ok(Some(peer)) = message.peer_ref().await
     {
         ctx.remember_chat(chat, peer);
@@ -698,9 +710,12 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         }
     }
 
-    if let Some(chat) = chat_id(message)
+    let state = ctx.state(chat);
+    let _slot = state.slot().await;
+
+    if !state.swept_bots.load(Ordering::Relaxed)
         && ctx.settings.is_locked(chat, bots::LOCK)
-        && ctx.claim_bot_sweep(chat)
+        && !state.swept_bots.swap(true, Ordering::Relaxed)
     {
         let ctx = Arc::clone(ctx);
         tokio::spawn(async move {
@@ -708,33 +723,24 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         });
     }
 
-    let state = chat_id(message).map(|chat| ctx.state(chat));
-    let _slot = match &state {
-        Some(state) => Some(state.slot().await),
-        None => None,
-    };
-
     let view = locks::View::new(message);
 
-    stats::count(ctx, message, &view);
+    stats::count(&state, message, &view);
     if matches!(
         message.action(),
         Some(grammers_client::tl::enums::MessageAction::ChatDeleteUser(_))
-    ) && let Some(chat) = chat_id(message)
-    {
-        ctx.bump(chat, stats::LEFT);
+    ) {
+        state.bump(stats::LEFT);
     }
 
-    if let Some(chat) = chat_id(message)
-        && matches!(
-            message.action(),
-            Some(
-                grammers_client::tl::enums::MessageAction::ChatAddUser(_)
-                    | grammers_client::tl::enums::MessageAction::ChatJoinedByLink(_)
-            )
+    if matches!(
+        message.action(),
+        Some(
+            grammers_client::tl::enums::MessageAction::ChatAddUser(_)
+                | grammers_client::tl::enums::MessageAction::ChatJoinedByLink(_)
         )
-    {
-        ctx.bump(chat, stats::JOINED);
+    ) {
+        state.bump(stats::JOINED);
         if let Some(grammers_client::tl::enums::MessageAction::ChatAddUser(action)) =
             message.action()
         {
@@ -746,7 +752,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
 
     tempmedia::watch(ctx, message, &view).await;
 
-    if panel::typed_number(ctx, message).await {
+    if panel::typed_number(ctx, message, &view).await {
         return;
     }
 
@@ -766,20 +772,20 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
             && (welcome::handle(ctx, message).await
                 || config::handle(ctx, message).await
                 || panel::handle(ctx, message).await
-                || restrict::handle(ctx, message).await
+                || restrict::handle(ctx, message, &view).await
                 || lists::command(ctx, message).await
                 || ping::handle(ctx, message).await
-                || promote::handle(ctx, message).await
+                || promote::handle(ctx, message, &view).await
                 || stats::handle(ctx, message).await
                 || report::handle(ctx, message).await
                 || packs::handle(ctx, message).await
-                || extras::handle(ctx, message).await
-                || tune::handle(ctx, message).await
-                || warns::handle(ctx, message).await
+                || extras::handle(ctx, message, &view).await
+                || tune::handle(ctx, message, &view).await
+                || warns::handle(ctx, message, &view).await
                 || filters::handle(ctx, message).await
-                || purge::handle(ctx, message).await
+                || purge::handle(ctx, message, &view).await
                 || purge::handle_all(ctx, message).await
-                || flood::handle(ctx, message).await
+                || flood::handle(ctx, message, &view).await
                 || join::handle(ctx, message).await
                 || cleaner::add(ctx, message).await
                 || cleaner::wipe(ctx, message).await
@@ -850,12 +856,14 @@ pub fn bot_admin_key(user: i64) -> String {
 }
 
 pub fn is_linked_post(message: &Message) -> bool {
-    let Some(grammers_client::tl::enums::MessageFwdHeader::Header(header)) =
-        message.forward_header()
+    let grammers_client::tl::enums::Message::Message(raw) = &message.raw else {
+        return false;
+    };
+    let Some(grammers_client::tl::enums::MessageFwdHeader::Header(header)) = raw.fwd_from.as_ref()
     else {
         return false;
     };
-    let Some(origin) = header.saved_from_peer else {
+    let Some(origin) = header.saved_from_peer.clone() else {
         return false;
     };
 
@@ -881,6 +889,12 @@ pub async fn can_manage(ctx: &Ctx, message: &Message) -> bool {
     let Some(chat) = chat_id(message) else {
         return false;
     };
+
+    if let Some(sender) = message.sender_id()
+        && sender.kind() == PeerKind::Channel
+    {
+        return sender == message.peer_id();
+    }
     let Some(sender) = message.sender_id().and_then(PeerId::bare_id) else {
         return true;
     };
@@ -1075,7 +1089,7 @@ pub async fn admin_ref(ctx: &Ctx, chat: PeerRef, user_id: i64) -> Option<(PeerRe
         grammers_client::tl::enums::ChannelParticipantsFilter::ChannelParticipantsAdmins,
     );
     while let Ok(Some(participant)) = participants.next().await {
-        if participant.user.id().bare_id_unchecked() != user_id {
+        if participant.user.id().bare_id_unchecked() != user_id || !holds_the_group(&participant) {
             continue;
         }
         let name = participant.user.full_name();
@@ -1096,6 +1110,9 @@ pub async fn admins(ctx: &Ctx, chat: PeerRef) -> (Option<(i64, String)>, Vec<Str
     );
     let (mut creator, mut names) = (None, Vec::new());
     while let Ok(Some(participant)) = participants.next().await {
+        if !holds_the_group(&participant) {
+            continue;
+        }
         let name = esc(&participant.user.full_name());
 
         if participant.user.is_bot() {
@@ -1131,6 +1148,40 @@ async fn permissions(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn digits_normalise_both_digit_sets_and_borrow_otherwise() {
+        use super::digits;
+        use std::borrow::Cow;
+
+        assert_eq!(digits("ضد رگبار ۱۰ ۵"), "ضد رگبار 10 5");
+        assert_eq!(digits("حذف ٥"), "حذف 5");
+        assert_eq!(digits("۰۱۲۳۴۵۶۷۸۹"), "0123456789");
+        assert_eq!(digits("٠١٢٣٤٥٦٧٨٩"), "0123456789");
+        assert_eq!(digits("سکوت ۳۰ دقیقه"), "سکوت 30 دقیقه");
+
+        assert!(matches!(digits("سلام دوستان"), Cow::Borrowed(_)));
+        assert!(matches!(digits("ban 10"), Cow::Borrowed(_)));
+        assert!(matches!(digits(""), Cow::Borrowed(_)));
+        assert!(matches!(digits("۱"), Cow::Owned(_)));
+    }
+
+    #[test]
+    fn counting_a_message_keeps_the_first_name_and_loses_no_count() {
+        use super::ChatState;
+
+        let state = ChatState::default();
+        state.count(7, || "Ali".to_owned(), ["k_text", "h9"]);
+        state.count(7, || panic!("the name is read once, not per message"), ["k_photo", "h9"]);
+
+        let counts = state.counts.lock().unwrap();
+        assert_eq!(counts.get(&7), Some(&(2, "Ali".to_owned())));
+
+        let tallies = state.tallies.lock().unwrap();
+        assert_eq!(tallies.get("k_text"), Some(&1));
+        assert_eq!(tallies.get("k_photo"), Some(&1));
+        assert_eq!(tallies.get("h9"), Some(&2));
+    }
+
     #[test]
     fn a_closed_tail_is_all_or_nothing() {
         use super::numbers_in;

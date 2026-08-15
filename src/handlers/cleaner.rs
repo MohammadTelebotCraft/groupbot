@@ -501,6 +501,28 @@ pub async fn purge(ctx: &Ctx, chat: i64, first: i32, last: i32) -> Option<usize>
     Some(deleted)
 }
 
+pub async fn set_slow(ctx: &Ctx, chat: i64, seconds: u32) -> Option<bool> {
+    let user = ctx.user_client()?;
+    let chat_ref = chat_ref(ctx, &user, chat).await?;
+    match user
+        .invoke(&grammers_client::tl::functions::channels::ToggleSlowMode {
+            channel: chat_ref.into(),
+            seconds: seconds as i32,
+        })
+        .await
+    {
+        Ok(_) => Some(true),
+
+        Err(grammers_client::InvocationError::Rpc(rpc)) if rpc.name == "CHAT_NOT_MODIFIED" => {
+            Some(true)
+        }
+        Err(e) => {
+            eprintln!("cleaner: slow mode in {chat}: {e}");
+            Some(false)
+        }
+    }
+}
+
 async fn chat_ref(ctx: &Ctx, user: &Client, chat: i64) -> Option<PeerRef> {
     if let Some(peer) = ctx.user_chat(chat) {
         return Some(peer);

@@ -182,7 +182,11 @@ fn built(ctx: &Ctx, chat: i64, opener: i64, ids: &[&str], back: &str) -> ReplyMa
     ReplyMarkup::from_buttons(&rows)
 }
 
-pub async fn typed_number(ctx: &Ctx, message: &Message) -> bool {
+pub async fn typed_number(
+    ctx: &Ctx,
+    message: &Message,
+    view: &super::locks::View<'_>,
+) -> bool {
     if !ctx.maybe_expecting_number() {
         return false;
     }
@@ -196,8 +200,7 @@ pub async fn typed_number(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
-    let text = super::digits(message.text().trim());
-    let Some(value) = parse_number(&text) else {
+    let Some(value) = parse_number(view.digits()) else {
         return false;
     };
     let Some(id) = ctx.take_expected_number(chat, user) else {
@@ -379,8 +382,15 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
         }
         "sl" => (slow_title(ctx, chat), slow_markup(ctx, chat, opener)),
         step if step.starts_with("sl:") => {
-            if let Ok(seconds) = step[3..].parse::<u32>() {
-                super::extras::apply_slow(ctx, chat, seconds).await;
+            if let Ok(seconds) = step[3..].parse::<u32>()
+                && super::extras::apply_slow(ctx, chat, seconds).await.is_none()
+            {
+                let _ = query
+                    .answer()
+                    .alert("اسلوموشن فقط با کلینر تنظیم می شود. «افزودن کلینر» را بفرستید.")
+                    .send()
+                    .await;
+                return;
             }
             (slow_title(ctx, chat), slow_markup(ctx, chat, opener))
         }

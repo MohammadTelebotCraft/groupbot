@@ -91,6 +91,13 @@ impl ChatSettings<'_> {
             .map(String::as_str)
             .filter(|value| !value.is_empty())
     }
+
+    pub fn number(&self, key: &str, default: u32, range: (u32, u32)) -> u32 {
+        self.value(key)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(default)
+            .clamp(range.0, range.1)
+    }
 }
 
 pub struct Settings {
@@ -932,6 +939,28 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_number_is_defaulted_and_clamped_the_same_way_everywhere() {
+        let mut map: HashMap<String, String> = HashMap::new();
+        map.insert("low".to_owned(), "1".to_owned());
+        map.insert("high".to_owned(), "999".to_owned());
+        map.insert("fine".to_owned(), "7".to_owned());
+        map.insert("empty".to_owned(), String::new());
+        map.insert("words".to_owned(), "زیاد".to_owned());
+        let settings = ChatSettings(Some(&map));
+
+        assert_eq!(settings.number("fine", 8, (2, 50)), 7);
+        assert_eq!(settings.number("low", 8, (2, 50)), 2);
+        assert_eq!(settings.number("high", 8, (2, 50)), 50);
+
+        assert_eq!(settings.number("absent", 8, (2, 50)), 8);
+        assert_eq!(settings.number("empty", 8, (2, 50)), 8);
+        assert_eq!(settings.number("words", 8, (2, 50)), 8);
+        assert_eq!(settings.number("absent", 1, (2, 50)), 2);
+
+        assert_eq!(ChatSettings(None).number("fine", 8, (2, 50)), 8);
+    }
 
     #[test]
     fn flags_and_values_share_the_map() {

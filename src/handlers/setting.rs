@@ -120,6 +120,7 @@ const MUTE_OR_BAN: &[Pick] = &[
 ];
 
 pub const SETTINGS: &[Setting] = &[
+
     Setting { id: "fl_on", key: flood::MODE, label: "ضد رگبار", section: "fl", kind: Kind::Flag },
     Setting { id: "bt_on", key: betrayal::MODE, label: "ضد خیانت ادمین", section: "bt", kind: Kind::Flag },
     Setting { id: "cp_on", key: captcha::MODE, label: "احراز هویت", section: "cp", kind: Kind::Flag },

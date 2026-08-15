@@ -12,8 +12,7 @@ fn key(set: i64) -> String {
     format!("{PREFIX}{set}")
 }
 
-pub fn set_of(message: &Message) -> Option<i64> {
-    let media = message.media()?;
+pub fn set_of_media(media: &grammers_client::media::Media) -> Option<i64> {
     let grammers_client::media::Media::Sticker(sticker) = media else {
         return None;
     };
@@ -23,11 +22,17 @@ pub fn set_of(message: &Message) -> Option<i64> {
     }
 }
 
-pub fn is_banned(ctx: &Ctx, chat: i64, message: &Message) -> bool {
+pub fn set_of(message: &Message) -> Option<i64> {
+    set_of_media(&message.media()?)
+}
+
+pub fn is_banned(ctx: &Ctx, chat: i64, view: &super::locks::View<'_>) -> bool {
     if ctx.settings.indexed_empty(chat, PREFIX) {
         return false;
     }
-    set_of(message).is_some_and(|set| ctx.settings.value(chat, &key(set)).is_some())
+    view.media()
+        .and_then(set_of_media)
+        .is_some_and(|set| ctx.settings.value(chat, &key(set)).is_some())
 }
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {

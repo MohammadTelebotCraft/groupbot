@@ -144,14 +144,27 @@ async fn send(ctx: &Ctx, message: &Message, chat: i64, who: Option<(i64, String)
     let Some(text) = template(ctx, chat) else {
         return;
     };
-    let mut input = InputMessage::new().html(fill(message, &text, who));
+    let filled = fill(message, &text, who);
 
     if let Some(stored) = ctx.settings.value(chat, MEDIA).filter(|m| !m.is_empty())
         && let Some(media) = decode_media(&stored)
     {
-        input = input.media(media);
+        let input = InputMessage::new().html(&filled).media(media);
+        let Err(e) = message.respond(input).await else {
+            return;
+        };
+        if !reference_expired(&e) {
+            eprintln!("welcome: {chat}: {e}");
+            return;
+        }
+
+        eprintln!("welcome: {chat}: stored media expired, keeping the text only");
+        ctx.settings.set(chat, MEDIA, false).await;
     }
-    let _ = message.respond(input).await;
+    if filled.trim().is_empty() {
+        return;
+    }
+    let _ = message.respond(InputMessage::new().html(&filled)).await;
 }
 
 fn fill(message: &Message, template: &str, who: Option<(i64, String)>) -> String {
@@ -217,6 +230,10 @@ pub fn encode_media(media: &grammers_client::media::Media) -> Option<String> {
 
 pub fn decode_media(stored: &str) -> Option<tl::enums::InputMedia> {
     tl::enums::InputMedia::from_bytes(&unhex(stored)?).ok()
+}
+
+pub fn reference_expired(e: &grammers_client::InvocationError) -> bool {
+    matches!(e, grammers_client::InvocationError::Rpc(rpc) if rpc.name.starts_with("FILE_REFERENCE"))
 }
 
 fn input_media(media: &grammers_client::media::Media) -> Option<tl::enums::InputMedia> {

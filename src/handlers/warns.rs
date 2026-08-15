@@ -36,8 +36,8 @@ pub async fn count(ctx: &Ctx, chat: i64, user: i64) -> u32 {
     ctx.settings.warns_of(chat, user).await
 }
 
-pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
-    let text = super::digits(message.text().trim());
+pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
+    let text = view.digits();
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
@@ -157,7 +157,7 @@ async fn punish(ctx: &Ctx, message: &Message, chat: i64, target: PeerRef, name: 
         ),
         Err(e) => {
             eprintln!("warns: {chat}: could not punish: {e}");
-            "انجام نشد. مطمئن شوید ربات اجازه محدود کردن کاربران دارد.".to_owned()
+            esc(&e.told())
         }
     };
     let _ = message.reply(InputMessage::new().html(reply)).await;

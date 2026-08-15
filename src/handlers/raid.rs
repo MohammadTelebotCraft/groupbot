@@ -112,7 +112,7 @@ pub async fn on_participant_update(ctx: &Ctx, update: &tl::types::UpdateChannelP
         return;
     };
 
-    if actor != user && super::added_by_an_admin(ctx, chat_ref, chat, actor).await {
+    if actor != user && super::is_admin(ctx, chat_ref, chat, actor).await {
         return;
     }
     let Some(peer) = PeerId::user(user).map(PeerId::to_ambient_ref) else {

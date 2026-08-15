@@ -115,7 +115,8 @@ pub async fn handle_all(ctx: &Ctx, message: &Message) -> bool {
     let last = message.id();
     let warning = match ctx.user_client().is_some() {
         true => "همه پیام های گروه برای همه پاک می شود. این کار برگشت ندارد.",
-        false => "کلینر وارد نشده است؛ بدون آن فقط پیام های کمتر از ۴۸ ساعت پاک می شود.\n\
+
+        false => "کلینر وارد نشده است؛ بدون آن هر بار تا ۱۰ هزار پیام آخر پاک می شود.\n\
                   برای پاک شدن کامل «افزودن کلینر» را بفرستید.",
     };
     let _ = message
@@ -180,9 +181,8 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
     }
 }
 
-pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
-    let text = super::digits(message.text().trim());
-    let Some(count) = parse(&text) else {
+pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
+    let Some(count) = parse(view.digits()) else {
         return false;
     };
 

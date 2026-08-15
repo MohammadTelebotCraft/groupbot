@@ -89,14 +89,27 @@ async fn answer(ctx: &Ctx, message: &Message, chat: i64, view: &super::locks::Vi
     }
 
     let (media, body) = stored.split_once(SEPARATOR).unwrap_or(("", stored.as_str()));
-    let mut input = InputMessage::new().html(body);
 
     if !media.is_empty()
-        && let Some(media) = welcome::decode_media(media)
+        && let Some(decoded) = welcome::decode_media(media)
     {
-        input = input.media(media);
+        let Err(e) = message.reply(InputMessage::new().html(body).media(decoded)).await else {
+            return true;
+        };
+        if !welcome::reference_expired(&e) {
+            eprintln!("answers: {chat}: {e}");
+            return true;
+        }
+
+        eprintln!("answers: {chat}: media for «{trigger}» expired, keeping the text");
+        ctx.settings
+            .set_value(chat, &key(trigger), &format!("{SEPARATOR}{body}"))
+            .await;
+        if body.trim().is_empty() {
+            return true;
+        }
     }
-    let _ = message.reply(input).await;
+    let _ = message.reply(InputMessage::new().html(body)).await;
     true
 }
 

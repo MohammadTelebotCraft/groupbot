@@ -13,8 +13,8 @@ const SETTINGS: &[(&str, &str)] = &[
 
 const COMMANDS: &[&str] = &["تنظیم", "ست"];
 
-pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
-    let text = super::digits(message.text().trim());
+pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
+    let text = view.digits();
     let Some(rest) = COMMANDS.iter().find_map(|command| {
         let rest = text.strip_prefix(command)?;
         rest.starts_with(char::is_whitespace)

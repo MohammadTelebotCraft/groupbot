@@ -122,7 +122,7 @@ pub async fn on_participant_update(
 
     if !ctx.settings.is_locked(chat, EVEN_ADMINS)
         && actor != user
-        && super::added_by_an_admin(ctx, chat_ref, chat, actor).await
+        && super::is_admin(ctx, chat_ref, chat, actor).await
     {
         return;
     }
@@ -161,6 +161,8 @@ async fn remove(ctx: &Ctx, chat: i64, chat_ref: PeerRef, target: PeerRef, name: 
         super::restrict::By {
             reason: "قفل ربات",
             target_name: name,
+
+            admins_too: true,
             ..Default::default()
         },
     )
@@ -245,7 +247,7 @@ pub async fn on_cleaner_message(ctx: &Ctx, message: &Message) {
     }
 
     let view = super::locks::View::new(message);
-    let Some(reason) = super::locks::scan(ctx, chat, message, &view) else {
+    let Some(reason) = super::locks::scan(ctx, chat, &view) else {
         return;
     };
 

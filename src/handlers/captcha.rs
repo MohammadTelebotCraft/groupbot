@@ -64,12 +64,6 @@ pub async fn set_timeout(ctx: &Ctx, chat: i64, value: u32) {
 }
 
 pub async fn on_join(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
-    let Some(chat) = message.peer_id().bot_api_dialog_id() else {
-        return false;
-    };
-    if !ctx.settings.is_locked(chat, MODE) {
-        return false;
-    }
     let joined = matches!(
         message.action(),
         Some(
@@ -78,6 +72,12 @@ pub async fn on_join(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
         )
     );
     if !joined {
+        return false;
+    }
+    let Some(chat) = message.peer_id().bot_api_dialog_id() else {
+        return false;
+    };
+    if !ctx.settings.is_locked(chat, MODE) {
         return false;
     }
     let Ok(Some(chat_ref)) = message.peer_ref().await else {
@@ -118,36 +118,56 @@ async fn challenge(
          <i>{seconds} ثانیه فرصت دارید.</i>",
         esc(&joined.name),
     );
-    let markup = buttons(user, &offered);
-
-    let mut input = InputMessage::new().html(&caption).reply_markup(markup);
     let cached = ctx
         .settings
         .value(GLOBAL, &photo_key(answer))
         .filter(|value| !value.is_empty())
         .and_then(|value| super::welcome::decode_media(&value));
-    let fresh = cached.is_none();
-    match cached {
-        Some(media) => input = input.media(media),
 
+    let reused = match cached {
+        None => None,
+        Some(media) => {
+            let input = InputMessage::new()
+                .html(&caption)
+                .reply_markup(buttons(user, &offered))
+                .media(media);
+            match message.reply(input).await {
+                Ok(sent) => Some(sent),
+                Err(e) if super::welcome::reference_expired(&e) => {
+                    eprintln!("captcha: cached photo expired, uploading a new one: {e}");
+                    ctx.settings.set(GLOBAL, &photo_key(answer), false).await;
+                    None
+                }
+                Err(e) => {
+                    eprintln!("captcha: {chat}: could not send the challenge: {e}");
+                    return false;
+                }
+            }
+        }
+    };
+
+    let sent = match reused {
+        Some(sent) => sent,
         None => {
+            let mut input = InputMessage::new()
+                .html(&caption)
+                .reply_markup(buttons(user, &offered));
             if let Some(uploaded) = upload(ctx, answer).await {
                 input = input.photo(uploaded);
             }
+            let Ok(fresh) = message.reply(input).await else {
+                return false;
+            };
+            if let Some(media) = fresh.media()
+                && let Some(encoded) = super::welcome::encode_media(&media)
+            {
+                ctx.settings
+                    .set_value(GLOBAL, &photo_key(answer), &encoded)
+                    .await;
+            }
+            fresh
         }
-    }
-
-    let Ok(sent) = message.reply(input).await else {
-        return false;
     };
-    if fresh
-        && let Some(media) = sent.media()
-        && let Some(encoded) = super::welcome::encode_media(&media)
-    {
-        ctx.settings
-            .set_value(GLOBAL, &photo_key(answer), &encoded)
-            .await;
-    }
 
     ctx.captcha_start(
         chat,

@@ -540,16 +540,15 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool 
     true
 }
 
-pub fn count(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) {
-    let (Some(chat), Some(user)) = (
-        message.peer_id().bot_api_dialog_id(),
-        message.sender_id().and_then(PeerId::bare_id),
-    ) else {
+pub fn count(state: &super::ChatState, message: &Message, view: &super::locks::View<'_>) {
+    let Some(user) = message.sender_id().and_then(PeerId::bare_id) else {
         return;
     };
-    ctx.count_message(chat, user, || name_of(message));
-    ctx.bump(chat, kind_of(view));
-    ctx.bump(chat, HOURS[local_hour() as usize % 24]);
+    state.count(
+        user,
+        || name_of(message),
+        [kind_of(view), HOURS[local_hour() as usize % 24]],
+    );
 }
 
 fn kind_of(view: &super::locks::View<'_>) -> &'static str {

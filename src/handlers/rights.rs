@@ -89,6 +89,13 @@ fn build(closed: &dyn Fn(&str) -> bool, force_all: bool) -> tl::types::ChatBanne
     }
 }
 
+pub fn muted(until_date: i32) -> tl::types::ChatBannedRights {
+    let mut rights = build(&|right| !matches!(right, "info" | "invite" | "pin"), false);
+    rights.manage_topics = true;
+    rights.until_date = until_date;
+    rights
+}
+
 pub async fn apply(
     ctx: &Ctx,
     chat_ref: grammers_client::session::types::PeerRef,
@@ -105,6 +112,8 @@ pub async fn apply(
         .await
     {
         Ok(_) => true,
+
+        Err(grammers_client::InvocationError::Rpc(rpc)) if rpc.name == "CHAT_NOT_MODIFIED" => true,
         Err(e) => {
             eprintln!("rights: {chat}: {e}");
             false
@@ -276,6 +285,22 @@ mod tests {
 
         let locked = build(&closed_none, true);
         assert!(locked.send_plain && locked.send_photos && locked.send_media);
+    }
+
+    #[test]
+    fn a_mute_closes_every_way_of_speaking() {
+        let rights = muted(0);
+
+        assert!(rights.send_plain && rights.send_media && rights.send_reactions);
+        assert!(rights.send_photos && rights.send_videos && rights.send_roundvideos);
+        assert!(rights.send_audios && rights.send_voices && rights.send_docs);
+        assert!(rights.send_stickers && rights.send_gifs && rights.send_games);
+        assert!(rights.send_inline && rights.send_polls && rights.embed_links);
+        assert!(rights.manage_topics);
+
+        assert!(!rights.view_messages);
+        assert!(!rights.change_info && !rights.invite_users && !rights.pin_messages);
+        assert_eq!(muted(1_800).until_date, 1_800);
     }
 
     #[test]

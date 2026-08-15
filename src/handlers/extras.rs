@@ -39,35 +39,20 @@ pub fn slow_label(seconds: u32) -> String {
     }
 }
 
-pub async fn apply_slow(ctx: &Ctx, chat: i64, seconds: u32) -> bool {
-    let Some(chat_ref) = ctx.chat_ref(chat) else {
-        return false;
-    };
+pub async fn apply_slow(ctx: &Ctx, chat: i64, seconds: u32) -> Option<bool> {
     let seconds = SLOW_STEPS
         .iter()
         .rev()
         .find(|step| **step <= seconds)
         .copied()
         .unwrap_or(0);
-    match ctx
-        .client
-        .invoke(&tl::functions::channels::ToggleSlowMode {
-            channel: chat_ref.into(),
-            seconds: seconds as i32,
-        })
-        .await
-    {
-        Ok(_) => {
-            ctx.settings
-                .set_value(chat, SLOW_STATE, &seconds.to_string())
-                .await;
-            true
-        }
-        Err(e) => {
-            eprintln!("slow mode: {chat}: {e}");
-            false
-        }
+    let done = super::cleaner::set_slow(ctx, chat, seconds).await?;
+    if done {
+        ctx.settings
+            .set_value(chat, SLOW_STATE, &seconds.to_string())
+            .await;
     }
+    Some(done)
 }
 
 pub fn rules(ctx: &Ctx, chat: i64) -> Option<String> {
@@ -101,9 +86,8 @@ pub fn clock(minutes: u32) -> String {
     format!("{:02}:{:02}", (minutes / 60) % 24, minutes % 60)
 }
 
-pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
-    let text = super::digits(message.text().trim());
-    let text = text.as_ref();
+pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
+    let text = view.digits();
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
@@ -297,15 +281,23 @@ async fn slow_mode(ctx: &Ctx, message: &Message, chat: i64, asked: u32) -> bool 
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(0);
     let _ = match (done, now) {
-        (true, 0) => message.reply("✗ اسلوموشن خاموش شد.").await,
-        (true, _) => {
+        (Some(true), 0) => message.reply("✗ اسلوموشن خاموش شد.").await,
+        (Some(true), _) => {
             message
                 .reply(format!("✓ اسلوموشن روی {} تنظیم شد.", slow_label(now)))
                 .await
         }
-        (false, _) => {
+        (Some(false), _) => {
             message
-                .reply("انجام نشد. مطمئن شوید ربات اجازه تغییر اطلاعات گروه دارد.")
+                .reply("انجام نشد. مطمئن شوید کلینر در گروه ادمین است و اجازه تغییر اطلاعات دارد.")
+                .await
+        }
+        (None, _) => {
+            message
+                .reply(
+                    "اسلوموشن را فقط کلینر می تواند تنظیم کند؛ ربات ها به این بخش تلگرام دسترسی ندارند.\n\
+                     «افزودن کلینر» را بفرستید.",
+                )
                 .await
         }
     };

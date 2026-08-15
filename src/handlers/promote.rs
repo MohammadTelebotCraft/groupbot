@@ -124,9 +124,9 @@ const RIGHTS: &[(&str, u32)] = &[
 
 const DEFAULT_RIGHTS: u32 = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3);
 
-pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
-    let text = super::digits(message.text().trim());
-    if tag(ctx, message, text.as_ref()).await {
+pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
+    let text = view.digits();
+    if tag(ctx, message, text).await {
         return true;
     }
     let matched = COMMANDS

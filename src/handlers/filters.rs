@@ -6,7 +6,7 @@ use super::{Ctx, esc, name_of};
 
 pub const PREFIX: &str = "filter:";
 
-const ADD: &[&str] = &["فیلتر کلمه", "فیلتر"];
+const ADD: &[&str] = &["فیلتر کلمه", "افزودن فیلتر", "اضافه کردن فیلتر", "فیلتر"];
 const REMOVE: &[&str] = &["حذف فیلتر", "لغو فیلتر"];
 
 const MAX_LEN: usize = 64;
@@ -38,27 +38,39 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
-    let word = match (word.is_empty(), super::phrase_carries_text(command)) {
-        (false, false) => return false,
-        (true, _) => match message.get_reply().await.ok().flatten() {
-            Some(replied) => replied.text().trim().to_owned(),
-            None => return false,
-        },
-        _ => word.to_owned(),
-    };
-    let word = word.as_str();
+    let phrase = super::phrase_carries_text(command);
+    if !word.is_empty() && !phrase {
+        return false;
+    }
+    let asked = match word.is_empty() {
+        true => message
+            .get_reply()
+            .await
+            .ok()
+            .flatten()
+            .map(|replied| replied.text().trim().to_owned()),
+        false => Some(word.to_owned()),
+    }
+    .filter(|word| !word.is_empty());
+
+    if asked.is_none() && !phrase {
+        return false;
+    }
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
     if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
+    let Some(word) = asked else {
+        let _ = message
+            .reply("کلمه را بعد از دستور بنویسید، مثل «افزودن فیلتر ممد»، یا روی پیام آن ریپلای کنید.")
+            .await;
+        return true;
+    };
 
     let word = word.trim().to_lowercase();
-    if word.is_empty() {
-        return false;
-    }
-    if word.len() > MAX_LEN || word.contains('=') {
+    if word.chars().count() > MAX_LEN || word.contains('=') {
         let _ = message
             .reply("این کلمه پذیرفته نمی شود: خیلی بلند است یا نویسه غیرمجاز دارد.")
             .await;
@@ -164,6 +176,13 @@ mod tests {
     #[test]
     fn parses_commands() {
         assert_eq!(parse("فیلتر کلمه تبلیغ"), Some((true, "فیلتر کلمه", "تبلیغ")));
+
+        assert_eq!(parse("افزودن فیلتر ممد"), Some((true, "افزودن فیلتر", "ممد")));
+        assert_eq!(
+            parse("اضافه کردن فیلتر ممد"),
+            Some((true, "اضافه کردن فیلتر", "ممد"))
+        );
+        assert!(super::super::phrase_carries_text("افزودن فیلتر"));
         assert_eq!(parse("فیلتر تبلیغ رایگان"), Some((true, "فیلتر", "تبلیغ رایگان")));
         assert_eq!(parse("حذف فیلتر تبلیغ"), Some((false, "حذف فیلتر", "تبلیغ")));
         assert_eq!(parse("فیلتر"), Some((true, "فیلتر", "")));

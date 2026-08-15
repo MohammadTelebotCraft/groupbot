@@ -34,9 +34,7 @@ pub fn bans(ctx: &Ctx, chat: i64) -> bool {
 
 fn number(ctx: &Ctx, chat: i64, key: &str, default: u32, range: (u32, u32)) -> u32 {
     ctx.settings
-        .value_parsed(chat, key)
-        .unwrap_or(default)
-        .clamp(range.0, range.1)
+        .with_chat(chat, |settings| settings.number(key, default, range))
 }
 
 pub async fn set(ctx: &Ctx, chat: i64, key: &str, value: u32) {
@@ -45,10 +43,10 @@ pub async fn set(ctx: &Ctx, chat: i64, key: &str, value: u32) {
     ctx.settings.set_value(chat, key, &value.to_string()).await;
 }
 
-pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
+pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
     const COMMANDS: &[&str] = &["ضد رگبار", "ضدرگبار", "ضد فلاد"];
 
-    let text = super::digits(message.text().trim());
+    let text = view.digits();
     let Some(rest) = COMMANDS.iter().find_map(|command| {
         let rest = text.strip_prefix(command)?;
         (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim().to_owned())
@@ -92,9 +90,18 @@ pub async fn check(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
-    if !ctx.settings.is_locked(chat, MODE) {
+    let Some((limit, window, bans)) = ctx.settings.with_chat(chat, |settings| {
+        if !settings.is_locked(MODE) {
+            return None;
+        }
+        Some((
+            settings.number(LIMIT, DEFAULT_LIMIT, LIMIT_RANGE),
+            settings.number(WINDOW, DEFAULT_WINDOW, WINDOW_RANGE),
+            settings.value(ACTION) == Some("ban"),
+        ))
+    }) else {
         return false;
-    }
+    };
     let Some(user) = message
         .sender_id()
         .and_then(grammers_client::session::types::PeerId::bare_id)
@@ -102,9 +109,8 @@ pub async fn check(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
-    let window = Duration::from_secs(u64::from(window(ctx, chat)));
-    let count = ctx.record_message(chat, user, window);
-    if count <= limit(ctx, chat) as usize {
+    let count = ctx.record_message(chat, user, Duration::from_secs(u64::from(window)));
+    if count <= limit as usize {
         return false;
     }
     if super::is_exempt(ctx, message).await {
@@ -117,11 +123,7 @@ pub async fn check(ctx: &Ctx, message: &Message) -> bool {
         log::warn!("flood: {chat}: no usable ref for {user}, cannot restrict");
         return false;
     };
-    let action = if bans(ctx, chat) {
-        Action::Ban
-    } else {
-        Action::Mute
-    };
+    let action = if bans { Action::Ban } else { Action::Mute };
     if let Err(e) = restrict::apply(ctx, chat_ref, target, action, None, restrict::By { reason: "ضد رگبار", target_name: &name_of(message), ..Default::default() }).await {
         eprintln!("flood: {chat}: could not restrict {user}: {e}");
         return false;

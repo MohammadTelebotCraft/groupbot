@@ -29,9 +29,9 @@ const COMMANDS: &[(&str, Action)] = &[
     ("سیک", Ban),
 ];
 
-pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
-    let text = super::digits(message.text().trim());
-    let Some(parsed) = parse(&text) else {
+pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
+    let text = view.digits();
+    let Some(parsed) = parse(text) else {
         return false;
     };
     let (action, arg) = (parsed.action, parsed.target);
@@ -69,6 +69,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             actor: by.as_ref().map(|(id, name)| (*id, name.as_str())),
             reason: "دستور ادمین",
             target_name: &target_name,
+            ..Default::default()
         },
     )
     .await;
@@ -85,11 +86,18 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let by = name_of(message);
     let _ = match result {
         Ok(()) => {
+            let kick_only = action == Ban
+                && chat_ref.id.kind() != grammers_client::session::types::PeerKind::Channel;
             let what = match action {
                 Mute => "✓ سکوت شد",
                 Unmute => "✗ سکوتش برداشته شد",
+                Ban if kick_only => "✓ از گروه اخراج شد",
                 Ban => "✓ بن شد",
                 Unban => "✗ بنش برداشته شد",
+            };
+            let note = match kick_only {
+                true => "\nدر گروه معمولی بن دائمی نیست. برای بن به سوپرگروه ارتقا دهید.",
+                false => "",
             };
             let how_long = match (parsed.duration, honoured(parsed.duration)) {
                 (Some(_), Some(held)) => {
@@ -99,14 +107,12 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
                 _ => String::new(),
             };
             message
-                .reply(format!("{target_name} {what}{how_long}.\nتوسط: {by}"))
+                .reply(format!("{target_name} {what}{how_long}.\nتوسط: {by}{note}"))
                 .await
         }
         Err(e) => {
             eprintln!("restrict failed: {e}");
-            message
-                .reply("انجام نشد. مطمئن شوید ربات ادمین است و اجازه محدود کردن کاربران دارد.")
-                .await
+            message.reply(e.told()).await
         }
     };
     true
@@ -123,6 +129,77 @@ pub fn honoured(duration: Option<Duration>) -> Option<Duration> {
     }
 }
 
+#[derive(Debug)]
+pub enum Failed {
+    Protected,
+
+    BasicGroup,
+    Telegram(grammers_client::InvocationError),
+}
+
+impl std::fmt::Display for Failed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failed::Protected => f.write_str("target is an admin"),
+            Failed::BasicGroup => f.write_str("basic group, no per-user restrictions"),
+            Failed::Telegram(e) => e.fmt(f),
+        }
+    }
+}
+
+impl Failed {
+    pub fn told(&self) -> String {
+        match self {
+            Failed::Protected => PROTECTED.to_owned(),
+            Failed::BasicGroup => BASIC_GROUP.to_owned(),
+            Failed::Telegram(grammers_client::InvocationError::Rpc(rpc)) => {
+                told_rpc(&rpc.name, rpc.value)
+            }
+            Failed::Telegram(_) => {
+                "✗ ارتباط با تلگرام برقرار نشد. چند لحظه بعد دوباره بفرستید.".to_owned()
+            }
+        }
+    }
+}
+
+const PROTECTED: &str = "✗ او ادمین است. تا از ادمینی عزل نشود محدود نمی شود.";
+
+pub const BASIC_GROUP: &str =
+    "✗ این گروه معمولی است. برای سکوت و بن باید به سوپرگروه ارتقا پیدا کند.";
+
+fn told_rpc(name: &str, value: Option<u32>) -> String {
+    match name {
+        "USER_ADMIN_INVALID" | "USER_CREATOR" => PROTECTED.to_owned(),
+        "CHAT_INVALID" => BASIC_GROUP.to_owned(),
+        "CHAT_ADMIN_REQUIRED" | "RIGHT_FORBIDDEN" | "CHAT_WRITE_FORBIDDEN" => {
+            "✗ ربات ادمین نیست یا اجازه «بن کاربران» ندارد.".to_owned()
+        }
+        "USER_NOT_PARTICIPANT" | "PARTICIPANT_ID_INVALID" => {
+            "✗ این کاربر عضو گروه نیست.".to_owned()
+        }
+        "USER_ID_INVALID" | "PEER_ID_INVALID" | "INPUT_USER_DEACTIVATED" => {
+            "✗ این کاربر پیدا نشد یا حسابش پاک شده است.".to_owned()
+        }
+        "CHANNEL_PRIVATE" | "CHANNEL_INVALID" => {
+            "✗ ربات دیگر به این گروه دسترسی ندارد.".to_owned()
+        }
+        "CHANNEL_MONOFORUM_UNSUPPORTED" => {
+            "✗ این چت از محدود کردن کاربران پشتیبانی نمی کند.".to_owned()
+        }
+
+        "BANNED_RIGHTS_INVALID" => "✗ انجام نشد · تنظیم دسترسی نامعتبر بود.".to_owned(),
+        "FLOOD_WAIT" | "FLOOD_PREMIUM_WAIT" | "SLOWMODE_WAIT" => match value {
+            Some(secs) => format!(
+                "✗ تلگرام موقتا ربات را محدود کرده. {} دیگر دوباره بفرستید.",
+                super::log::duration_label(u64::from(secs))
+            ),
+            None => "✗ تلگرام موقتا ربات را محدود کرده. کمی بعد دوباره بفرستید.".to_owned(),
+        },
+
+        other => format!("✗ انجام نشد · {other}\nمطمئن شوید ربات ادمین است و اجازه محدود کردن کاربران دارد."),
+    }
+}
+
 pub async fn apply(
     ctx: &Ctx,
     chat: grammers_client::session::types::PeerRef,
@@ -130,7 +207,15 @@ pub async fn apply(
     action: Action,
     duration: Option<Duration>,
     by: By<'_>,
-) -> Result<(), grammers_client::InvocationError> {
+) -> Result<(), Failed> {
+    if matches!(action, Mute | Ban)
+        && !by.admins_too
+        && let (Some(chat_id), Some(user)) = (chat.id.bot_api_dialog_id(), target.id.bare_id())
+        && super::is_admin(ctx, chat, chat_id, user).await
+    {
+        return Err(Failed::Protected);
+    }
+
     let duration = honoured(duration);
     let done = apply_rights(ctx, chat, target, action, duration).await;
 
@@ -170,6 +255,18 @@ pub struct By<'a> {
     pub actor: Option<(i64, &'a str)>,
     pub reason: &'a str,
     pub target_name: &'a str,
+
+    pub admins_too: bool,
+}
+
+fn until_date(duration: Option<Duration>) -> i32 {
+    let Some(duration) = duration else {
+        return 0;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    i32::try_from(now + duration.as_secs()).unwrap_or(i32::MAX)
 }
 
 async fn apply_rights(
@@ -178,25 +275,32 @@ async fn apply_rights(
     target: grammers_client::session::types::PeerRef,
     action: Action,
     duration: Option<Duration>,
-) -> Result<(), grammers_client::InvocationError> {
+) -> Result<(), Failed> {
+    if action == Mute {
+        if chat.id.kind() != grammers_client::session::types::PeerKind::Channel {
+            return Err(Failed::BasicGroup);
+        }
+        return ctx
+            .client
+            .invoke(&grammers_client::tl::functions::channels::EditBanned {
+                channel: chat.into(),
+                participant: target.into(),
+                banned_rights: super::rights::muted(until_date(duration)).into(),
+            })
+            .await
+            .map(drop)
+            .map_err(Failed::Telegram);
+    }
+
     let mut rights = ctx.client.set_banned_rights(chat, target);
     if let Some(duration) = duration {
         rights = rights.duration(duration);
     }
     match action {
-        Mute => {
-            rights
-                .send_messages(false)
-                .send_media(false)
-                .send_stickers(false)
-                .send_gifs(false)
-                .send_inline(false)
-                .send_polls(false)
-                .await
-        }
         Ban => rights.view_messages(false).await,
-        Unmute | Unban => rights.await,
+        _ => rights.await,
     }
+    .map_err(Failed::Telegram)
 }
 
 #[derive(Debug, PartialEq)]
@@ -314,6 +418,22 @@ mod tests {
 
         assert_eq!(p("بن").target, None);
         assert_eq!(p("بن 10 دقیقه").target, None);
+    }
+
+    #[test]
+    fn a_failure_says_which_one_it_was() {
+        assert_eq!(told_rpc("USER_ADMIN_INVALID", None), PROTECTED);
+        assert!(told_rpc("CHAT_ADMIN_REQUIRED", None).contains("ربات ادمین نیست"));
+        assert!(told_rpc("USER_NOT_PARTICIPANT", None).contains("عضو گروه نیست"));
+        assert!(told_rpc("FLOOD_WAIT", Some(120)).contains("2 دقیقه"));
+        assert!(told_rpc("FLOOD_WAIT", None).contains("کمی بعد"));
+
+        assert_eq!(told_rpc("CHAT_INVALID", None), BASIC_GROUP);
+        assert_eq!(Failed::BasicGroup.told(), BASIC_GROUP);
+
+        assert_ne!(told_rpc("ADMIN_RANK_EMPTY", None), PROTECTED);
+
+        assert!(told_rpc("SOMETHING_NEW", None).contains("SOMETHING_NEW"));
     }
 
     #[test]
