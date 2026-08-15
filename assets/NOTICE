@@ -6,3 +6,15 @@ project, licensed under the SIL Open Font License 1.1.
 
 It is compiled into the binary with include_bytes! and used only to
 render the captcha images.
+
+nsfw.onnx is Marqo/nsfw-image-detection-384, licensed under the
+Apache License 2.0.
+
+    Source:  https://huggingface.co/Marqo/nsfw-image-detection-384
+    ONNX:    https://huggingface.co/ICIJ/nsfw-image-detection-384-onnx
+    License: https://www.apache.org/licenses/LICENSE-2.0
+
+It is compiled into the binary with include_bytes! and used only by the
+NSFW lock, to score a thumbnail. It takes RGB [1, 3, 384, 384] scaled to
+-1..1 (mean and standard deviation of 0.5) and emits two logits, in the
+order nsfw, sfw.

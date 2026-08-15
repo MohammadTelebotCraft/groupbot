@@ -18,6 +18,7 @@ pub mod lists;
 pub mod log;
 pub mod locks;
 pub mod notice;
+pub mod nsfw;
 pub mod packs;
 pub mod panel;
 pub mod ping;
@@ -191,6 +192,12 @@ pub struct Ctx {
     bio_fetch: OnceLock<tokio::sync::Semaphore>,
 
     bot_sweeps: OnceLock<tokio::sync::Semaphore>,
+
+    verdicts: RwLock<HashMap<i64, (Instant, f32)>>,
+
+    nsfw_slots: OnceLock<tokio::sync::Semaphore>,
+
+    nsfw_fetches: OnceLock<tokio::sync::Semaphore>,
 }
 
 pub const NOTICE_EVERY: Duration = Duration::from_secs(120);
@@ -226,6 +233,14 @@ const BIO_TTL: Duration = Duration::from_secs(600);
 const BIO_MAX: usize = 10_000;
 
 const BIO_FETCHES: usize = 4;
+
+const VERDICT_TTL: Duration = Duration::from_secs(86_400);
+
+const VERDICT_MAX: usize = 50_000;
+
+const NSFW_SLOTS: usize = 2;
+
+const NSFW_FETCHES: usize = 4;
 
 pub const FLEET_CONCURRENCY: usize = 8;
 
@@ -278,6 +293,9 @@ impl Ctx {
             bios: RwLock::new(HashMap::new()),
             bio_fetch: OnceLock::new(),
             bot_sweeps: OnceLock::new(),
+            verdicts: RwLock::new(HashMap::new()),
+            nsfw_slots: OnceLock::new(),
+            nsfw_fetches: OnceLock::new(),
         }
     }
 
@@ -374,6 +392,38 @@ impl Ctx {
             .acquire()
             .await
             .expect("the bio semaphore is never closed")
+    }
+
+    pub fn known_verdict(&self, file: i64) -> Option<f32> {
+        let verdicts = self.verdicts.read().unwrap();
+        verdicts
+            .get(&file)
+            .filter(|(at, _)| at.elapsed() < VERDICT_TTL)
+            .map(|(_, score)| *score)
+    }
+
+    pub fn remember_verdict(&self, file: i64, score: f32) {
+        let mut verdicts = self.verdicts.write().unwrap();
+        if verdicts.len() >= VERDICT_MAX {
+            verdicts.retain(|_, (at, _)| at.elapsed() < VERDICT_TTL);
+        }
+        verdicts.insert(file, (Instant::now(), score));
+    }
+
+    pub async fn nsfw_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.nsfw_slots
+            .get_or_init(|| tokio::sync::Semaphore::new(NSFW_SLOTS))
+            .acquire()
+            .await
+            .expect("the nsfw semaphore is never closed")
+    }
+
+    pub async fn nsfw_fetch(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.nsfw_fetches
+            .get_or_init(|| tokio::sync::Semaphore::new(NSFW_FETCHES))
+            .acquire()
+            .await
+            .expect("the nsfw fetch semaphore is never closed")
     }
 
     pub async fn sweep_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
@@ -985,6 +1035,8 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
     flood::check(ctx, message).await;
 
     tempmedia::watch(ctx, message, &view).await;
+
+    nsfw::watch(ctx, message, &view).await;
 
     if panel::typed_number(ctx, message, &view).await {
         return;
@@ -1638,6 +1690,7 @@ mod tests {
             include_str!("lists.rs"),
             include_str!("locks.rs"),
             include_str!("notice.rs"),
+            include_str!("nsfw.rs"),
             include_str!("packs.rs"),
             include_str!("panel.rs"),
             include_str!("ping.rs"),

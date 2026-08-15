@@ -10,7 +10,8 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "signal"
 log = "0.4"
 simple_logger = { version = "5", default-features = false, features = ["colors"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres"] }
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 cosmic-text = "0.19.0"
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 base64 = "0.22"
+tract-onnx = { version = "0.21", default-features = false }

@@ -94,6 +94,8 @@ pub const LOCKS: &[Lock] = &[
     Lock { key: super::bots::LOCK, names: &["ربات", "بات"], matches: never },
 
     Lock { key: super::biolink::LOCK, names: &["لینک در بایو", "لینک بایو", "بایو"], matches: never },
+
+    Lock { key: super::nsfw::LOCK, names: &["محتوای غیراخلاقی", "غیراخلاقی", "مستهجن"], matches: never },
 ];
 
 const ALL: &[&str] = &["همه", "همه چیز", "کل"];
@@ -461,12 +463,15 @@ fn is_spoiler(view: &View) -> bool {
         || matches!(&view.media, Some(Media::Document(doc)) if doc.is_spoiler())
 }
 
-fn is_story(view: &View) -> bool {
-    let media = match &view.message.raw {
+fn raw_media<'a>(view: &View<'a>) -> Option<&'a tl::enums::MessageMedia> {
+    match &view.message.raw {
         tl::enums::Message::Message(message) => message.media.as_ref(),
         _ => None,
-    };
-    matches!(media, Some(tl::enums::MessageMedia::Story(_)))
+    }
+}
+
+fn is_story(view: &View) -> bool {
+    matches!(raw_media(view), Some(tl::enums::MessageMedia::Story(_)))
 }
 
 fn is_pin_notice(view: &View) -> bool {
@@ -614,7 +619,7 @@ fn is_forward_user(view: &View) -> bool {
 }
 
 fn is_media(view: &View) -> bool {
-    view.media.is_some()
+    !matches!(raw_media(view), None | Some(tl::enums::MessageMedia::Empty))
 }
 
 pub fn is_photo(view: &View) -> bool {
@@ -720,6 +725,40 @@ mod tests {
         assert!(text_has_telegram_link("https://telegram.me/somechannel"));
         assert!(!text_has_telegram_link("example.com/t/me"));
         assert!(!text_has_telegram_link("سلام"));
+    }
+
+    #[test]
+    fn the_catch_all_covers_what_grammers_has_no_wrapper_for() {
+        let dropped = [
+            tl::enums::MessageMedia::PaidMedia(tl::types::MessageMediaPaidMedia {
+                stars_amount: 0,
+                extended_media: Vec::new(),
+            }),
+            tl::enums::MessageMedia::Giveaway(tl::types::MessageMediaGiveaway {
+                only_new_subscribers: false,
+                winners_are_visible: false,
+                channels: Vec::new(),
+                countries_iso2: None,
+                prize_description: None,
+                quantity: 0,
+                months: None,
+                stars: None,
+                until_date: 0,
+            }),
+            tl::enums::MessageMedia::Unsupported,
+        ];
+        for media in dropped {
+            assert!(
+                Media::from_raw(media.clone()).is_none(),
+                "grammers grew a wrapper for {media:?} — this test's premise is stale"
+            );
+            assert!(
+                !matches!(Some(&media), None | Some(tl::enums::MessageMedia::Empty)),
+                "{media:?} must read as media"
+            );
+        }
+
+        assert!(Media::from_raw(tl::enums::MessageMedia::Empty).is_none());
     }
 
     #[test]

@@ -2,7 +2,8 @@ use grammers_client::message::Button;
 
 use super::style::{Colour, choice, data as coloured, toggle};
 use super::{
-    Ctx, betrayal, biolink, captcha, flood, join, limits, notice, purge, raid, strict, tempmedia, warns,
+    Ctx, betrayal, biolink, captcha, flood, join, limits, notice, nsfw, purge, raid, strict,
+    tempmedia, warns,
 };
 
 pub struct Pick {
@@ -47,6 +48,10 @@ fn plain(value: u32) -> String {
 
 fn duration(value: u32) -> String {
     strict::time_label(value)
+}
+
+fn percent(value: u32) -> String {
+    format!("٪{value}")
 }
 
 fn every(value: u32) -> String {
@@ -130,6 +135,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { id: "rk_on", key: super::stats::RANKS, label: "مقام خودکار", section: "adv", kind: Kind::Flag },
     Setting { id: "tmed_on", key: tempmedia::MODE, label: "رسانه موقت", section: "tmed", kind: Kind::Flag },
     Setting { id: "lim_on", key: limits::MODE, label: "محدودیت مدیران", section: "lim", kind: Kind::Flag },
+    Setting { id: "nsfw_live", key: nsfw::LIVE, label: "حذف واقعی غیراخلاقی", section: "nsw", kind: Kind::Flag },
 
     Setting {
         id: "fl_lim", key: flood::LIMIT, label: "پیام", section: "fl",
@@ -248,6 +254,13 @@ pub const SETTINGS: &[Setting] = &[
         kind: Kind::Number {
             range: tempmedia::MINUTES_RANGE, presets: tempmedia::MINUTES_PRESETS,
             per_row: 3, show: duration, read: tempmedia::minutes,
+        },
+    },
+    Setting {
+        id: "nsfw_lim", key: nsfw::LIMIT, label: "حساسیت غیراخلاقی", section: "nsw",
+        kind: Kind::Number {
+            range: nsfw::LIMIT_RANGE, presets: nsfw::LIMIT_PRESETS,
+            per_row: 5, show: percent, read: nsfw::limit,
         },
     },
     Setting {

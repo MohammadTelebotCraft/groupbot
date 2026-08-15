@@ -243,6 +243,8 @@ const PAGES: &[&str] = &[
     "wn", "cp", "nt", "an", "wc", "ng", "sl", "jn", "ad", "gp", "gr", "lg", "dr",
     "ap", "tmed", "lim", "bl", "close", "page", "in", "on", "off", "ng_toggle", "ap_toggle",
     "dr_toggle", "dr_now", "lg_off", "jn_off", "wc_off",
+
+    "nsw",
 ];
 
 pub fn is_page(action: &str) -> bool {
@@ -415,6 +417,7 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
     let (title, markup): (String, ReplyMarkup) = match action {
         "root" => (ROOT_TITLE.to_owned(), root_markup(ctx, chat, opener)),
         "locks" => (locks_title(0), locks_markup(ctx, chat, opener, 0)),
+        "nsw" => (nsfw_title(ctx, chat), nsfw_markup(ctx, chat, opener)),
         "adv" => (ADVANCED_TITLE.to_owned(), advanced_markup(ctx, chat, opener)),
         "sec" => (
             "<b>پنل مدیریت</b> › <b>امنیت و ورود</b>\n\nچه کسی بنویسد، و با متخلف چه شود."
@@ -1597,6 +1600,39 @@ fn temp_media_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
     ReplyMarkup::from_buttons(&rows)
 }
 
+fn nsfw_title(ctx: &Ctx, chat: i64) -> String {
+    let armed = ctx.settings.is_locked(chat, super::nsfw::LOCK);
+    let live = ctx.settings.is_locked(chat, super::nsfw::LIVE);
+    format!(
+        "<b>پنل مدیریت</b> › <b>محتوای غیراخلاقی</b>\n\n\
+         قفل · <b>{}</b>\n\
+         حذف واقعی · <b>{}</b>\n\
+         حساسیت · <b>٪{}</b>\n\n\
+         <i>{}</i>",
+        if armed { "روشن" } else { "خاموش" },
+        if live { "روشن" } else { "خاموش · فقط بررسی" },
+        super::nsfw::limit(ctx, chat),
+        if live {
+            "تصویرهایی که از حساسیت بالاتر بروند پاک می شوند."
+        } else {
+            "تصویرها بررسی می شوند ولی چیزی پاک نمی شود. تا از نتیجه مطمئن نشده اید همین طور بگذارید."
+        }
+    )
+}
+
+fn nsfw_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
+    let armed = ctx.settings.is_locked(chat, super::nsfw::LOCK);
+    let mut rows = vec![vec![toggle(
+        format!("🔞  قفل غیراخلاقی  ·  {}", if armed { "✓" } else { "✗" }),
+        payload(opener, chat, super::nsfw::LOCK),
+        armed,
+    )]];
+    rows.extend(rows_for(ctx, chat, opener, "nsfw_live"));
+    rows.extend(rows_for(ctx, chat, opener, "nsfw_lim"));
+    rows.push(back_row(opener, chat, "locks", "nsw"));
+    ReplyMarkup::from_buttons(&rows)
+}
+
 fn last_page() -> usize {
     LOCKS.len().div_ceil(PER_PAGE) - 1
 }
@@ -1639,6 +1675,11 @@ fn locks_markup(ctx: &Ctx, chat: i64, opener: i64, page: usize) -> ReplyMarkup {
         rows.push(paging);
     }
 
+    rows.push(vec![section(
+        "🔞  محتوای غیراخلاقی",
+        payload(opener, chat, "nsw"),
+        ctx.settings.is_locked(chat, super::nsfw::LOCK),
+    )]);
     rows.push(vec![
         coloured("🔒  قفل همه", payload(opener, chat, "on"), Colour::Danger),
         coloured("🔓  باز کردن همه", payload(opener, chat, "off"), Colour::Success),
@@ -1701,6 +1742,16 @@ mod tests {
         assert_eq!(parse_number("24:00"), None);
         assert_eq!(parse_number("12:99"), None);
         assert_eq!(parse_number("سلام"), None);
+    }
+
+    #[test]
+    fn every_declared_setting_is_rendered_somewhere() {
+        let source = include_str!("panel.rs");
+        for declared in setting::SETTINGS {
+            let named = source.contains(&format!("\"{}\"", declared.id))
+                || source.contains(&format!("\"{}:", declared.id));
+            assert!(named, "{} is declared but no panel page renders it", declared.id);
+        }
     }
 
     #[test]

@@ -35,8 +35,8 @@ const fn cmd(form: &'static str, does: &'static str) -> Cmd {
 pub const INDEX_ID: &str = "i";
 
 pub const INDEX: &[&str] = &[
-    "locks", "filter", "usr", "adm", "sec", "msg", "tm", "ls", "cl", "st", "gr", "lim",
-    "etc",
+    "locks", "nsfw", "filter", "usr", "adm", "sec", "msg", "tm", "ls", "cl", "st", "gr",
+    "lim", "etc",
 ];
 
 pub const TOPICS: &[Topic] = &[
@@ -630,6 +630,28 @@ pub const TOPICS: &[Topic] = &[
         ],
     },
     Topic {
+        id: "nsfw",
+        icon: "🔞",
+        title: "محتوای غیراخلاقی",
+        intro: "عکس، گیف، استیکر و کاور فیلم را به مدل تشخیص تصویر می دهد و اگر مستهجن بود پاک می کند. تنها قفلی است که به جای نوع پیام، به خود تصویر نگاه می کند.",
+        commands: &[
+            cmd("قفل غیراخلاقی", "قفل را روشن می کند"),
+            cmd("بازکردن غیراخلاقی", "قفل را بر می دارد"),
+        ],
+        examples: &[
+            eg("قفل غیراخلاقی", "از این به بعد تصویرهای مستهجن پاک می شوند."),
+        ],
+        extra: None,
+        notes: &[
+            "این قفل تازه روشن شود در «حالت آزمایشی» است: تصویرها بررسی و ثبت می شوند ولی هیچ چیز پاک نمی شود. تا از نتیجه مطمئن نشده اید همین طور بگذاریدش.",
+            "«حساسیت» از همین پنل تنظیم می شود. عدد بالاتر یعنی سخت گیری کمتر و اشتباه کمتر؛ پیشنهاد ٪۹۰.",
+            "تشخیص قطعی نیست و گاهی اشتباه می کند، برای همین حالت آزمایشی وجود دارد.",
+            "بررسی بیرون از مسیر پیام انجام می شود، پس تصویر یکی دو ثانیه دیده می شود و بعد پاک می شود.",
+            "هر فایل یک بار بررسی می شود و نتیجه اش به خاطر می ماند، پس فوروارد همان تصویر در گروه های دیگر هزینه ای ندارد.",
+            "ادمین ها و کاربران ویژه مثل بقیه قفل ها معاف اند.",
+        ],
+    },
+    Topic {
         id: "etc",
         icon: "✨",
         title: "باقی دستورها",
@@ -665,7 +687,7 @@ pub const TOPICS: &[Topic] = &[
 
 fn lock_names() -> String {
     const GROUPS: &[(&str, &[&str])] = &[
-        ("رسانه", &["photo", "video", "gif", "music", "voice", "file", "sticker", "animsticker", "media"]),
+        ("رسانه", &["photo", "video", "gif", "music", "voice", "file", "sticker", "animsticker", "media", "nsfw"]),
         ("متن", &["links", "hyperlink", "hashtag", "username", "mention", "english", "persian", "commands", "botcall"]),
         ("ظاهر", &["emoji", "premoji", "spoiler"]),
         ("فوروارد", &["forward_channel", "forward_user"]),
