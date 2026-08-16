@@ -18,3 +18,59 @@ It is compiled into the binary with include_bytes! and used only by the
 NSFW lock, to score a thumbnail. It takes RGB [1, 3, 384, 384] scaled to
 -1..1 (mean and standard deviation of 0.5) and emits two logits, in the
 order nsfw, sfw.
+
+nsfw_grade.onnx is mobilenetv4_conv_small.e2400_r224_in1k_nsfw_classifier,
+licensed under the Apache License 2.0.
+
+    Source:  https://huggingface.co/taufiqdp/mobilenetv4_conv_small.e2400_r224_in1k_nsfw_classifier
+    License: https://www.apache.org/licenses/LICENSE-2.0
+
+It is compiled into the binary with include_bytes! and used only by the
+NSFW lock, to tell explicit content apart from merely revealing content.
+It takes RGB [3, 224, 224] in 0..1 and applies its own ImageNet
+normalisation; it emits five logits, in the order drawings, hentai,
+neutral, porn, sexy.
+
+libonnxruntime.so.1.20.1 is ONNX Runtime, licensed under the MIT License.
+
+    Source:  https://github.com/microsoft/onnxruntime
+    Release: https://github.com/microsoft/onnxruntime/releases/tag/v1.20.1
+    License: https://github.com/microsoft/onnxruntime/blob/main/LICENSE
+
+It is compiled into the binary with include_bytes! and written beside the
+executable on first start, so that a deploy stays a single file. It runs
+both models above; it replaced tract, which produced identical scores but
+took twelve times as long per forward pass on the deployment hardware.
+
+ocr_det.onnx and ocr_rec.onnx are the mobile detection and English
+recognition models from PaddleOCR, licensed under the Apache License 2.0.
+
+    Source:  https://github.com/PaddlePaddle/PaddleOCR
+    ONNX:    https://huggingface.co/monkt/paddleocr-onnx
+    License: https://www.apache.org/licenses/LICENSE-2.0
+
+They are compiled into the binary with include_bytes! and used only by the
+advertisement lock, to read text that was written into a picture. Detection
+takes RGB [1, 3, h, w] with both sides a multiple of 32, ImageNet
+normalised, and emits a probability map; recognition takes RGB
+[1, 3, 48, w] scaled to -1..1 and emits per-step class logits decoded by
+greedy CTC against ocr_dict.txt, which ships beside them and is part of the
+same release.
+
+clip.onnx is the vision tower of CLIP ViT-B/32, licensed under the MIT
+License.
+
+    Source:  https://github.com/openai/CLIP
+    Weights: https://huggingface.co/openai/clip-vit-base-patch32
+    ONNX:    https://huggingface.co/Xenova/clip-vit-base-patch32
+
+It is the one model that is not part of this repository: at 335 MB it is
+loaded from a file of that name beside the executable, because embedding it
+makes rustc materialise the whole array into the object file and the link
+needs several gigabytes. It is used only by the topic locks, to turn a
+thumbnail into a 512-value embedding. It takes RGB
+[1, 3, 224, 224] normalised with CLIP's own mean and standard deviation
+and emits image_embeds directly. Only the vision tower ships; the text
+tower was run once, offline, to produce the concept vectors in
+src/handlers/concept_vectors.rs and is not part of this program.
+

@@ -14,4 +14,4 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 cosmic-text = "0.19.0"
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 base64 = "0.22"
-tract-onnx = { version = "0.21", default-features = false }
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }

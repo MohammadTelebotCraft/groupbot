@@ -1,7 +1,7 @@
 use grammers_client::message::{Button, InputMessage, Message, ReplyMarkup};
 use grammers_client::update::CallbackQuery;
 
-use super::locks::LOCKS;
+use super::locks::{LOCKS, plain};
 use super::style::{Colour, choice, data as coloured, toggle};
 use super::{
     Ctx, answers, betrayal, biolink, captcha, flood, help, join, limits, lists, log, notice, raid,
@@ -245,6 +245,8 @@ const PAGES: &[&str] = &[
     "dr_toggle", "dr_now", "lg_off", "jn_off", "wc_off",
 
     "nsw",
+    "cq",
+    "ai",
 ];
 
 pub fn is_page(action: &str) -> bool {
@@ -417,7 +419,9 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
     let (title, markup): (String, ReplyMarkup) = match action {
         "root" => (ROOT_TITLE.to_owned(), root_markup(ctx, chat, opener)),
         "locks" => (locks_title(0), locks_markup(ctx, chat, opener, 0)),
+        "ai" => (ai_title(ctx, chat), ai_markup(ctx, chat, opener)),
         "nsw" => (nsfw_title(ctx, chat), nsfw_markup(ctx, chat, opener)),
+        "cq" => (concepts_title(ctx, chat), concepts_markup(ctx, chat, opener)),
         "adv" => (ADVANCED_TITLE.to_owned(), advanced_markup(ctx, chat, opener)),
         "sec" => (
             "<b>پنل مدیریت</b> › <b>امنیت و ورود</b>\n\nچه کسی بنویسد، و با متخلف چه شود."
@@ -612,7 +616,7 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
         }
         "on" | "off" => {
             let on = action == "on";
-            for lock in LOCKS {
+            for lock in plain() {
                 ctx.settings.set(chat, lock.key, on).await;
                 strict::sync_pick(ctx, chat, lock.key, on).await;
                 super::bots::on_lock_set(ctx, chat, lock.key, on).await;
@@ -643,8 +647,13 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
             ctx.settings.set(chat, lock.key, now_on).await;
             strict::sync_pick(ctx, chat, lock.key, now_on).await;
             super::bots::on_lock_set(ctx, chat, lock.key, now_on).await;
-            let page = page.min(last_page());
-            (locks_title(page), locks_markup(ctx, chat, opener, page))
+
+            if super::locks::is_ai(lock.key) {
+                (ai_title(ctx, chat), ai_markup(ctx, chat, opener))
+            } else {
+                let page = page.min(last_page());
+                (locks_title(page), locks_markup(ctx, chat, opener, page))
+            }
         }
     };
 
@@ -691,14 +700,24 @@ async fn list_callback(ctx: &Ctx, query: &CallbackQuery, rest: &str, chat: i64, 
 }
 
 fn root_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
-    let active = LOCKS
-        .iter()
+    let active = plain()
         .filter(|lock| ctx.settings.is_locked(chat, lock.key))
+        .count();
+    let watching = ai_keys()
+        .filter(|key| ctx.settings.is_locked(chat, key))
         .count();
     ReplyMarkup::from_buttons(&[
         vec![Button::data(
-            format!("🔒  قفل ها  ({active} از {})  ›", LOCKS.len()),
+            format!("🔒  قفل ها  ({active} از {})  ›", plain().count()),
             payload(opener, chat, "locks"),
+        )],
+        vec![Button::data(
+            if watching == 0 {
+                "🤖  نگهبان تصویر  ›".to_owned()
+            } else {
+                format!("🤖  نگهبان تصویر  ({watching} روشن)  ›")
+            },
+            payload(opener, chat, "ai"),
         )],
         vec![toggle(
             "🔥  حالت سختگیرانه  ›",
@@ -1600,18 +1619,91 @@ fn temp_media_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
     ReplyMarkup::from_buttons(&rows)
 }
 
+fn ai_keys() -> impl Iterator<Item = &'static str> {
+    std::iter::once(super::nsfw::LOCK)
+        .chain(std::iter::once(super::ocr::LOCK))
+        .chain(super::concepts::CONCEPTS.iter().map(|c| c.key))
+}
+
+fn ai_title(ctx: &Ctx, chat: i64) -> String {
+    let on: Vec<&str> = ai_keys()
+        .filter(|key| ctx.settings.is_locked(chat, key))
+        .filter_map(|key| LOCKS.iter().find(|lock| lock.key == key))
+        .map(|lock| lock.names[0])
+        .collect();
+    let watching = !on.is_empty();
+    format!(
+        "<b>پنل مدیریت</b> › <b>نگهبان تصویر</b>\n\n\
+         روشن · <b>{}</b>\n\n\
+         <i>{}</i>",
+        if watching { on.join("، ") } else { "هیچ کدام".to_owned() },
+        if watching {
+            "هر تصویر یک بار گرفته و بررسی می شود، هر چند مورد که روشن باشد. نتیجه برای همان \
+             فایل نگه داشته می شود، پس فوروارد همان تصویر دیگر هزینه ای ندارد."
+        } else {
+            "هیچ کدام روشن نیست و تا وقتی روشن نشوند هیچ تصویری دانلود یا بررسی نمی شود."
+        }
+    )
+}
+
+fn ai_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
+    let row = |icon: &str, label: &str, key: &'static str| {
+        let on = ctx.settings.is_locked(chat, key);
+        toggle(
+            format!("{icon}  {label}  {}", if on { "✓" } else { "✗" }),
+            payload(opener, chat, key),
+            on,
+        )
+    };
+    let icons = ["🚬", "🍷", "🔫", "🎰", "💊", "🩸"];
+    let mut rows = vec![
+        vec![row("🔞", "غیراخلاقی", super::nsfw::LOCK)],
+        vec![row("📢", "تبلیغ در تصویر", super::ocr::LOCK)],
+    ];
+    rows.extend(
+        super::concepts::CONCEPTS
+            .chunks(2)
+            .enumerate()
+            .map(|(pair, concepts)| {
+                concepts
+                    .iter()
+                    .enumerate()
+                    .map(|(at, concept)| {
+                        row(
+                            icons.get(pair * 2 + at).copied().unwrap_or("•"),
+                            concept.names[0],
+                            concept.key,
+                        )
+                    })
+                    .collect()
+            }),
+    );
+    rows.push(vec![
+        Button::data("⚙️  تنظیم غیراخلاقی  ›", payload(opener, chat, "nsw")),
+        Button::data("⚙️  تنظیم موضوعی  ›", payload(opener, chat, "cq")),
+    ]);
+    rows.push(back_row(opener, chat, "root", "ai"));
+    ReplyMarkup::from_buttons(&rows)
+}
+
 fn nsfw_title(ctx: &Ctx, chat: i64) -> String {
     let armed = ctx.settings.is_locked(chat, super::nsfw::LOCK);
     let live = ctx.settings.is_locked(chat, super::nsfw::LIVE);
     format!(
         "<b>پنل مدیریت</b> › <b>محتوای غیراخلاقی</b>\n\n\
          قفل · <b>{}</b>\n\
-         حذف واقعی · <b>{}</b>\n\
-         حساسیت · <b>٪{}</b>\n\n\
+         حالت · <b>{}</b>\n\
+         حساسیت · <b>٪{}</b>\n\
+         محتوای محرک · <b>{}</b>\n\n\
          <i>{}</i>",
         if armed { "روشن" } else { "خاموش" },
         if live { "روشن" } else { "خاموش · فقط بررسی" },
         super::nsfw::limit(ctx, chat),
+        if ctx.settings.is_locked(chat, super::nsfw::SOFT) {
+            "می ماند"
+        } else {
+            "حذف می شود"
+        },
         if live {
             "تصویرهایی که از حساسیت بالاتر بروند پاک می شوند."
         } else {
@@ -1628,13 +1720,59 @@ fn nsfw_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
         armed,
     )]];
     rows.extend(rows_for(ctx, chat, opener, "nsfw_live"));
+    rows.extend(rows_for(ctx, chat, opener, "nsfw_soft"));
     rows.extend(rows_for(ctx, chat, opener, "nsfw_lim"));
-    rows.push(back_row(opener, chat, "locks", "nsw"));
+    rows.push(back_row(opener, chat, "ai", "nsw"));
+    ReplyMarkup::from_buttons(&rows)
+}
+
+fn concepts_title(ctx: &Ctx, chat: i64) -> String {
+    let armed: Vec<&str> = super::concepts::CONCEPTS
+        .iter()
+        .filter(|concept| ctx.settings.is_locked(chat, concept.key))
+        .map(|concept| concept.names[0])
+        .collect();
+    format!(
+        "<b>پنل مدیریت</b> › <b>قفل موضوعی</b>\n\n         روشن · <b>{}</b>\n         حذف واقعی · <b>{}</b>\n         حساسیت · <b>{}</b>\n\n         <i>تشخیص موضوعی از قفل غیراخلاقی کم دقت تر است. اگر می خواهید اول نتیجه را ببینید بدون اینکه چیزی پاک شود، «فقط بررسی» را روشن کنید.</i>",
+        if armed.is_empty() { "هیچ کدام".to_owned() } else { armed.join("، ") },
+        if ctx.settings.is_locked(chat, super::concepts::SHADOW) { "فقط بررسی" } else { "حذف" },
+        super::concepts::limit(ctx, chat),
+    )
+}
+
+fn concepts_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
+    let mut rows: Vec<Vec<Button>> = super::concepts::CONCEPTS
+        .chunks(2)
+        .map(|pair| {
+            pair.iter()
+                .map(|concept| {
+                    let on = ctx.settings.is_locked(chat, concept.key);
+                    toggle(
+                        format!("{}  {}", if on { "✓" } else { "✗" }, concept.names[0]),
+                        payload(opener, chat, concept.key),
+                        on,
+                    )
+                })
+                .collect()
+        })
+        .collect();
+        rows.push(vec![toggle(
+        format!(
+            "🚫  تبلیغ در تصویر  ·  {}",
+            if ctx.settings.is_locked(chat, super::ocr::LOCK) { "✓" } else { "✗" }
+        ),
+        payload(opener, chat, super::ocr::LOCK),
+        ctx.settings.is_locked(chat, super::ocr::LOCK),
+    )]);
+    rows.extend(rows_for(ctx, chat, opener, "cq_shadow"));
+    rows.extend(rows_for(ctx, chat, opener, "ad_shadow"));
+    rows.extend(rows_for(ctx, chat, opener, "cq_lim"));
+    rows.push(back_row(opener, chat, "ai", "cq"));
     ReplyMarkup::from_buttons(&rows)
 }
 
 fn last_page() -> usize {
-    LOCKS.len().div_ceil(PER_PAGE) - 1
+    plain().count().div_ceil(PER_PAGE) - 1
 }
 
 fn locks_title(page: usize) -> String {
@@ -1647,7 +1785,8 @@ fn locks_title(page: usize) -> String {
 
 fn locks_markup(ctx: &Ctx, chat: i64, opener: i64, page: usize) -> ReplyMarkup {
     let start = page * PER_PAGE;
-    let shown = &LOCKS[start..(start + PER_PAGE).min(LOCKS.len())];
+    let grid: Vec<&super::locks::Lock> = plain().collect();
+    let shown = &grid[start..(start + PER_PAGE).min(grid.len())];
 
     let mut rows: Vec<Vec<Button>> = shown
         .chunks(2)
@@ -1680,6 +1819,13 @@ fn locks_markup(ctx: &Ctx, chat: i64, opener: i64, page: usize) -> ReplyMarkup {
         payload(opener, chat, "nsw"),
         ctx.settings.is_locked(chat, super::nsfw::LOCK),
     )]);
+    rows.push(vec![section(
+        "🚭  قفل موضوعی",
+        payload(opener, chat, "cq"),
+        super::concepts::CONCEPTS
+            .iter()
+            .any(|concept| ctx.settings.is_locked(chat, concept.key)),
+    )]);
     rows.push(vec![
         coloured("🔒  قفل همه", payload(opener, chat, "on"), Colour::Danger),
         coloured("🔓  باز کردن همه", payload(opener, chat, "off"), Colour::Success),
@@ -1709,18 +1855,17 @@ fn lock_button(
 }
 
 fn summary(ctx: &Ctx, chat: i64) -> String {
-    let active: Vec<&str> = LOCKS
-        .iter()
+    let active: Vec<&str> = plain()
         .filter(|lock| ctx.settings.is_locked(chat, lock.key))
         .map(|lock| lock.names[0])
         .collect();
     if active.is_empty() {
-        format!("<b>قفل ها</b>\n\nهیچ قفلی فعال نیست ({} در دسترس).", LOCKS.len())
+        format!("<b>قفل ها</b>\n\nهیچ قفلی فعال نیست ({} در دسترس).", plain().count())
     } else {
         format!(
             "<b>قفل ها</b> ({} از {})\n{}",
             active.len(),
-            LOCKS.len(),
+            plain().count(),
             active
                 .iter()
                 .map(|name| format!("✓ {name}"))

@@ -2,8 +2,8 @@ use grammers_client::message::Button;
 
 use super::style::{Colour, choice, data as coloured, toggle};
 use super::{
-    Ctx, betrayal, biolink, captcha, flood, join, limits, notice, nsfw, purge, raid, strict,
-    tempmedia, warns,
+    Ctx, betrayal, biolink, captcha, concepts, flood, join, limits, notice, nsfw, ocr, purge,
+    raid, strict, tempmedia, warns,
 };
 
 pub struct Pick {
@@ -136,6 +136,9 @@ pub const SETTINGS: &[Setting] = &[
     Setting { id: "tmed_on", key: tempmedia::MODE, label: "رسانه موقت", section: "tmed", kind: Kind::Flag },
     Setting { id: "lim_on", key: limits::MODE, label: "محدودیت مدیران", section: "lim", kind: Kind::Flag },
     Setting { id: "nsfw_live", key: nsfw::LIVE, label: "حذف واقعی غیراخلاقی", section: "nsw", kind: Kind::Flag },
+    Setting { id: "nsfw_soft", key: nsfw::SOFT, label: "نگه داشتن محتوای محرک", section: "nsw", kind: Kind::Flag },
+    Setting { id: "cq_shadow", key: concepts::SHADOW, label: "فقط بررسی، بدون حذف", section: "cq", kind: Kind::Flag },
+    Setting { id: "ad_shadow", key: ocr::SHADOW, label: "فقط بررسی تبلیغ، بدون حذف", section: "cq", kind: Kind::Flag },
 
     Setting {
         id: "fl_lim", key: flood::LIMIT, label: "پیام", section: "fl",
@@ -254,6 +257,13 @@ pub const SETTINGS: &[Setting] = &[
         kind: Kind::Number {
             range: tempmedia::MINUTES_RANGE, presets: tempmedia::MINUTES_PRESETS,
             per_row: 3, show: duration, read: tempmedia::minutes,
+        },
+    },
+    Setting {
+        id: "cq_lim", key: concepts::LIMIT, label: "حساسیت موضوعی", section: "cq",
+        kind: Kind::Number {
+            range: concepts::LIMIT_RANGE, presets: concepts::LIMIT_PRESETS,
+            per_row: 3, show: plain, read: concepts::limit,
         },
     },
     Setting {

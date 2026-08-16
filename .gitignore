@@ -10,3 +10,4 @@ groupbot.locks
 *.sql.gz
 *.md
 !README.md
+assets/clip.onnx

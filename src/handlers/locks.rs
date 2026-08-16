@@ -53,6 +53,16 @@ impl<'a> View<'a> {
     }
 }
 
+pub fn is_ai(key: &str) -> bool {
+    key == super::nsfw::LOCK
+        || key == super::ocr::LOCK
+        || super::concepts::CONCEPTS.iter().any(|c| c.key == key)
+}
+
+pub fn plain() -> impl Iterator<Item = &'static Lock> {
+    LOCKS.iter().filter(|lock| !is_ai(lock.key))
+}
+
 pub const LOCKS: &[Lock] = &[
     Lock { key: "links", names: &["لینک", "لینک ها", "لینکها"], matches: is_link },
     Lock { key: "photo", names: &["عکس", "تصویر"], matches: is_photo },
@@ -96,6 +106,15 @@ pub const LOCKS: &[Lock] = &[
     Lock { key: super::biolink::LOCK, names: &["لینک در بایو", "لینک بایو", "بایو"], matches: never },
 
     Lock { key: super::nsfw::LOCK, names: &["محتوای غیراخلاقی", "غیراخلاقی", "مستهجن"], matches: never },
+
+    Lock { key: "c_cig", names: &["سیگار", "دخانیات", "قلیان"], matches: never },
+    Lock { key: "c_alc", names: &["مشروب", "الکل", "مشروبات"], matches: never },
+    Lock { key: "c_gun", names: &["اسلحه", "سلاح"], matches: never },
+    Lock { key: "c_bet", names: &["قمار", "شرط بندی", "شرطبندی"], matches: never },
+    Lock { key: "c_drg", names: &["مواد", "مواد مخدر"], matches: never },
+    Lock { key: "c_bld", names: &["خون", "خونریزی"], matches: never },
+
+    Lock { key: super::ocr::LOCK, names: &["تبلیغ در تصویر", "تبلیغ تصویری", "لینک در تصویر"], matches: never },
 ];
 
 const ALL: &[&str] = &["همه", "همه چیز", "کل"];
@@ -116,6 +135,22 @@ pub const FORWARD_CHANNEL: &str = "forward_channel";
 pub const FORWARD_USER: &str = "forward_user";
 pub const STATUS: &[&str] = &["قفل ها", "قفلها", "لیست قفل", "وضعیت قفل"];
 
+pub const COMMANDS: &str = "commands";
+
+const PUBLIC: &[&[&str]] = &[
+    super::ping::COMMANDS,
+    super::report::COMMANDS,
+    super::config::HELP,
+    super::config::ADMIN_LIST,
+    super::extras::SHOW_RULES,
+    super::stats::INFO,
+    STATUS,
+];
+
+fn is_public_command(text: &str) -> bool {
+    PUBLIC.iter().any(|names| names.contains(&text))
+}
+
 pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_>) -> bool {
     let text = view.text();
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
@@ -123,21 +158,23 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
     };
 
     if STATUS.contains(&text) {
+        if ctx.settings.is_locked(chat, COMMANDS) && moderate(ctx, message, chat, view).await {
+            return true;
+        }
         let active: Vec<&str> = ctx.settings.with_chat(chat, |settings| {
-            LOCKS
-                .iter()
+            plain()
                 .filter(|lock| settings.is_locked(lock.key))
                 .map(|lock| lock.names[0])
                 .collect()
         });
         let _ = message
             .reply(if active.is_empty() {
-                format!("هیچ قفلی فعال نیست. ({} قفل در دسترس)", LOCKS.len())
+                format!("هیچ قفلی فعال نیست. ({} قفل در دسترس)", plain().count())
             } else {
                 format!(
                     "قفل های فعال ({} از {}):\n{}",
                     active.len(),
-                    LOCKS.len(),
+                    plain().count(),
                     active.join("، ")
                 )
             })
@@ -157,7 +194,7 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
 
         if ALL.contains(&name) {
             let mut changed = 0;
-            for lock in LOCKS {
+            for lock in plain() {
                 if ctx.settings.set(chat, lock.key, on).await {
                     changed += 1;
                 }
@@ -166,7 +203,7 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
             }
             let _ = message
                 .reply(if on {
-                    format!("✓ همه قفل ها فعال شد ({changed} تغییر، {} قفل).", LOCKS.len())
+                    format!("✓ همه قفل ها فعال شد ({changed} تغییر، {} قفل).", plain().count())
                 } else {
                     format!("✗ همه قفل ها برداشته شد ({changed} تغییر).")
                 })
@@ -545,7 +582,7 @@ fn markup_has_link(markup: &tl::enums::ReplyMarkup) -> bool {
 fn markup_has_telegram_link(markup: &tl::enums::ReplyMarkup) -> bool {
     markup_links(markup)
         .iter()
-        .any(|url| text_has_telegram_link(url))
+        .any(|url| has_telegram_link(url))
 }
 
 pub(super) fn text_has_link(text: &str) -> bool {
@@ -554,7 +591,7 @@ pub(super) fn text_has_link(text: &str) -> bool {
         .any(|needle| text.contains(needle))
 }
 
-fn text_has_telegram_link(text: &str) -> bool {
+pub fn has_telegram_link(text: &str) -> bool {
     ["t.me/", "telegram.me/", "telegram.dog/"]
         .iter()
         .any(|needle| text.contains(needle))
@@ -590,7 +627,7 @@ fn is_bot_call(view: &View) -> bool {
 fn is_promoter(view: &View) -> bool {
     is_forward_channel(view)
         || is_username(view)
-        || text_has_telegram_link(view.lower())
+        || has_telegram_link(view.lower())
         || markup_of(view).is_some_and(markup_has_telegram_link)
 }
 
@@ -600,6 +637,7 @@ fn is_bot_command(view: &View) -> bool {
             .iter()
             .any(|e| matches!(e, tl::enums::MessageEntity::BotCommand(_)))
     }) || view.message.text().starts_with('/')
+        || is_public_command(view.text())
 }
 
 fn is_mention(view: &View) -> bool {
@@ -721,10 +759,10 @@ mod tests {
 
     #[test]
     fn spots_a_telegram_link() {
-        assert!(text_has_telegram_link("بیا t.me/joinchat/abc"));
-        assert!(text_has_telegram_link("https://telegram.me/somechannel"));
-        assert!(!text_has_telegram_link("example.com/t/me"));
-        assert!(!text_has_telegram_link("سلام"));
+        assert!(has_telegram_link("بیا t.me/joinchat/abc"));
+        assert!(has_telegram_link("https://telegram.me/somechannel"));
+        assert!(!has_telegram_link("example.com/t/me"));
+        assert!(!has_telegram_link("سلام"));
     }
 
     #[test]
@@ -759,6 +797,19 @@ mod tests {
         }
 
         assert!(Media::from_raw(tl::enums::MessageMedia::Empty).is_none());
+    }
+
+    #[test]
+    fn the_commands_lock_covers_what_a_member_can_actually_send() {
+        for word in ["پینگ", "گزارش", "راهنما", "دستورات", "قوانین", "لیست ادمین", "قفل ها"] {
+            assert!(is_public_command(word), "«{word}» is public but the lock ignores it");
+        }
+
+        for word in ["قفل عکس", "سکوت", "بن", "پنل", "ترفیع", "کانفیگ"] {
+            assert!(!is_public_command(word), "«{word}» is admin-gated already");
+        }
+
+        assert!(LOCKS.iter().any(|lock| lock.key == COMMANDS));
     }
 
     #[test]

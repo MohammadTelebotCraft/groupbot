@@ -6,6 +6,8 @@ pub mod bots;
 pub mod callbacks;
 pub mod captcha;
 pub mod cleaner;
+pub mod concept_vectors;
+pub mod concepts;
 pub mod emoji_image;
 pub mod config;
 pub mod extras;
@@ -18,6 +20,7 @@ pub mod lists;
 pub mod log;
 pub mod locks;
 pub mod notice;
+pub mod ocr;
 pub mod nsfw;
 pub mod packs;
 pub mod panel;
@@ -193,12 +196,18 @@ pub struct Ctx {
 
     bot_sweeps: OnceLock<tokio::sync::Semaphore>,
 
-    verdicts: RwLock<HashMap<i64, (Instant, f32)>>,
+    verdicts: RwLock<HashMap<i64, (Instant, f32, bool, bool)>>,
 
-    nsfw_slots: OnceLock<tokio::sync::Semaphore>,
+    nsfw_slots: OnceLock<Arc<tokio::sync::Semaphore>>,
 
     nsfw_fetches: OnceLock<tokio::sync::Semaphore>,
+
+    margins: RwLock<HashMap<i64, (Instant, [f32; CONCEPT_SLOTS])>>,
+
+    adverts: RwLock<HashMap<i64, (Instant, Option<&'static str>)>>,
 }
+
+pub const CONCEPT_SLOTS: usize = 8;
 
 pub const NOTICE_EVERY: Duration = Duration::from_secs(120);
 
@@ -296,6 +305,8 @@ impl Ctx {
             verdicts: RwLock::new(HashMap::new()),
             nsfw_slots: OnceLock::new(),
             nsfw_fetches: OnceLock::new(),
+            margins: RwLock::new(HashMap::new()),
+            adverts: RwLock::new(HashMap::new()),
         }
     }
 
@@ -394,28 +405,62 @@ impl Ctx {
             .expect("the bio semaphore is never closed")
     }
 
-    pub fn known_verdict(&self, file: i64) -> Option<f32> {
+    pub fn known_verdict(&self, file: i64) -> Option<(f32, bool, bool)> {
         let verdicts = self.verdicts.read().unwrap();
         verdicts
             .get(&file)
-            .filter(|(at, _)| at.elapsed() < VERDICT_TTL)
-            .map(|(_, score)| *score)
+            .filter(|(at, ..)| at.elapsed() < VERDICT_TTL)
+            .map(|(_, score, innocent, explicit)| (*score, *innocent, *explicit))
     }
 
-    pub fn remember_verdict(&self, file: i64, score: f32) {
+    pub fn remember_verdict(&self, file: i64, score: f32, innocent: bool, explicit: bool) {
         let mut verdicts = self.verdicts.write().unwrap();
         if verdicts.len() >= VERDICT_MAX {
-            verdicts.retain(|_, (at, _)| at.elapsed() < VERDICT_TTL);
+            verdicts.retain(|_, (at, ..)| at.elapsed() < VERDICT_TTL);
         }
-        verdicts.insert(file, (Instant::now(), score));
+        verdicts.insert(file, (Instant::now(), score, innocent, explicit));
     }
 
-    pub async fn nsfw_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
-        self.nsfw_slots
-            .get_or_init(|| tokio::sync::Semaphore::new(NSFW_SLOTS))
-            .acquire()
-            .await
-            .expect("the nsfw semaphore is never closed")
+    pub async fn nsfw_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(
+            self.nsfw_slots
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(NSFW_SLOTS))),
+        )
+        .acquire_owned()
+        .await
+        .expect("the nsfw semaphore is never closed")
+    }
+
+    pub fn known_margins(&self, file: i64) -> Option<[f32; CONCEPT_SLOTS]> {
+        let margins = self.margins.read().unwrap();
+        margins
+            .get(&file)
+            .filter(|(at, _)| at.elapsed() < VERDICT_TTL)
+            .map(|(_, all)| *all)
+    }
+
+    pub fn known_advert(&self, file: i64) -> Option<Option<&'static str>> {
+        let adverts = self.adverts.read().unwrap();
+        adverts
+            .get(&file)
+            .filter(|(at, _)| at.elapsed() < VERDICT_TTL)
+            .map(|(_, why)| *why)
+    }
+
+    pub fn remember_advert(&self, file: i64, why: Option<&'static str>) {
+        let mut adverts = self.adverts.write().unwrap();
+        if adverts.len() >= VERDICT_MAX {
+            adverts.retain(|_, (at, _)| at.elapsed() < VERDICT_TTL);
+        }
+        adverts.insert(file, (Instant::now(), why));
+    }
+
+    pub fn remember_margins(&self, file: i64, all: [f32; CONCEPT_SLOTS]) {
+        let mut margins = self.margins.write().unwrap();
+        if margins.len() >= VERDICT_MAX {
+            margins.retain(|_, (at, _)| at.elapsed() < VERDICT_TTL);
+        }
+        margins.insert(file, (Instant::now(), all));
     }
 
     pub async fn nsfw_fetch(&self) -> tokio::sync::SemaphorePermit<'_> {
@@ -1036,7 +1081,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
 
     tempmedia::watch(ctx, message, &view).await;
 
-    nsfw::watch(ctx, message, &view).await;
+    nsfw::watch(ctx, message, chat, &view).await;
 
     if panel::typed_number(ctx, message, &view).await {
         return;
@@ -1061,6 +1106,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
                 || restrict::handle(ctx, message, &view).await
                 || lists::command(ctx, message).await
                 || ping::handle(ctx, message).await
+                || nsfw::test(ctx, message).await
                 || promote::handle(ctx, message, &view).await
                 || stats::handle(ctx, message).await
                 || report::handle(ctx, message).await
