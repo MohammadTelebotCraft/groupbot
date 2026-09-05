@@ -24,8 +24,13 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
     };
     let Some((name, what)) = SETTINGS
         .iter()
-
-        .max_by_key(|(name, _)| if rest.starts_with(*name) { name.len() } else { 0 })
+        .max_by_key(|(name, _)| {
+            if rest.starts_with(*name) {
+                name.len()
+            } else {
+                0
+            }
+        })
         .filter(|(name, _)| rest.starts_with(*name))
     else {
         return false;
@@ -123,7 +128,13 @@ mod tests {
         for (alias, what) in SETTINGS {
             let picked = SETTINGS
                 .iter()
-                .max_by_key(|(name, _)| if alias.starts_with(*name) { name.len() } else { 0 })
+                .max_by_key(|(name, _)| {
+                    if alias.starts_with(*name) {
+                        name.len()
+                    } else {
+                        0
+                    }
+                })
                 .filter(|(name, _)| alias.starts_with(*name))
                 .expect("an alias must match itself");
             assert_eq!(picked.1, *what, "«{alias}» resolved to the wrong setting");

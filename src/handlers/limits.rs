@@ -11,14 +11,46 @@ pub struct Cap {
     pub label: &'static str,
 }
 
-pub const BAN: &Cap = &Cap { name: "ban", key: "lim_ban", label: "بن" };
-pub const MUTE: &Cap = &Cap { name: "mute", key: "lim_mute", label: "سکوت" };
-pub const WARN: &Cap = &Cap { name: "warn", key: "lim_warn", label: "اخطار" };
-pub const SET: &Cap = &Cap { name: "set", key: "lim_set", label: "تنظیمات" };
-pub const CLEAN: &Cap = &Cap { name: "clean", key: "lim_clean", label: "پاکسازی" };
-pub const EXEMPT: &Cap = &Cap { name: "exempt", key: "lim_exempt", label: "معافیت" };
-pub const PIN: &Cap = &Cap { name: "pin", key: "lim_pin", label: "سنجاق" };
-pub const VIP: &Cap = &Cap { name: "vip", key: "lim_vip", label: "عضو ویژه" };
+pub const BAN: &Cap = &Cap {
+    name: "ban",
+    key: "lim_ban",
+    label: "بن",
+};
+pub const MUTE: &Cap = &Cap {
+    name: "mute",
+    key: "lim_mute",
+    label: "سکوت",
+};
+pub const WARN: &Cap = &Cap {
+    name: "warn",
+    key: "lim_warn",
+    label: "اخطار",
+};
+pub const SET: &Cap = &Cap {
+    name: "set",
+    key: "lim_set",
+    label: "تنظیمات",
+};
+pub const CLEAN: &Cap = &Cap {
+    name: "clean",
+    key: "lim_clean",
+    label: "پاکسازی",
+};
+pub const EXEMPT: &Cap = &Cap {
+    name: "exempt",
+    key: "lim_exempt",
+    label: "معافیت",
+};
+pub const PIN: &Cap = &Cap {
+    name: "pin",
+    key: "lim_pin",
+    label: "سنجاق",
+};
+pub const VIP: &Cap = &Cap {
+    name: "vip",
+    key: "lim_vip",
+    label: "عضو ویژه",
+};
 
 pub const CAPS: &[&Cap] = &[BAN, MUTE, WARN, SET, CLEAN, EXEMPT, PIN, VIP];
 
@@ -33,7 +65,11 @@ fn decides(is_owner: bool, master_on: bool, denied: bool) -> bool {
 pub fn permits(ctx: &Ctx, chat: i64, user: i64, cap: &Cap) -> bool {
     let is_owner = super::owner(ctx, chat) == Some(user);
     ctx.settings.with_chat(chat, |settings| {
-        decides(is_owner, settings.is_locked(MODE), settings.is_locked(cap.key))
+        decides(
+            is_owner,
+            settings.is_locked(MODE),
+            settings.is_locked(cap.key),
+        )
     })
 }
 
@@ -77,9 +113,18 @@ mod tests {
     #[test]
     fn the_owner_is_never_bound_and_off_means_open() {
         assert!(decides(true, true, true), "the owner is never limited");
-        assert!(decides(false, false, true), "a denial with the feature off does nothing");
-        assert!(decides(false, true, false), "an undenied capability stays open");
-        assert!(!decides(false, true, true), "an admin hitting a live denial is refused");
+        assert!(
+            decides(false, false, true),
+            "a denial with the feature off does nothing"
+        );
+        assert!(
+            decides(false, true, false),
+            "an undenied capability stays open"
+        );
+        assert!(
+            !decides(false, true, true),
+            "an admin hitting a live denial is refused"
+        );
     }
 
     #[test]
@@ -88,7 +133,11 @@ mod tests {
         let mut names: Vec<&str> = CAPS.iter().map(|cap| cap.name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), count, "two capabilities answer to the same name");
+        assert_eq!(
+            names.len(),
+            count,
+            "two capabilities answer to the same name"
+        );
 
         let mut keys: Vec<&str> = CAPS.iter().map(|cap| cap.key).collect();
         keys.sort_unstable();
@@ -102,7 +151,11 @@ mod tests {
             let longest = format!("p:{}:{}:{MODE}:{}", i64::MAX, i64::MIN, cap.name);
             assert!(longest.len() <= 64, "payload too long for {}", cap.name);
             assert!(cap.key.starts_with(MODE), "{} is not a lim key", cap.key);
-            assert!(!cap.name.contains(':'), "{} has a colon in its name", cap.name);
+            assert!(
+                !cap.name.contains(':'),
+                "{} has a colon in its name",
+                cap.name
+            );
         }
     }
 }

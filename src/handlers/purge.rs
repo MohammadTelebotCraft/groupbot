@@ -1,7 +1,7 @@
 use grammers_client::message::{Button, InputMessage, Message, ReplyMarkup};
 use grammers_client::update::CallbackQuery;
 
-use super::{Ctx};
+use super::Ctx;
 
 pub const ALL: &[&str] = &["حذف همه", "پاکسازی همه", "حذف کل پیام ها"];
 
@@ -31,14 +31,16 @@ pub fn auto_count(ctx: &Ctx, chat: i64) -> u32 {
     ctx.settings
         .value_parsed(chat, AUTO_COUNT)
         .unwrap_or(AUTO_DEFAULT_COUNT)
+        .clamp(AUTO_COUNT_RANGE.0, AUTO_COUNT_RANGE.1)
 }
 
 pub async fn set_auto_at(ctx: &Ctx, chat: i64, at: Option<u32>) {
     match at {
         Some(at) => {
-            ctx.settings
+            let _ = ctx
+                .settings
                 .set_value(chat, AUTO_AT, &(at % 1440).to_string())
-                .await
+                .await;
         }
         None => {
             ctx.settings.set(chat, AUTO_AT, false).await;
@@ -49,18 +51,16 @@ pub async fn set_auto_at(ctx: &Ctx, chat: i64, at: Option<u32>) {
 pub async fn run_auto(ctx: &std::sync::Arc<Ctx>) {
     let now = ((super::stats::local_seconds() % 86_400) / 60) as u32;
     let day = super::stats::today();
+    let minutes = super::recent_minutes(now);
 
     let mut due = Vec::new();
-    for chat in ctx.settings.chats_with(AUTO_AT).await {
+    for chat in ctx.settings.chats_with_values(AUTO_AT, &minutes).await {
         if !auto_at(ctx, chat).is_some_and(|at| (0..=2).contains(&now.wrapping_sub(at))) {
             continue;
         }
         if ctx.settings.value_parsed::<u64>(chat, "auto_purge_day") == Some(day) {
             continue;
         }
-        ctx.settings
-            .set_value(chat, "auto_purge_day", &day.to_string())
-            .await;
         let Some(chat_ref) = ctx.chat_ref(chat) else {
             continue;
         };
@@ -71,36 +71,39 @@ pub async fn run_auto(ctx: &std::sync::Arc<Ctx>) {
     super::bounded(due, super::FLEET_CAMPAIGNS, move |(chat, chat_ref)| {
         let ctx = std::sync::Arc::clone(&owner);
         async move {
-        let ctx = &*ctx;
+            let ctx = &*ctx;
 
-        let Ok(marker) = ctx
-            .client
-            .send_message(
-                chat_ref,
-                InputMessage::new().html("<b>پاکسازی خودکار</b>\n\nدر حال پاک کردن..."),
-            )
-            .await
-        else {
-            return;
-        };
-        let last = marker.id() - 1;
-        let count = auto_count(ctx, chat);
-        let done = match count {
-            0 => match super::cleaner::purge_history(ctx, chat, last).await {
-                Ok(deleted) => format!("{deleted} پیام پاک شد."),
-                Err(e) => format!("انجام نشد · {e}"),
-            },
-            count => {
-                let first = (last - count as i32).max(1);
-                format!(
-                    "{} پیام پاک شد.",
-                    wipe_range(ctx, chat, chat_ref, first, last).await
+            let Ok(marker) = ctx
+                .client
+                .send_message(
+                    chat_ref,
+                    InputMessage::new().html("<b>پاکسازی خودکار</b>\n\nدر حال پاک کردن..."),
                 )
-            }
-        };
-        let _ = marker
-            .edit(InputMessage::new().html(format!("<b>پاکسازی خودکار</b>\n\n{done}")))
-            .await;
+                .await
+            else {
+                return;
+            };
+            ctx.settings
+                .set_value(chat, "auto_purge_day", &day.to_string())
+                .await;
+            let last = marker.id() - 1;
+            let count = auto_count(ctx, chat);
+            let done = match count {
+                0 => match super::cleaner::purge_history(ctx, chat, last).await {
+                    Ok(deleted) => format!("{deleted} پیام پاک شد."),
+                    Err(e) => format!("انجام نشد · {e}"),
+                },
+                count => {
+                    let first = (last - count as i32).max(1);
+                    format!(
+                        "{} پیام پاک شد.",
+                        wipe_range(ctx, chat, chat_ref, first, last).await
+                    )
+                }
+            };
+            let _ = marker
+                .edit(InputMessage::new().html(format!("<b>پاکسازی خودکار</b>\n\n{done}")))
+                .await;
         }
     })
     .await;
@@ -125,8 +128,10 @@ pub async fn handle_all(ctx: &Ctx, message: &Message) -> bool {
     let warning = match ctx.user_client().is_some() {
         true => "همه پیام های گروه برای همه پاک می شود. این کار برگشت ندارد.",
 
-        false => "کلینر وارد نشده است؛ بدون آن هر بار تا ۱۰ هزار پیام آخر پاک می شود.\n\
-                  برای پاک شدن کامل «افزودن کلینر» را بفرستید.",
+        false => {
+            "کلینر وارد نشده است؛ بدون آن هر بار تا ۱۰ هزار پیام آخر پاک می شود.\n\
+                  برای پاک شدن کامل «افزودن کلینر» را بفرستید."
+        }
     };
     let _ = message
         .reply(
@@ -209,9 +214,7 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
     let first = (last - count).max(1);
     let deleted = wipe_range(ctx, chat, chat_ref, first, last).await;
 
-    let _ = message
-        .respond(format!("✓ {deleted} پیام حذف شد."))
-        .await;
+    let _ = message.respond(format!("✓ {deleted} پیام حذف شد.")).await;
     true
 }
 

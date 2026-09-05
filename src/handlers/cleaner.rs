@@ -27,7 +27,9 @@ fn media_filter(name: &str) -> Option<(&'static str, grammers_client::tl::enums:
         "مکان" | "لوکیشن" => ("مکان", InputMessagesFilterGeo {}.into()),
         "مخاطب" | "کانتکت" => ("مخاطب", InputMessagesFilterContacts {}.into()),
         "نظرسنجی" => ("نظرسنجی", InputMessagesFilterPoll {}.into()),
-        "ویدیو پیام" | "ویدئو پیام" => ("ویدیو پیام", InputMessagesFilterRoundVideo {}.into()),
+        "ویدیو پیام" | "ویدئو پیام" => {
+            ("ویدیو پیام", InputMessagesFilterRoundVideo {}.into())
+        }
         _ => return None,
     };
     Some(found)
@@ -40,47 +42,27 @@ const DEADLINE: Duration = Duration::from_secs(300);
 const CHUNK: usize = 100;
 
 const RANGE_MAX: i32 = 10_000;
+const USER_CHATS_MAX: usize = 50_000;
 
 pub fn sudo() -> Option<i64> {
     std::env::var("SUDO_ID").ok()?.parse().ok()
 }
 
-pub async fn add(ctx: &Ctx, message: &Message) -> bool {
-    if !ADD.contains(&message.text().trim()) {
-        return false;
-    }
-    if !super::limits::allows(ctx, message, super::limits::CLEAN).await {
-        return true;
-    }
+pub enum Installed {
+    AlreadyAdmin,
+
+    Promoted,
+
+    JoinedNotAdmin(String),
+}
+
+pub async fn install(ctx: &Ctx, chat_ref: PeerRef) -> std::result::Result<Installed, String> {
     let (Some(cleaner), Some(user)) = (ctx.cleaner_id(), ctx.user_client()) else {
-        let _ = message
-            .reply("کلینر وارد نشده است. مالک ربات باید در پیوی «ورود کلینر» را بفرستد.")
-            .await;
-        return true;
-    };
-    let Ok(Some(chat_ref)) = message.peer_ref().await else {
-        return false;
+        return Err("کلینر وارد نشده است".to_owned());
     };
     let Some(target) = PeerId::user(cleaner).map(PeerId::to_ambient_ref) else {
-        return true;
+        return Err("شناسه کلینر خوانده نشد".to_owned());
     };
-
-    if let Ok(me) = ctx.client.get_me().await
-        && let Some(me_ref) = PeerId::user(me.id().bare_id_unchecked()).map(PeerId::to_ambient_ref)
-        && let Ok(mine) = ctx.client.get_permissions(chat_ref, me_ref).await
-    {
-        let missing = match (mine.is_admin(), mine.can_add_admins()) {
-            (false, _) => Some("اول ربات را ادمین کنید، با دسترسی کامل."),
-            (true, false) => Some("ربات دسترسی «افزودن ادمین» ندارد؛ آن را بدهید و دوباره بفرستید."),
-            _ => None,
-        };
-        if let Some(missing) = missing {
-            let _ = message.reply(missing).await;
-            return true;
-        }
-    }
-
-    let _ = message.reply("در حال افزودن کلینر...").await;
 
     if let Ok(state) = ctx.client.get_permissions(chat_ref, target).await
         && state.is_banned()
@@ -98,17 +80,15 @@ pub async fn add(ctx: &Ctx, message: &Message) -> bool {
         )
         .await
     {
-        let _ = message.reply(format!("رفع بن کلینر انجام نشد · {e}")).await;
-        return true;
+        return Err(format!("رفع بن کلینر انجام نشد · {e}"));
     }
 
     let member = matches!(
         ctx.client.get_permissions(chat_ref, target).await,
         Ok(state) if !state.has_left() && !state.is_banned()
     );
-    if !member && let Err(reason) = join(ctx, &user, chat_ref).await {
-        let _ = message.reply(reason).await;
-        return true;
+    if !member {
+        join(ctx, &user, chat_ref).await?;
     }
 
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -116,45 +96,92 @@ pub async fn add(ctx: &Ctx, message: &Message) -> bool {
     if let Ok(state) = ctx.client.get_permissions(chat_ref, target).await
         && state.is_admin()
     {
-        let _ = message
-            .reply("✓ کلینر در گروه است و از قبل ادمین بود. «حذف 999» پیام های قدیمی را هم پاک می کند.")
-            .await;
-        ctx.forget_user_chats();
-        return true;
+        return Ok(Installed::AlreadyAdmin);
     }
 
     match promote(ctx, chat_ref, target).await {
-        Ok(()) => {
-            let _ = message
-                .reply("✓ کلینر اضافه و ادمین شد. حالا «حذف 999» پیام های قدیمی را هم پاک می کند.")
-                .await;
-        }
-        Err(e) => {
-            let _ = message
-                .reply(format!(
-                    "کلینر وارد گروه شد ولی ادمین نشد · {e}
-ربات باید دسترسی «افزودن ادمین» داشته باشد."
-                ))
-                .await;
-        }
+        Ok(()) => Ok(Installed::Promoted),
+        Err(e) => Ok(Installed::JoinedNotAdmin(e.to_string())),
+    }
+}
+
+pub async fn add(ctx: &Ctx, message: &Message) -> bool {
+    if !ADD.contains(&message.text().trim()) {
+        return false;
+    }
+    if !super::limits::allows(ctx, message, super::limits::CLEAN).await {
+        return true;
+    }
+    if ctx.cleaner_id().is_none() || ctx.user_client().is_none() {
+        let _ = message
+            .reply("کلینر وارد نشده است. مالک ربات باید در پیوی «ورود کلینر» را بفرستد.")
+            .await;
+        return true;
+    }
+    let Ok(Some(chat_ref)) = message.peer_ref().await else {
+        return false;
+    };
+
+    let standing = super::install::standing(ctx, chat_ref).await;
+    if !super::install::ready(&standing)
+        && !matches!(standing, super::install::Standing::Unknown)
+    {
+        let installed = message
+            .peer_id()
+            .bot_api_dialog_id()
+            .is_some_and(|chat| super::owner(ctx, chat).is_some());
+        let _ = message
+            .reply(InputMessage::new().html(super::install::card(&standing, installed)))
+            .await;
+        return true;
     }
 
+    let _ = message.reply("در حال افزودن کلینر...").await;
+    let done = install(ctx, chat_ref).await;
+
     ctx.forget_user_chats();
+
+    if done.is_ok()
+        && let Some(chat) = message.peer_id().bot_api_dialog_id()
+    {
+        ctx.settings
+            .set(chat, super::install::CLEANER_ADDED, true)
+            .await;
+    }
+    let _ = message
+        .reply(match done {
+            Ok(Installed::AlreadyAdmin) => {
+                "✓ کلینر در گروه است و از قبل ادمین بود. «حذف 999» پیام های قدیمی را هم پاک می کند."
+                    .to_owned()
+            }
+            Ok(Installed::Promoted) => {
+                "✓ کلینر اضافه و ادمین شد. حالا «حذف 999» پیام های قدیمی را هم پاک می کند."
+                    .to_owned()
+            }
+            Ok(Installed::JoinedNotAdmin(reason)) => format!(
+                "کلینر وارد گروه شد ولی ادمین نشد · {reason}\n\
+                 ربات باید دسترسی «افزودن ادمین» داشته باشد."
+            ),
+            Err(reason) => reason,
+        })
+        .await;
     true
 }
 
 async fn join(ctx: &Ctx, user: &Client, chat_ref: PeerRef) -> std::result::Result<(), String> {
     let exported = ctx
         .client
-        .invoke(&grammers_client::tl::functions::messages::ExportChatInvite {
-            legacy_revoke_permanent: false,
-            request_needed: false,
-            peer: chat_ref.into(),
-            expire_date: None,
-            usage_limit: Some(1),
-            title: Some("cleaner".to_owned()),
-            subscription_pricing: None,
-        })
+        .invoke_outbound(
+            &grammers_client::tl::functions::messages::ExportChatInvite {
+                legacy_revoke_permanent: false,
+                request_needed: false,
+                peer: chat_ref.into(),
+                expire_date: None,
+                usage_limit: Some(1),
+                title: Some("cleaner".to_owned()),
+                subscription_pricing: None,
+            },
+        )
         .await
         .map_err(|e| match e.to_string().contains("CHAT_ADMIN_REQUIRED") {
             true => "ربات دسترسی «افزودن اعضا» ندارد؛ آن را بدهید و دوباره بفرستید.".to_owned(),
@@ -192,7 +219,9 @@ pub async fn on_join(ctx: &Ctx, message: &Message) -> bool {
     if !matches!(
         message.action(),
         Some(grammers_client::tl::enums::MessageAction::ChatAddUser(_))
-            | Some(grammers_client::tl::enums::MessageAction::ChatJoinedByLink(_))
+            | Some(grammers_client::tl::enums::MessageAction::ChatJoinedByLink(
+                _
+            ))
     ) {
         return false;
     }
@@ -221,18 +250,16 @@ pub async fn purge_history(
     let mut refused = None;
     if let Some(user) = ctx.user_client() {
         match chat_ref(ctx, &user, chat).await {
-            Some(chat_ref) => {
-                match delete_history_call(&user, chat_ref, max_id).await {
-                    Ok(()) => return Ok(max_id as usize),
-                    Err(e) => {
-                        let deleted = delete_range(&user, chat_ref, 1, max_id).await;
-                        if deleted > 0 {
-                            return Ok(deleted);
-                        }
-                        refused = Some(format!("کلینر · {e}"));
+            Some(chat_ref) => match delete_history_call(&user, chat_ref, max_id).await {
+                Ok(()) => return Ok(max_id as usize),
+                Err(e) => {
+                    let deleted = delete_range(&user, chat_ref, 1, max_id).await;
+                    if deleted > 0 {
+                        return Ok(deleted);
                     }
+                    refused = Some(format!("کلینر · {e}"));
                 }
-            }
+            },
             None => refused = Some("کلینر در این گروه نیست".to_owned()),
         }
     }
@@ -271,7 +298,7 @@ async fn delete_history_call(
     max_id: i32,
 ) -> std::result::Result<(), grammers_client::InvocationError> {
     client
-        .invoke(&grammers_client::tl::functions::channels::DeleteHistory {
+        .invoke_outbound(&grammers_client::tl::functions::channels::DeleteHistory {
             for_everyone: true,
             channel: chat_ref.into(),
             max_id,
@@ -327,14 +354,14 @@ pub async fn sweep(ctx: &Ctx, message: &Message) -> bool {
     }
     if let Some(e) = failed.filter(|_| ids.is_empty()) {
         let _ = message
-            .reply(format!(
-                "انجام نشد · {e}\nکلینر باید در گروه ادمین باشد."
-            ))
+            .reply(format!("انجام نشد · {e}\nکلینر باید در گروه ادمین باشد."))
             .await;
         return true;
     }
     if ids.is_empty() {
-        let _ = message.reply(format!("چیزی از نوع {label} پیدا نشد.")).await;
+        let _ = message
+            .reply(format!("چیزی از نوع {label} پیدا نشد."))
+            .await;
         return true;
     }
 
@@ -382,10 +409,8 @@ pub async fn wipe(ctx: &Ctx, message: &Message) -> bool {
             .await;
         return true;
     };
-    let (Some(chat), Some(user_id)) = (
-        message.peer_id().bot_api_dialog_id(),
-        target.id.bare_id(),
-    ) else {
+    let (Some(chat), Some(user_id)) = (message.peer_id().bot_api_dialog_id(), target.id.bare_id())
+    else {
         return false;
     };
     if super::owner(ctx, chat) == Some(user_id) {
@@ -441,7 +466,7 @@ async fn wipe_as_cleaner(
     Some(delete_history(&user, chat_ref, target).await)
 }
 
-async fn member_ref(
+pub(crate) async fn member_ref(
     user: &Client,
     chat_ref: PeerRef,
     user_id: i64,
@@ -449,6 +474,13 @@ async fn member_ref(
 ) -> Option<PeerRef> {
     if let Some(username) = arg.and_then(|arg| arg.strip_prefix('@'))
         && let Ok(Some(peer)) = user.resolve_username(username).await
+        && let Ok(Some(peer_ref)) = peer.to_ref().await
+    {
+        return Some(peer_ref);
+    }
+
+    if let Some(id) = PeerId::user(user_id)
+        && let Ok(peer) = user.resolve_peer(id.to_ambient_ref()).await
         && let Ok(Some(peer_ref)) = peer.to_ref().await
     {
         return Some(peer_ref);
@@ -473,7 +505,7 @@ async fn delete_history(
     target: PeerRef,
 ) -> std::result::Result<(), grammers_client::InvocationError> {
     client
-        .invoke(
+        .invoke_outbound(
             &grammers_client::tl::functions::channels::DeleteParticipantHistory {
                 channel: chat_ref.into(),
                 participant: target.into(),
@@ -505,7 +537,7 @@ pub async fn set_slow(ctx: &Ctx, chat: i64, seconds: u32) -> Option<bool> {
     let user = ctx.user_client()?;
     let chat_ref = chat_ref(ctx, &user, chat).await?;
     match user
-        .invoke(&grammers_client::tl::functions::channels::ToggleSlowMode {
+        .invoke_outbound(&grammers_client::tl::functions::channels::ToggleSlowMode {
             channel: chat_ref.into(),
             seconds: seconds as i32,
         })
@@ -523,24 +555,45 @@ pub async fn set_slow(ctx: &Ctx, chat: i64, seconds: u32) -> Option<bool> {
     }
 }
 
-async fn chat_ref(ctx: &Ctx, user: &Client, chat: i64) -> Option<PeerRef> {
+pub(crate) async fn chat_ref(ctx: &Ctx, user: &Client, chat: i64) -> Option<PeerRef> {
     if let Some(peer) = ctx.user_chat(chat) {
         return Some(peer);
     }
-    let mut found = Vec::new();
+
+    let mut found = Vec::with_capacity(USER_CHATS_MAX);
+    let mut requested = None;
     let mut dialogs = user.iter_dialogs();
     while let Ok(Some(dialog)) = dialogs.next().await {
         let peer = dialog.peer();
-        if let Some(id) = peer.id().bot_api_dialog_id()
-            && let Ok(Some(peer_ref)) = peer.to_ref().await
-        {
-            found.push((id, peer_ref));
+        let Some(id) = peer.id().bot_api_dialog_id() else {
+            continue;
+        };
+        if found.len() >= USER_CHATS_MAX && id != chat {
+            continue;
+        }
+        if let Ok(Some(peer_ref)) = peer.to_ref().await {
+            if id == chat {
+                requested = Some(peer_ref);
+            }
+            if found.len() < USER_CHATS_MAX {
+                found.push((id, peer_ref));
+            }
         }
     }
-    let peer = found
-        .iter()
-        .find(|(id, _)| *id == chat)
-        .map(|(_, peer)| *peer);
+    let peer = requested.or_else(|| {
+        found
+            .iter()
+            .find(|(id, _)| *id == chat)
+            .map(|(_, peer)| *peer)
+    });
+    if let Some(peer) = peer
+        && !found.iter().any(|(id, _)| *id == chat)
+    {
+        if found.len() >= USER_CHATS_MAX {
+            found.pop();
+        }
+        found.push((chat, peer));
+    }
     ctx.set_user_chats(found);
     peer
 }
@@ -648,7 +701,9 @@ async fn login(ctx: &Ctx, user: &Client, message: &Message, api_hash: &str) {
                     )))
                     .await;
                 let Some(password) = ctx.await_password(DEADLINE).await else {
-                    let _ = message.reply("رمزی نیامد. دوباره «ورود کلینر» را بفرستید.").await;
+                    let _ = message
+                        .reply("رمزی نیامد. دوباره «ورود کلینر» را بفرستید.")
+                        .await;
                     return;
                 };
                 let _ = match user.check_password(token, password.trim()).await {

@@ -150,14 +150,20 @@ pub async fn flush(ctx: &std::sync::Arc<Ctx>) {
 async fn send(ctx: &Ctx, target: PeerRef, header: &str, body: &str) {
     if let Err(e) = ctx
         .client
-        .send_message(target, InputMessage::new().html(format!("{header}\n\n{body}")))
+        .send_message(
+            target,
+            InputMessage::new().html(format!("{header}\n\n{body}")),
+        )
         .await
     {
         eprintln!("log: could not write to the log channel: {e}");
     }
 }
 
-pub async fn on_participant(ctx: &Ctx, update: &grammers_client::tl::types::UpdateChannelParticipant) {
+pub async fn on_participant(
+    ctx: &Ctx,
+    update: &grammers_client::tl::types::UpdateChannelParticipant,
+) {
     use grammers_client::tl::enums::ChannelParticipant as P;
 
     let Some(chat) = PeerId::channel(update.channel_id).and_then(|id| id.bot_api_dialog_id())
@@ -186,10 +192,11 @@ pub async fn on_participant(ctx: &Ctx, update: &grammers_client::tl::types::Upda
                 false => "حذف شد",
             },
         ),
-        (None, Some(P::Admin(_) | P::Creator(_))) | (Some(_), Some(P::Admin(_) | P::Creator(_))) => {
-            ("log_admin", "ادمین شد", "در تلگرام")
+        (None, Some(P::Admin(_) | P::Creator(_)))
+        | (Some(_), Some(P::Admin(_) | P::Creator(_))) => ("log_admin", "ادمین شد", "در تلگرام"),
+        (Some(P::Admin(_) | P::Creator(_)), Some(_)) => {
+            ("log_admin", "از ادمینی عزل شد", "در تلگرام")
         }
-        (Some(P::Admin(_) | P::Creator(_)), Some(_)) => ("log_admin", "از ادمینی عزل شد", "در تلگرام"),
         (None, Some(_)) => (
             "log_join",
             "ورود",
@@ -288,7 +295,9 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
 
     if rest.is_empty() {
-        let _ = message.reply(InputMessage::new().html(status(ctx, chat))).await;
+        let _ = message
+            .reply(InputMessage::new().html(status(ctx, chat)))
+            .await;
         return true;
     }
 

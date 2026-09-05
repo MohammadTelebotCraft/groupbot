@@ -29,7 +29,9 @@ pub fn bans(ctx: &Ctx, chat: i64) -> bool {
 
 pub async fn set_limit(ctx: &Ctx, chat: i64, value: u32) {
     let value = value.clamp(LIMIT_RANGE.0, LIMIT_RANGE.1);
-    ctx.settings.set_value(chat, LIMIT, &value.to_string()).await;
+    ctx.settings
+        .set_value(chat, LIMIT, &value.to_string())
+        .await;
 }
 
 pub async fn count(ctx: &Ctx, chat: i64, user: i64) -> u32 {
@@ -150,10 +152,27 @@ async fn punish(ctx: &Ctx, message: &Message, chat: i64, target: PeerRef, name: 
         "سکوت شد"
     };
 
-    let reply = match restrict::apply(ctx, chat_ref, target, action, None, restrict::By { reason: "سقف اخطار", target_name: name, ..Default::default() }).await {
-        Ok(()) => format!(
-            "<b>اخطار</b>\n\n{} به <b>{limit}</b> اخطار رسید و {what}.",
-            esc(name)
+    let reply = match restrict::apply(
+        ctx,
+        chat_ref,
+        target,
+        action,
+        None,
+        restrict::By {
+            reason: "سقف اخطار",
+            target_name: name,
+            ..Default::default()
+        },
+    )
+    .await
+    {
+        Ok(wiped) => format!(
+            "<b>اخطار</b>\n\n{} به <b>{limit}</b> اخطار رسید و {what}.{}",
+            esc(name),
+            match wiped {
+                0 => String::new(),
+                n => format!("\n\n🧹 {n} پیام او هم پاک شد."),
+            }
         ),
         Err(e) => {
             eprintln!("warns: {chat}: could not punish: {e}");

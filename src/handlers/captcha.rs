@@ -9,6 +9,11 @@ use super::{Ctx, esc};
 
 pub const MODE: &str = "captcha";
 
+pub const NAMES: &[&str] = &["احراز هویت", "احراز"];
+
+const ON_WORDS: &[&str] = &["روشن", "فعال"];
+const OFF_WORDS: &[&str] = &["خاموش", "غیرفعال"];
+
 pub const TIMEOUT: &str = "captcha_timeout";
 
 pub const ACTION: &str = "captcha_action";
@@ -18,8 +23,8 @@ pub const TIMEOUT_RANGE: (u32, u32) = (30, 900);
 pub const TIMEOUT_PRESETS: &[u32] = &[60, 120, 300, 600];
 
 const EMOJI: &[&str] = &[
-    "🍎", "🚗", "⚽", "🌙", "🎈", "🐱", "🌷", "🔑", "⭐", "🍉", "🐟", "🍌", "🚀", "🎩", "🥁",
-    "🦋", "🍇", "🐘", "☂️", "🍕", "🐝", "🎸", "🧊", "🕰️",
+    "🍎", "🚗", "⚽", "🌙", "🎈", "🐱", "🌷", "🔑", "⭐", "🍉", "🐟", "🍌", "🚀", "🎩", "🥁", "🦋",
+    "🍇", "🐘", "☂️", "🍕", "🐝", "🎸", "🧊", "🕰️",
 ];
 
 pub const CHOICES: &str = "captcha_choices";
@@ -28,6 +33,46 @@ pub const CHOICES_RANGE: (u32, u32) = (2, 6);
 pub const CHOICES_PRESETS: &[u32] = &[2, 3, 4, 5, 6];
 
 const GLOBAL: i64 = 0;
+
+fn parse(text: &str) -> Option<bool> {
+    let tail = NAMES.iter().find_map(|name| {
+        let rest = text.strip_prefix(name)?;
+        rest.starts_with(char::is_whitespace)
+            .then(|| rest.trim_start())
+    })?;
+    if ON_WORDS.contains(&tail) {
+        return Some(true);
+    }
+    if OFF_WORDS.contains(&tail) {
+        return Some(false);
+    }
+    None
+}
+
+pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
+    let Some(on) = parse(message.text().trim()) else {
+        return false;
+    };
+    let Some(chat) = message.peer_id().bot_api_dialog_id() else {
+        return false;
+    };
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
+        return true;
+    }
+
+    ctx.settings.set(chat, MODE, on).await;
+    let _ = message
+        .reply(if on {
+            format!(
+                "✓ احراز هویت روشن شد. عضو تازه تا {} ثانیه فرصت دارد.",
+                timeout(ctx, chat)
+            )
+        } else {
+            "✗ احراز هویت خاموش شد.".to_owned()
+        })
+        .await;
+    true
+}
 
 pub fn choices(ctx: &Ctx, chat: i64) -> usize {
     ctx.settings
@@ -86,7 +131,10 @@ pub async fn on_join(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
 
     let mut challenged = false;
     for joined in super::joined_users(ctx, message).await {
-        if joined.is_bot || super::is_bot_admin(ctx, chat, joined.id) || super::owner(ctx, chat) == Some(joined.id) {
+        if joined.is_bot
+            || super::is_bot_admin(ctx, chat, joined.id)
+            || super::owner(ctx, chat) == Some(joined.id)
+        {
             continue;
         }
         if challenge(ctx, message, chat, chat_ref, joined).await {
@@ -105,7 +153,20 @@ async fn challenge(
 ) -> bool {
     let (user, target) = (joined.id, joined.peer);
 
-    if let Err(e) = restrict::apply(ctx, chat_ref, target, Action::Mute, None, restrict::By { reason: "احراز هویت", target_name: &joined.name, ..Default::default() }).await {
+    if let Err(e) = restrict::apply(
+        ctx,
+        chat_ref,
+        target,
+        Action::Mute,
+        None,
+        restrict::By {
+            reason: "احراز هویت",
+            target_name: &joined.name,
+            ..Default::default()
+        },
+    )
+    .await
+    {
         eprintln!("captcha: {chat}: could not mute {user}: {e}");
         return false;
     }
@@ -179,11 +240,12 @@ async fn challenge(
         },
     );
 
-    let ctx_clone = std::sync::Arc::clone(ctx);
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(u64::from(seconds))).await;
-        expire(&ctx_clone, chat_ref, chat, user, target).await;
-    });
+    ctx.schedule_captcha(
+        chat,
+        user,
+        target,
+        Instant::now() + Duration::from_secs(u64::from(seconds)),
+    );
     true
 }
 
@@ -203,7 +265,11 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, chat: 
         return;
     }
     let Some(pending) = ctx.captcha_pending(chat, user) else {
-        let _ = query.answer().alert("این آزمون منقضی شده است.").send().await;
+        let _ = query
+            .answer()
+            .alert("این آزمون منقضی شده است.")
+            .send()
+            .await;
         return;
     };
 
@@ -222,7 +288,19 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, chat: 
     else {
         return;
     };
-    if let Err(e) = restrict::apply(ctx, chat_ref, target, Action::Unmute, None, restrict::By { reason: "احراز هویت", ..Default::default() }).await {
+    if let Err(e) = restrict::apply(
+        ctx,
+        chat_ref,
+        target,
+        Action::Unmute,
+        None,
+        restrict::By {
+            reason: "احراز هویت",
+            ..Default::default()
+        },
+    )
+    .await
+    {
         eprintln!("captcha: {chat}: could not unmute {user}: {e}");
     }
     let _ = query
@@ -233,7 +311,7 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, chat: 
         .await;
 }
 
-async fn expire(ctx: &Ctx, chat_ref: PeerRef, chat: i64, user: i64, target: PeerRef) {
+pub(super) async fn expire(ctx: &Ctx, chat_ref: PeerRef, chat: i64, user: i64, target: PeerRef) {
     let Some(pending) = ctx.captcha_pending(chat, user) else {
         return;
     };
@@ -302,6 +380,23 @@ fn buttons(user: i64, choices: &[usize]) -> ReplyMarkup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_state_word_must_be_the_whole_tail() {
+        assert_eq!(parse("احراز هویت روشن"), Some(true));
+        assert_eq!(parse("احراز هویت خاموش"), Some(false));
+        assert_eq!(parse("احراز روشن"), Some(true));
+        assert_eq!(parse("احراز خاموش"), Some(false));
+        assert_eq!(parse("احراز فعال"), Some(true));
+        assert_eq!(parse("احراز غیرفعال"), Some(false));
+
+        assert_eq!(parse("احراز هویت"), None);
+        assert_eq!(parse("احراز"), None);
+        assert_eq!(parse("احرازی روشن"), None);
+        assert_eq!(parse("احراز هویت رو روشن کن"), None);
+        assert_eq!(parse("احراز روشن شد؟"), None);
+        assert_eq!(parse("سلام"), None);
+    }
 
     #[test]
     fn choices_are_distinct_and_contain_the_answer() {

@@ -10,6 +10,9 @@ pub const ADD: &[&str] = &["تنظیم پاسخ", "افزودن پاسخ", "پا
 pub const REMOVE: &[&str] = &["حذف پاسخ", "پاک پاسخ"];
 
 const SEPARATOR: char = '|';
+const MAX_ANSWERS: usize = 200;
+const MAX_TRIGGER_CHARS: usize = 64;
+const MAX_BODY_CHARS: usize = 3_500;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Audience {
@@ -57,8 +60,8 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
         return false;
     };
 
-    if let Some((adding, rest)) = parse(text) {
-        return edit(ctx, message, chat, adding, rest).await;
+    if let Some((adding, command, rest)) = parse(text) {
+        return edit(ctx, message, chat, adding, command, rest).await;
     }
     answer(ctx, message, chat, view).await
 }
@@ -88,12 +91,17 @@ async fn answer(ctx: &Ctx, message: &Message, chat: i64, view: &super::locks::Vi
         return false;
     }
 
-    let (media, body) = stored.split_once(SEPARATOR).unwrap_or(("", stored.as_str()));
+    let (media, body) = stored
+        .split_once(SEPARATOR)
+        .unwrap_or(("", stored.as_str()));
 
     if !media.is_empty()
         && let Some(decoded) = welcome::decode_media(media)
     {
-        let Err(e) = message.reply(InputMessage::new().html(body).media(decoded)).await else {
+        let Err(e) = message
+            .reply(InputMessage::new().html(body).media(decoded))
+            .await
+        else {
             return true;
         };
         if !welcome::reference_expired(&e) {
@@ -113,15 +121,29 @@ async fn answer(ctx: &Ctx, message: &Message, chat: i64, view: &super::locks::Vi
     true
 }
 
-async fn edit(ctx: &Ctx, message: &Message, chat: i64, adding: bool, trigger: &str) -> bool {
+async fn edit(
+    ctx: &Ctx,
+    message: &Message,
+    chat: i64,
+    adding: bool,
+    command: &'static str,
+    trigger: &str,
+) -> bool {
+    if !trigger.is_empty() && !super::phrase_carries_text(command) {
+        return false;
+    }
     if adding && !has_body(message, trigger) {
         return false;
     }
-    if !super::limits::allows(ctx, message, super::limits::SET).await {
-        return true;
-    }
+
     let mut trigger = trigger.trim().to_lowercase();
     if trigger.is_empty() {
+        if !super::phrase_carries_text(command) {
+            return false;
+        }
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
+            return true;
+        }
         let _ = message
             .reply(
                 "روی پیام پاسخ ریپلای کنید و بنویسید: «تنظیم پاسخ سلام»\n\
@@ -130,8 +152,19 @@ async fn edit(ctx: &Ctx, message: &Message, chat: i64, adding: bool, trigger: &s
             .await;
         return true;
     }
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
+        return true;
+    }
 
     if !adding {
+        if trigger.chars().count() > MAX_TRIGGER_CHARS {
+            let _ = message
+                .reply(format!(
+                    "تریگر پاسخ باید حداکثر {MAX_TRIGGER_CHARS} نویسه باشد."
+                ))
+                .await;
+            return true;
+        }
         let existed = ctx.settings.set(chat, &key(&trigger), false).await;
         let _ = message
             .reply(if existed {
@@ -175,14 +208,45 @@ async fn edit(ctx: &Ctx, message: &Message, chat: i64, adding: bool, trigger: &s
             )
         }
     };
+    if trigger.chars().count() > MAX_TRIGGER_CHARS {
+        let _ = message
+            .reply(format!(
+                "تریگر پاسخ باید حداکثر {MAX_TRIGGER_CHARS} نویسه باشد."
+            ))
+            .await;
+        return true;
+    }
     if media.is_empty() && body.is_empty() {
         let _ = message.reply("آن پیام محتوایی برای فرستادن ندارد.").await;
         return true;
     }
 
-    ctx.settings
-        .set_value(chat, &key(&trigger), &format!("{media}{SEPARATOR}{body}"))
-        .await;
+    if body.chars().count() > MAX_BODY_CHARS {
+        let _ = message
+            .reply(format!("متن پاسخ باید حداکثر {MAX_BODY_CHARS} نویسه باشد."))
+            .await;
+        return true;
+    }
+    let stored = format!("{media}{SEPARATOR}{body}");
+    if stored.len() > crate::state::MAX_SETTING_VALUE_BYTES {
+        let _ = message.reply("رسانه یا متن پاسخ بیش از حد بزرگ است.").await;
+        return true;
+    }
+    let trigger_key = key(&trigger);
+    if ctx.settings.value(chat, &trigger_key).is_none() && triggers(ctx, chat).len() >= MAX_ANSWERS
+    {
+        let _ = message
+            .reply(format!("لیست پاسخ ها پر است ({MAX_ANSWERS} مورد)."))
+            .await;
+        return true;
+    }
+
+    if !ctx.settings.set_value(chat, &trigger_key, &stored).await {
+        let _ = message
+            .reply("ذخیره پاسخ انجام نشد؛ ظرفیت تنظیمات یا پایگاه داده را بررسی کنید.")
+            .await;
+        return true;
+    }
     let _ = message
         .reply(InputMessage::new().html(format!(
             "✓ پاسخ «{}» ذخیره شد · مخاطب: <b>{}</b>",
@@ -202,18 +266,17 @@ fn has_body(message: &Message, trigger: &str) -> bool {
 fn inline_answer(rest: &str) -> Option<(String, String)> {
     let (trigger, answer) = rest.split_once('=')?;
     let (trigger, answer) = (trigger.trim(), answer.trim());
-    (!trigger.is_empty() && !answer.is_empty())
-        .then(|| (trigger.to_lowercase(), answer.to_owned()))
+    (!trigger.is_empty() && !answer.is_empty()).then(|| (trigger.to_lowercase(), answer.to_owned()))
 }
 
-fn parse(text: &str) -> Option<(bool, &str)> {
+fn parse(text: &str) -> Option<(bool, &'static str, &str)> {
     for (commands, adding) in [(ADD, true), (REMOVE, false)] {
         for command in commands {
             let Some(rest) = text.strip_prefix(command) else {
                 continue;
             };
             if rest.starts_with(char::is_whitespace) {
-                return Some((adding, rest.trim()));
+                return Some((adding, command, rest.trim()));
             }
         }
     }
@@ -237,10 +300,23 @@ mod tests {
 
     #[test]
     fn parses_commands() {
-        assert_eq!(parse("تنظیم پاسخ سلام"), Some((true, "سلام")));
-        assert_eq!(parse("پاسخ خوش آمدید"), Some((true, "خوش آمدید")));
-        assert_eq!(parse("حذف پاسخ سلام"), Some((false, "سلام")));
+        assert_eq!(parse("تنظیم پاسخ سلام"), Some((true, "تنظیم پاسخ", "سلام")));
+        assert_eq!(parse("پاسخ خوش آمدید"), Some((true, "پاسخ", "خوش آمدید")));
+        assert_eq!(parse("حذف پاسخ سلام"), Some((false, "حذف پاسخ", "سلام")));
         assert_eq!(parse("پاسخگو"), None);
         assert_eq!(parse("سلام"), None);
+    }
+
+    #[test]
+    fn a_one_word_alias_does_not_carry_a_trigger() {
+        assert!(!super::super::phrase_carries_text("پاسخ"));
+        assert!(super::super::phrase_carries_text("تنظیم پاسخ"));
+        assert!(super::super::phrase_carries_text("افزودن پاسخ"));
+        for command in REMOVE {
+            assert!(
+                super::super::phrase_carries_text(command),
+                "«{command}» would silently claim ordinary speech"
+            );
+        }
     }
 }

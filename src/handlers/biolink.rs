@@ -44,7 +44,9 @@ fn mentions_a_handle(text: &str) -> bool {
         .filter_map(|word| word.strip_prefix('@'))
         .any(|handle| {
             (5..=32).contains(&handle.chars().count())
-                && handle.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && handle
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
         })
 }
 
@@ -67,8 +69,9 @@ pub async fn tripped(ctx: &std::sync::Arc<Ctx>, chat: i64, message: &Message) ->
         return false;
     };
     let ctx = std::sync::Arc::clone(ctx);
+    let slot = ctx.bio_slot().await;
     tokio::spawn(async move {
-        let _slot = ctx.bio_slot().await;
+        let _slot = slot;
         if let Some(about) = fetch(&ctx, target).await {
             ctx.remember_bio(user, has_link(&about.to_lowercase()));
         }
@@ -111,7 +114,11 @@ pub async fn punish(ctx: &Ctx, message: &Message, chat: i64) {
         return;
     }
 
-    let action = if act == Act::Ban { Action::Ban } else { Action::Mute };
+    let action = if act == Act::Ban {
+        Action::Ban
+    } else {
+        Action::Mute
+    };
     let applied = restrict::apply(
         ctx,
         chat_ref,
@@ -126,7 +133,7 @@ pub async fn punish(ctx: &Ctx, message: &Message, chat: i64) {
     )
     .await;
     match applied {
-        Ok(()) => ctx.bump(
+        Ok(_) => ctx.bump(
             chat,
             if action == Action::Ban {
                 super::stats::BANNED
@@ -191,7 +198,10 @@ mod tests {
         }
         assert_eq!(mapped.len(), 4, "every action is offered");
 
-        assert!(reading(default) == Act::Delete, "the default is the gentlest action");
+        assert!(
+            reading(default) == Act::Delete,
+            "the default is the gentlest action"
+        );
         assert!(reading("") == Act::Delete);
         assert!(reading("BAN") == Act::Delete);
     }

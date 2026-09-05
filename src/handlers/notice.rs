@@ -1,6 +1,6 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use grammers_client::message::{InputMessage, Message};
+use grammers_client::message::{InputMessage, Message, ReplyMarkup};
 use grammers_client::session::types::PeerId;
 
 use super::{Ctx, esc, name_of};
@@ -33,6 +33,17 @@ pub async fn send(
     reason: &str,
     chances: Option<u32>,
 ) {
+    send_with_markup(ctx, message, chat, reason, chances, None).await;
+}
+
+pub async fn send_with_markup(
+    ctx: &std::sync::Arc<Ctx>,
+    message: &Message,
+    chat: i64,
+    reason: &str,
+    chances: Option<u32>,
+    markup: Option<ReplyMarkup>,
+) {
     if !ctx.settings.is_locked(chat, MODE) {
         return;
     }
@@ -47,13 +58,15 @@ pub async fn send(
         Some(chances) => super::strict::chances_line(chances),
         None => "<i>لطفا دوباره نفرستید.</i>".to_owned(),
     };
-    let sent = message
-        .respond(InputMessage::new().html(format!(
+    let mut card = InputMessage::new().html(format!(
             "<a href=\"tg://user?id={user}\">{}</a> پیام شما حذف شد · <b>{}</b> در این گروه قفل است.\n{tail}",
             esc(&name_of(message)),
             esc(reason)
-        )))
-        .await;
+        ));
+    if let Some(markup) = markup {
+        card = card.reply_markup(markup);
+    }
+    let sent = message.respond(card).await;
 
     let Ok(sent) = sent else {
         return;
@@ -63,13 +76,10 @@ pub async fn send(
         return;
     }
 
-    let ctx = std::sync::Arc::clone(ctx);
-    let Ok(Some(chat_ref)) = message.peer_ref().await else {
-        return;
-    };
     let id = sent.id();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(u64::from(seconds))).await;
-        let _ = ctx.client.delete_messages(chat_ref, &[id]).await;
-    });
+    ctx.schedule_delete(
+        chat,
+        id,
+        Instant::now() + Duration::from_secs(u64::from(seconds)),
+    );
 }

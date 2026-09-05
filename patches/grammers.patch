@@ -1,3 +1,16 @@
+diff --git a/grammers-client/Cargo.toml b/grammers-client/Cargo.toml
+index d83c369..9de7048 100644
+--- a/grammers-client/Cargo.toml
++++ b/grammers-client/Cargo.toml
+@@ -39,7 +39,7 @@ mime_guess = "2.0.5"
+ pin-project-lite = "0.2"
+ pulldown-cmark = { version = "0.13.4", default-features = false, optional = true }
+ tokio = { version = "1.52.3", default-features = false, features = [
+-    "rt", "macros"
++    "rt", "macros", "sync", "time"
+ ] }
+ url = { version = "2.5.8", optional = true }
+ 
 diff --git a/grammers-client/examples/echo.rs b/grammers-client/examples/echo.rs
 index 70f5960..c13e990 100644
 --- a/grammers-client/examples/echo.rs
@@ -103,12 +116,273 @@ index d4d10ee..038aa03 100644
      /// Requests the login code for the account associated to the given phone
      /// number via another Telegram application or SMS.
      ///
+diff --git a/grammers-client/src/client/bots.rs b/grammers-client/src/client/bots.rs
+index 2f9bdc0..6ac6b76 100644
+--- a/grammers-client/src/client/bots.rs
++++ b/grammers-client/src/client/bots.rs
+@@ -31,13 +31,14 @@ impl InlineResult {
+     /// Send this inline result to the specified peer.
+     // TODO return the produced message
+     pub async fn send<C: Into<PeerRef>>(&self, peer: C) -> Result<(), InvocationError> {
++        let peer = peer.into();
+         self.client
+-            .invoke(&tl::functions::messages::SendInlineBotResult {
++            .invoke_outbound_for_peer(peer, &tl::functions::messages::SendInlineBotResult {
+                 silent: false,
+                 background: false,
+                 clear_draft: false,
+                 hide_via: false,
+-                peer: peer.into().into(),
++                peer: peer.into(),
+                 reply_to: None,
+                 random_id: generate_random_id(),
+                 query_id: self.query_id,
+@@ -174,7 +175,7 @@ impl Client {
+             )
+         }) {
+             let dc_id = message_id.dc_id();
+-            self.invoke_in_dc(
++            self.invoke_outbound_in_dc(
+                 dc_id,
+                 &tl::functions::messages::EditInlineBotMessage {
+                     id: message_id,
+@@ -189,7 +190,7 @@ impl Client {
+             )
+             .await
+         } else {
+-            self.invoke(&tl::functions::messages::EditInlineBotMessage {
++            self.invoke_outbound(&tl::functions::messages::EditInlineBotMessage {
+                 id: message_id,
+                 message: Some(message.text),
+                 media: message.media,
+diff --git a/grammers-client/src/client/chats.rs b/grammers-client/src/client/chats.rs
+index bad61c0..a50fa7b 100644
+--- a/grammers-client/src/client/chats.rs
++++ b/grammers-client/src/client/chats.rs
+@@ -488,7 +488,7 @@ impl Client {
+ 
+             self.set_banned_rights(chat, user).await
+         } else if chat.id.kind() == PeerKind::Chat {
+-            self.invoke(&tl::functions::messages::DeleteChatUser {
++            self.invoke_outbound(&tl::functions::messages::DeleteChatUser {
+                 chat_id: chat.into(),
+                 user_id: user.into(),
+                 revoke_history: false,
+@@ -800,7 +800,7 @@ impl Client {
+         match Self::parse_invite_link(invite_link) {
+             Some(hash) => Ok(
+                 if let tl::enums::messages::ChatInviteJoinResult::Ok(ok) = self
+-                    .invoke(&tl::functions::messages::ImportChatInvite { hash })
++                    .invoke_outbound(&tl::functions::messages::ImportChatInvite { hash })
+                     .await?
+                 {
+                     updates_to_chat(self, None, ok.updates)
+@@ -833,7 +833,7 @@ impl Client {
+         let channel = chat.into();
+         Ok(
+             if let tl::enums::messages::ChatInviteJoinResult::Ok(ok) = self
+-                .invoke(&tl::functions::channels::JoinChannel { channel })
++                .invoke_outbound(&tl::functions::channels::JoinChannel { channel })
+                 .await?
+             {
+                 updates_to_chat(self, chat.id.bare_id(), ok.updates)
+diff --git a/grammers-client/src/client/client.rs b/grammers-client/src/client/client.rs
+index a659a95..b41b35b 100644
+--- a/grammers-client/src/client/client.rs
++++ b/grammers-client/src/client/client.rs
+@@ -11,12 +11,15 @@ use std::sync::Arc;
+ use grammers_mtsender::SenderPoolHandle;
+ use grammers_session::storages::ErasedSession;
+ 
++use super::outbound::OutboundBudget;
++
+ pub(crate) struct ClientInner {
+     pub(crate) session: Arc<ErasedSession>,
+     pub(crate) api_id: i32,
+     pub(crate) handle: SenderPoolHandle,
+     pub(crate) configuration: ClientConfiguration,
+     pub(crate) auth_copied_to_dcs: tokio::sync::Mutex<Vec<i32>>,
++    pub(crate) outbound: Arc<OutboundBudget>,
+ }
+ 
+ /// Wrapper around [`SenderPool`] to facilitate interaction with Telegram's API.
+diff --git a/grammers-client/src/client/dialogs.rs b/grammers-client/src/client/dialogs.rs
+index dbc6df6..a4dea66 100644
+--- a/grammers-client/src/client/dialogs.rs
++++ b/grammers-client/src/client/dialogs.rs
+@@ -183,13 +183,13 @@ impl Client {
+     pub async fn delete_dialog<C: Into<PeerRef>>(&self, peer: C) -> Result<(), InvocationError> {
+         let peer = peer.into();
+         if peer.id.kind() == PeerKind::Channel {
+-            self.invoke(&tl::functions::channels::LeaveChannel {
++            self.invoke_outbound(&tl::functions::channels::LeaveChannel {
+                 channel: peer.into(),
+             })
+             .await
+             .map(drop)
+         } else if peer.id.kind() == PeerKind::Chat {
+-            self.invoke(&tl::functions::messages::DeleteChatUser {
++            self.invoke_outbound(&tl::functions::messages::DeleteChatUser {
+                 chat_id: peer.into(),
+                 user_id: tl::enums::InputUser::UserSelf,
+                 revoke_history: false,
+@@ -197,7 +197,7 @@ impl Client {
+             .await
+             .map(drop)
+         } else {
+-            self.invoke(&tl::functions::messages::DeleteHistory {
++            self.invoke_outbound(&tl::functions::messages::DeleteHistory {
+                 just_clear: false,
+                 revoke: false,
+                 peer: peer.into(),
+diff --git a/grammers-client/src/client/files.rs b/grammers-client/src/client/files.rs
+index 3ba3c02..13c394f 100644
+--- a/grammers-client/src/client/files.rs
++++ b/grammers-client/src/client/files.rs
+@@ -420,7 +420,7 @@ impl Client {
+                 let task = async move {
+                     while let Some((part, bytes)) = parts.next_part().await? {
+                         let ok = handle
+-                            .invoke(&tl::functions::upload::SaveBigFilePart {
++                            .invoke_outbound(&tl::functions::upload::SaveBigFilePart {
+                                 file_id,
+                                 file_part: part,
+                                 file_total_parts: total_parts,
+@@ -458,7 +458,7 @@ impl Client {
+             while let Some((part, bytes)) = parts.next_part().await? {
+                 md5.consume(&bytes);
+                 let ok = self
+-                    .invoke(&tl::functions::upload::SaveFilePart {
++                    .invoke_outbound(&tl::functions::upload::SaveFilePart {
+                         file_id,
+                         file_part: part,
+                         bytes,
+diff --git a/grammers-client/src/client/messages.rs b/grammers-client/src/client/messages.rs
+index 08af5cd..b4e927c 100644
+--- a/grammers-client/src/client/messages.rs
++++ b/grammers-client/src/client/messages.rs
+@@ -601,7 +601,7 @@ impl Client {
+         let random_id = generate_random_id();
+         let entities = parse_mention_entities(self, message.entities.clone()).await;
+         let updates = if let Some(media) = message.media.clone() {
+-            self.invoke(&tl::functions::messages::SendMedia {
++            self.invoke_outbound_for_peer(peer, &tl::functions::messages::SendMedia {
+                 silent: message.silent,
+                 background: message.background,
+                 clear_draft: message.clear_draft,
+@@ -626,7 +626,7 @@ impl Client {
+             })
+             .await
+         } else {
+-            self.invoke(&tl::functions::messages::SendMessage {
++            self.invoke_outbound_for_peer(peer, &tl::functions::messages::SendMessage {
+                 no_webpage: !message.link_preview,
+                 silent: message.silent,
+                 background: message.background,
+@@ -740,7 +740,7 @@ impl Client {
+                     | tl::enums::InputMedia::DocumentExternal(_)
+             ) {
+                 let uploaded = self
+-                    .invoke(&tl::functions::messages::UploadMedia {
++                    .invoke_outbound(&tl::functions::messages::UploadMedia {
+                         business_connection_id: None,
+                         peer: peer.into(),
+                         media: raw_media,
+@@ -772,7 +772,7 @@ impl Client {
+         }
+ 
+         let updates = self
+-            .invoke(&tl::functions::messages::SendMultiMedia {
++            .invoke_outbound_for_peer(peer, &tl::functions::messages::SendMultiMedia {
+                 silent: false,
+                 background: false,
+                 clear_draft: false,
+@@ -816,12 +816,13 @@ impl Client {
+         message_id: i32,
+         new_message: M,
+     ) -> Result<(), InvocationError> {
++        let peer = peer.into();
+         let new_message = new_message.into();
+         let entities = parse_mention_entities(self, new_message.entities).await;
+-        self.invoke(&tl::functions::messages::EditMessage {
++        self.invoke_outbound(&tl::functions::messages::EditMessage {
+             no_webpage: !new_message.link_preview,
+             invert_media: new_message.invert_media,
+-            peer: peer.into().into(),
++            peer: peer.into(),
+             id: message_id,
+             message: Some(new_message.text),
+             media: new_message.media,
+@@ -875,13 +876,13 @@ impl Client {
+         let peer = peer.into();
+         let tl::enums::messages::AffectedMessages::Messages(affected) =
+             if peer.id.kind() == PeerKind::Channel {
+-                self.invoke(&tl::functions::channels::DeleteMessages {
++                self.invoke_outbound(&tl::functions::channels::DeleteMessages {
+                     channel: peer.into(),
+                     id: message_ids.to_vec(),
+                 })
+                 .await
+             } else {
+-                self.invoke(&tl::functions::messages::DeleteMessages {
++                self.invoke_outbound(&tl::functions::messages::DeleteMessages {
+                     revoke: true,
+                     id: message_ids.to_vec(),
+                 })
+@@ -946,7 +947,7 @@ impl Client {
+             allow_paid_stars: None,
+             suggested_post: None,
+         };
+-        let result = self.invoke(&request).await?;
++        let result = self.invoke_outbound_for_peer(peer, &request).await?;
+         Ok(map_random_ids_to_messages(self, peer.into(), &request.random_id, result).await?)
+     }
+ 
+@@ -1231,7 +1232,7 @@ impl Client {
+         id: i32,
+         pin: bool,
+     ) -> Result<(), InvocationError> {
+-        self.invoke(&tl::functions::messages::UpdatePinnedMessage {
++        self.invoke_outbound(&tl::functions::messages::UpdatePinnedMessage {
+             silent: true,
+             unpin: !pin,
+             pm_oneside: false,
+@@ -1256,8 +1257,9 @@ impl Client {
+         &self,
+         peer: C,
+     ) -> Result<(), InvocationError> {
+-        self.invoke(&tl::functions::messages::UnpinAllMessages {
+-            peer: peer.into().into(),
++        let peer = peer.into();
++        self.invoke_outbound(&tl::functions::messages::UnpinAllMessages {
++            peer: peer.into(),
+             top_msg_id: None,
+             saved_peer_id: None,
+         })
+@@ -1313,11 +1315,12 @@ impl Client {
+         reactions: R,
+     ) -> Result<(), InvocationError> {
+         let reactions = reactions.into();
++        let peer = peer.into();
+ 
+-        self.invoke(&tl::functions::messages::SendReaction {
++        self.invoke_outbound(&tl::functions::messages::SendReaction {
+             big: reactions.big,
+             add_to_recent: reactions.add_to_recent,
+-            peer: peer.into().into(),
++            peer: peer.into(),
+             msg_id: message_id,
+             reaction: Some(reactions.reactions),
+         })
 diff --git a/grammers-client/src/client/mod.rs b/grammers-client/src/client/mod.rs
-index e75f4b9..06162c5 100644
+index e75f4b9..3b244a7 100644
 --- a/grammers-client/src/client/mod.rs
 +++ b/grammers-client/src/client/mod.rs
-@@ -20,7 +20,7 @@ mod messages;
+@@ -18,9 +18,10 @@ mod files;
+ mod iter_buffer;
+ mod messages;
  mod net;
++mod outbound;
  mod updates;
  
 -pub use auth::{LoginToken, PasswordToken, SignInError};
@@ -116,6 +390,72 @@ index e75f4b9..06162c5 100644
  pub use bots::{InlineResult, InlineResultIter};
  pub use chats::{ParticipantIter, ParticipantPermissions, ProfilePhotoIter};
  pub(crate) use client::ClientInner;
+diff --git a/grammers-client/src/client/net.rs b/grammers-client/src/client/net.rs
+index f80d4ae..6b3638b 100644
+--- a/grammers-client/src/client/net.rs
++++ b/grammers-client/src/client/net.rs
+@@ -9,6 +9,7 @@
+ use std::sync::Arc;
+ 
+ use grammers_mtsender::{InvocationError, SenderPoolFatHandle};
++use grammers_session::types::PeerRef;
+ use grammers_tl_types as tl;
+ use tokio::sync::Mutex;
+ 
+@@ -62,6 +63,7 @@ impl Client {
+             handle: sender_pool.thin.clone(),
+             auth_copied_to_dcs: Mutex::new(Vec::new()),
+             configuration,
++            outbound: Arc::new(super::outbound::OutboundBudget::from_env()),
+         }))
+     }
+ 
+@@ -96,6 +98,45 @@ impl Client {
+         self.invoke_in_dc(dc_id, request).await
+     }
+ 
++    /// Invoke an account-level write under the shared outbound budget.
++    ///
++    /// Raw [`Client::invoke`] remains available for reads and advanced calls. High-level write
++    /// helpers use this method so cloned clients and message replies share one rate limiter.
++    pub async fn invoke_outbound<R: tl::RemoteCall>(
++        &self,
++        request: &R,
++    ) -> Result<R::Return, InvocationError> {
++        let _permit = self.0.outbound.acquire().await;
++        self.invoke(request).await
++    }
++
++    /// Invoke a message-producing write into a known peer under both the account-wide budget and
++    /// the per-group message budget. Control-plane writes should use [`Self::invoke_outbound`]
++    /// when they do not create a new group message.
++    pub async fn invoke_outbound_for_peer<R: tl::RemoteCall>(
++        &self,
++        peer: PeerRef,
++        request: &R,
++    ) -> Result<R::Return, InvocationError> {
++        let _permit = self.0.outbound.acquire_for_peer(peer).await;
++        self.invoke(request).await
++    }
++
++    /// Invoke an account-level write in a specific data center under the same shared budget.
++    pub async fn invoke_outbound_in_dc<R: tl::RemoteCall>(
++        &self,
++        dc_id: i32,
++        request: &R,
++    ) -> Result<R::Return, InvocationError> {
++        let _permit = self.0.outbound.acquire().await;
++        self.invoke_in_dc(dc_id, request).await
++    }
++
++    /// Returns `(active, waiting)` for the shared outbound write budget.
++    pub fn outbound_snapshot(&self) -> (usize, usize) {
++        self.0.outbound.snapshot()
++    }
++
+     /// Like [`Self::invoke`], but in the specified DC.
+     ///
+     /// <div class="warning">
 diff --git a/grammers-client/src/lib.rs b/grammers-client/src/lib.rs
 index d9a6bc6..269a708 100644
 --- a/grammers-client/src/lib.rs
@@ -129,6 +469,110 @@ index d9a6bc6..269a708 100644
  pub use grammers_mtsender::{self as sender, InvocationError, SenderPool};
  pub use grammers_session as session;
  pub use grammers_tl_types as tl;
+diff --git a/grammers-client/src/peer/action.rs b/grammers-client/src/peer/action.rs
+index 0fd4d8f..3291bc3 100644
+--- a/grammers-client/src/peer/action.rs
++++ b/grammers-client/src/peer/action.rs
+@@ -62,7 +62,7 @@ impl ActionSender {
+         action: A,
+     ) -> Result<(), InvocationError> {
+         self.client
+-            .invoke(&tl::functions::messages::SetTyping {
++            .invoke_outbound(&tl::functions::messages::SetTyping {
+                 peer: self.peer.into(),
+                 top_msg_id: self.topic_id,
+                 action: action.into(),
+diff --git a/grammers-client/src/peer/chats.rs b/grammers-client/src/peer/chats.rs
+index b7772f4..63731a6 100644
+--- a/grammers-client/src/peer/chats.rs
++++ b/grammers-client/src/peer/chats.rs
+@@ -38,7 +38,7 @@ impl AdminRightsBuilderInner {
+     pub(crate) async fn invoke(self) -> Result<(), InvocationError> {
+         if self.peer_ref.id.kind() == PeerKind::Channel {
+             self.client
+-                .invoke(&tl::functions::channels::EditAdmin {
++                .invoke_outbound(&tl::functions::channels::EditAdmin {
+                     channel: self.peer_ref.into(),
+                     user_id: self.user.clone(),
+                     admin_rights: tl::enums::ChatAdminRights::Rights(self.rights.clone()),
+@@ -58,7 +58,7 @@ impl AdminRightsBuilderInner {
+                 || self.rights.add_admins
+                 || self.rights.manage_call;
+             self.client
+-                .invoke(&tl::functions::messages::EditChatAdmin {
++                .invoke_outbound(&tl::functions::messages::EditChatAdmin {
+                     chat_id: self.peer_ref.into(),
+                     user_id: self.user.clone(),
+                     is_admin: promote,
+@@ -321,7 +321,7 @@ impl BannedRightsBuilderInner {
+     pub(crate) async fn invoke(self) -> Result<(), InvocationError> {
+         if self.peer_ref.id.kind() == PeerKind::Channel {
+             self.client
+-                .invoke(&tl::functions::channels::EditBanned {
++                .invoke_outbound(&tl::functions::channels::EditBanned {
+                     channel: self.peer_ref.into(),
+                     participant: self.peer.clone(),
+                     banned_rights: tl::enums::ChatBannedRights::Rights(self.rights.clone()),
+@@ -331,7 +331,7 @@ impl BannedRightsBuilderInner {
+         } else if self.peer_ref.id.kind() == PeerKind::Chat {
+             if self.rights.view_messages {
+                 self.client
+-                    .invoke(&tl::functions::messages::DeleteChatUser {
++                    .invoke_outbound(&tl::functions::messages::DeleteChatUser {
+                         chat_id: self.peer_ref.into(),
+                         user_id: self.user.clone(),
+                         revoke_history: false,
+diff --git a/grammers-client/src/update/callback_query.rs b/grammers-client/src/update/callback_query.rs
+index 2455bff..5492d44 100644
+--- a/grammers-client/src/update/callback_query.rs
++++ b/grammers-client/src/update/callback_query.rs
+@@ -178,13 +178,13 @@ impl<'a> Answer<'a> {
+     /// Send the answer back to Telegram, and then relayed to the user who pressed the inline
+     /// button.
+     pub async fn send(self) -> Result<(), InvocationError> {
+-        self.query.client.invoke(&self.request).await?;
++        self.query.client.invoke_outbound(&self.request).await?;
+         Ok(())
+     }
+ 
+     /// [`Self::send`] the answer, and also edit the message that contained the button.
+     pub async fn edit<M: Into<InputMessage>>(self, new_message: M) -> Result<(), InvocationError> {
+-        self.query.client.invoke(&self.request).await?;
++        self.query.client.invoke_outbound(&self.request).await?;
+         let peer = self
+             .query
+             .peer_ref()
+@@ -212,7 +212,7 @@ impl<'a> Answer<'a> {
+         self,
+         message: M,
+     ) -> Result<Message, InvocationError> {
+-        self.query.client.invoke(&self.request).await?;
++        self.query.client.invoke_outbound(&self.request).await?;
+         let peer = self
+             .query
+             .peer_ref()
+@@ -230,7 +230,7 @@ impl<'a> Answer<'a> {
+             tl::enums::Update::BotCallbackQuery(update) => update.msg_id,
+             _ => return Err(InvocationError::Dropped),
+         };
+-        self.query.client.invoke(&self.request).await?;
++        self.query.client.invoke_outbound(&self.request).await?;
+         let peer = self
+             .query
+             .peer_ref()
+diff --git a/grammers-client/src/update/inline_query.rs b/grammers-client/src/update/inline_query.rs
+index e533899..e6ff6d9 100644
+--- a/grammers-client/src/update/inline_query.rs
++++ b/grammers-client/src/update/inline_query.rs
+@@ -145,7 +145,7 @@ impl Answer {
+ 
+     /// Answers the inline query with the given results.
+     pub async fn send(self) -> Result<(), InvocationError> {
+-        self.client.invoke(&self.request).await?;
++        self.client.invoke_outbound(&self.request).await?;
+         Ok(())
+     }
+ }
 diff --git a/grammers-mtsender/src/configuration.rs b/grammers-mtsender/src/configuration.rs
 index e27c257..b81e9f8 100644
 --- a/grammers-mtsender/src/configuration.rs
@@ -217,10 +661,23 @@ index 619eda2..707a713 100644
                  }
                  return;
 diff --git a/grammers-mtsender/src/updates_receiver.rs b/grammers-mtsender/src/updates_receiver.rs
-index eaa5315..42db94a 100644
+index eaa5315..c4b1aca 100644
 --- a/grammers-mtsender/src/updates_receiver.rs
 +++ b/grammers-mtsender/src/updates_receiver.rs
-@@ -91,13 +91,14 @@ impl UpdatesReceiver {
+@@ -20,7 +20,11 @@ use tokio::time::timeout_at;
+ use crate::{InvocationError, SenderPoolHandle, UpdatesConfiguration};
+ 
+ // See https://core.telegram.org/method/updates.getChannelDifference.
+-const BOT_CHANNEL_DIFF_LIMIT: i32 = 100000;
++// A bot may belong to tens of thousands of channels. Telegram permits a much larger limit, but
++// materialising 100k updates plus their peer vectors in `UpdateStream` can briefly consume a
++// shard's entire memory budget during one gap. `final = false` makes the server continue the
++// difference, so a smaller page bounds recovery memory without dropping updates.
++const BOT_CHANNEL_DIFF_LIMIT: i32 = 5_000;
+ const USER_CHANNEL_DIFF_LIMIT: i32 = 100;
+ 
+ pub struct UpdatesReceiver {
+@@ -91,13 +95,14 @@ impl UpdatesReceiver {
          updates: mpsc::Receiver<UpdatesLike>,
          configuration: UpdatesConfiguration,
      ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {

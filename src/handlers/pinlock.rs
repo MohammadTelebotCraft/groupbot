@@ -89,7 +89,10 @@ pub async fn on_raw(ctx: &Ctx, raw: &grammers_client::update::Raw) {
         return;
     };
 
-    let Some(chat_ref) = ctx.chat_ref(chat).or_else(|| peer.map(PeerId::to_ambient_ref)) else {
+    let Some(chat_ref) = ctx
+        .chat_ref(chat)
+        .or_else(|| peer.map(PeerId::to_ambient_ref))
+    else {
         return;
     };
 

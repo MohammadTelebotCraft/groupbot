@@ -36,9 +36,13 @@ fn millis(duration: Duration) -> String {
     format!("{} میلی ثانیه", duration.as_millis())
 }
 
-fn uptime(elapsed: Duration) -> String {
+pub fn uptime(elapsed: Duration) -> String {
     let seconds = elapsed.as_secs();
-    let (days, hours, minutes) = (seconds / 86_400, (seconds % 86_400) / 3600, (seconds % 3600) / 60);
+    let (days, hours, minutes) = (
+        seconds / 86_400,
+        (seconds % 86_400) / 3600,
+        (seconds % 3600) / 60,
+    );
     match (days, hours, minutes) {
         (0, 0, 0) => format!("{seconds} ثانیه"),
         (0, 0, m) => format!("{m} دقیقه"),

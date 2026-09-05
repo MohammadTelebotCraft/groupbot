@@ -6,85 +6,70 @@ use grammers_client::session::types::PeerRef;
 use super::Ctx;
 use super::concept_vectors as vectors;
 use super::nsfw;
+use super::vision::{DIM, dot};
 
 pub struct Concept {
     pub key: &'static str,
     pub names: &'static [&'static str],
-    pub vector: &'static [f32; 512],
+
+    pub notice: &'static str,
+    pub vector: &'static [f32; DIM],
 }
 
 pub const CONCEPTS: &[Concept] = &[
-    Concept { key: "c_cig", names: &["سیگار", "دخانیات", "قلیان"], vector: &vectors::CIGARETTE },
-    Concept { key: "c_alc", names: &["مشروب", "الکل", "مشروبات"], vector: &vectors::ALCOHOL },
-    Concept { key: "c_gun", names: &["اسلحه", "سلاح"], vector: &vectors::WEAPON },
-    Concept { key: "c_bet", names: &["قمار", "شرط بندی", "شرطبندی"], vector: &vectors::GAMBLING },
-    Concept { key: "c_drg", names: &["مواد", "مواد مخدر"], vector: &vectors::DRUGS },
-    Concept { key: "c_bld", names: &["خون", "خونریزی"], vector: &vectors::BLOOD },
+    Concept {
+        key: "c_cig",
+        names: &["سیگار", "دخانیات", "قلیان"],
+        notice: "تصویر سیگار و دخانیات",
+        vector: &vectors::CIGARETTE,
+    },
+    Concept {
+        key: "c_alc",
+        names: &["مشروب", "الکل", "مشروبات"],
+        notice: "تصویر مشروبات الکلی",
+        vector: &vectors::ALCOHOL,
+    },
+    Concept {
+        key: "c_gun",
+        names: &["اسلحه", "سلاح"],
+        notice: "تصویر اسلحه",
+        vector: &vectors::WEAPON,
+    },
+    Concept {
+        key: "c_bet",
+        names: &["قمار", "شرط بندی", "شرطبندی"],
+        notice: "تصویر قمار و شرط بندی",
+        vector: &vectors::GAMBLING,
+    },
+    Concept {
+        key: "c_drg",
+        names: &["مواد", "مواد مخدر"],
+        notice: "تصویر مواد مخدر",
+        vector: &vectors::DRUGS,
+    },
+    Concept {
+        key: "c_bld",
+        names: &["خون", "خونریزی"],
+        notice: "تصویر خون و خونریزی",
+        vector: &vectors::BLOOD,
+    },
 ];
 
 pub const SHADOW: &str = "cq_shadow";
 
 pub const LIMIT: &str = "cq_lim";
 
-pub const LIMIT_RANGE: (u32, u32) = (10, 120);
-pub const LIMIT_PRESETS: &[u32] = &[20, 25, 30, 40, 60, 80];
-const DEFAULT_LIMIT: u32 = 30;
-
-const MODEL_FILE: &str = "clip.onnx";
-
-const SIDE: usize = 224;
-const RESIZE: usize = 224;
-const DIM: usize = 512;
-
-const MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
-const STD: [f32; 3] = [0.268_629_54, 0.261_302_6, 0.275_777_1];
-
-fn model() -> Option<&'static nsfw::Session> {
-    static CELL: std::sync::OnceLock<Option<nsfw::Session>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| {
-        let mut path = std::env::current_exe().ok()?;
-        path.pop();
-        path.push(MODEL_FILE);
-        if !path.exists() {
-            eprintln!(
-                "concepts: {} is not beside the binary, so the concept locks are inert",
-                path.display()
-            );
-            return None;
-        }
-        nsfw::open_path(&path, "concept model")
-    })
-    .as_ref()
-}
+pub const LIMIT_RANGE: (u32, u32) = (5, 60);
+pub const LIMIT_PRESETS: &[u32] = &[10, 15, 20, 25, 30, 40];
+pub const DEFAULT_LIMIT: u32 = 20;
 
 pub fn limit(ctx: &Ctx, chat: i64) -> u32 {
-    ctx.settings
-        .with_chat(chat, |settings| settings.number(LIMIT, DEFAULT_LIMIT, LIMIT_RANGE))
+    ctx.settings.with_chat(chat, |settings| {
+        settings.number(LIMIT, DEFAULT_LIMIT, LIMIT_RANGE)
+    })
 }
 
-fn unit(v: &[f32]) -> Vec<f32> {
-    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm <= 0.0 {
-        return v.to_vec();
-    }
-    v.iter().map(|x| x / norm).collect()
-}
-
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
-}
-
-fn embed(image: &image::RgbImage) -> Option<Vec<f32>> {
-    let session = model()?;
-    let view = nsfw::fit(image, RESIZE, SIDE);
-    let pixels = nsfw::pixels_by(&view, SIDE, |channel, value| {
-        (f32::from(value) / 255.0 - MEAN[channel]) / STD[channel]
-    });
-    let out = nsfw::run(session, vec![1, 3, SIDE as i64, SIDE as i64], pixels)?;
-    (out.len() == DIM).then(|| unit(&out))
-}
-
-fn margins_all(embedding: &[f32]) -> [f32; super::CONCEPT_SLOTS] {
+pub fn margins_from(embedding: &[f32]) -> [f32; super::CONCEPT_SLOTS] {
     let baseline = dot(embedding, &vectors::BACKGROUND);
     let mut out = [f32::MIN; super::CONCEPT_SLOTS];
     for (slot, concept) in CONCEPTS.iter().enumerate() {
@@ -115,10 +100,6 @@ pub fn armed_under(settings: &super::super::state::ChatSettings<'_>) -> Option<A
     })
 }
 
-pub fn margins_of(image: &image::RgbImage) -> Option<[f32; super::CONCEPT_SLOTS]> {
-    embed(image).map(|embedding| margins_all(&embedding))
-}
-
 fn worst(all: &[f32; super::CONCEPT_SLOTS], armed: &Armed) -> Option<(&'static Concept, f32)> {
     armed
         .concepts
@@ -140,7 +121,7 @@ fn report(chat: i64, id: i64, all: &[f32; super::CONCEPT_SLOTS], armed: &Armed, 
         })
         .collect();
     let hit = worst(all, armed).is_some_and(|(_, margin)| over(margin, armed.limit));
-    println!(
+    log::info!(
         "concept[{}]: chat {chat} file {id} limit {} {} {}{}",
         if armed.live { "live" } else { "shadow" },
         armed.limit,
@@ -171,7 +152,12 @@ pub async fn act_known(
         return;
     }
     ctx.bump(chat, super::stats::DELETED);
-    super::notice::send(ctx, message, chat, concept.names[0], None).await;
+    let chances = match super::strict::punish(ctx, message, chat, concept.key).await {
+        super::strict::Outcome::Announced => return,
+        super::strict::Outcome::Chances(left) => Some(left),
+        super::strict::Outcome::Nothing => None,
+    };
+    super::notice::send(ctx, message, chat, concept.notice, chances).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -194,7 +180,10 @@ pub async fn act_detached(
         return;
     }
     match ctx.client.delete_messages(chat_ref, &[message_id]).await {
-        Ok(0) => eprintln!("concept: delete affected nothing in {chat} msg {message_id}"),
+        Ok(0) => {
+            eprintln!("concept: delete affected nothing in {chat} msg {message_id}");
+            return;
+        }
         Ok(_) => {}
         Err(e) => {
             eprintln!("concept: could not delete in {chat} msg {message_id}: {e}");
@@ -202,7 +191,7 @@ pub async fn act_detached(
         }
     }
     ctx.bump(chat, super::stats::DELETED);
-    nsfw::notify(ctx, chat, chat_ref, sender, name, concept.names[0]).await;
+    nsfw::punish_and_notify(ctx, chat, chat_ref, sender, name, concept.key, concept.notice).await;
 }
 
 #[cfg(test)]
@@ -227,7 +216,11 @@ mod tests {
         all[2] = 0.088;
 
         let armed: Vec<&'static Concept> = CONCEPTS.iter().take(2).collect();
-        let armed = Armed { concepts: armed, limit: 30, live: true };
+        let armed = Armed {
+            concepts: armed,
+            limit: 30,
+            live: true,
+        };
         let (concept, margin) = worst(&all, &armed).expect("a winner among the armed");
 
         assert_eq!(concept.key, CONCEPTS[0].key);
@@ -242,7 +235,10 @@ mod tests {
         keys.dedup();
         assert_eq!(keys.len(), count, "two concepts share a settings key");
 
-        let mut names: Vec<&str> = CONCEPTS.iter().flat_map(|c| c.names.iter().copied()).collect();
+        let mut names: Vec<&str> = CONCEPTS
+            .iter()
+            .flat_map(|c| c.names.iter().copied())
+            .collect();
         let total = names.len();
         names.sort_unstable();
         names.dedup();
@@ -250,7 +246,9 @@ mod tests {
 
         for concept in CONCEPTS {
             assert!(
-                super::super::locks::LOCKS.iter().any(|lock| lock.key == concept.key),
+                super::super::locks::LOCKS
+                    .iter()
+                    .any(|lock| lock.key == concept.key),
                 "«{}» is a concept but not a lock",
                 concept.names[0]
             );
@@ -259,7 +257,7 @@ mod tests {
 
     #[test]
     fn the_vectors_are_unit_length_and_distinct() {
-        let all: Vec<&[f32; 512]> = CONCEPTS
+        let all: Vec<&[f32; DIM]> = CONCEPTS
             .iter()
             .map(|c| c.vector)
             .chain(std::iter::once(&vectors::BACKGROUND))
@@ -281,7 +279,10 @@ mod tests {
         let matches = [0.064f32, 0.053, 0.035, 0.026];
 
         for m in innocent {
-            assert!(!over(m, DEFAULT_LIMIT), "an innocent margin of {m} would delete");
+            assert!(
+                !over(m, DEFAULT_LIMIT),
+                "an innocent margin of {m} would delete"
+            );
         }
         for m in matches {
             assert!(m > 0.0);

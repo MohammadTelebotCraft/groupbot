@@ -16,6 +16,8 @@ pub const ALLOWED: &str = "botok:";
 pub const ALLOW: &[&str] = &["ربات مجاز", "افزودن ربات مجاز"];
 pub const DISALLOW: &[&str] = &["حذف ربات مجاز", "لغو ربات مجاز"];
 
+const SPARED_REPORT_MAX: usize = 512;
+
 pub fn allow_key(user: i64) -> String {
     format!("{ALLOWED}{user}")
 }
@@ -152,6 +154,11 @@ pub async fn on_participant_update(
 }
 
 async fn remove(ctx: &Ctx, chat: i64, chat_ref: PeerRef, target: PeerRef, name: &str) -> bool {
+    if let Some(user) = target.id.bare_id()
+        && !ctx.claim_bot_removal(chat, user)
+    {
+        return false;
+    }
     let done = super::restrict::apply(
         ctx,
         chat_ref,
@@ -168,7 +175,7 @@ async fn remove(ctx: &Ctx, chat: i64, chat_ref: PeerRef, target: PeerRef, name: 
     )
     .await;
     match done {
-        Ok(()) => true,
+        Ok(_) => true,
         Err(e) => {
             eprintln!("bot lock: {chat}: could not ban bot {}: {e}", target.id);
             false
@@ -178,6 +185,7 @@ async fn remove(ctx: &Ctx, chat: i64, chat_ref: PeerRef, target: PeerRef, name: 
 
 pub async fn on_lock_set(ctx: &Ctx, chat: i64, key: &str, on: bool) {
     if key == LOCK && on {
+        let _permit = ctx.sweep_slot().await;
         sweep(ctx, chat).await;
     }
 }
@@ -334,7 +342,9 @@ pub async fn sweep(ctx: &Ctx, chat: i64) -> usize {
                     is_allowed(ctx, chat, user),
                 );
                 if let Some(why) = why {
-                    spared.push(format!("{user} ({why})"));
+                    if spared.len() < SPARED_REPORT_MAX {
+                        spared.push(format!("{user} ({why})"));
+                    }
                     continue;
                 }
                 let Some(target) = PeerId::user(user).map(PeerId::to_ambient_ref) else {
@@ -382,7 +392,11 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
         message.action(),
         Some(tl::enums::MessageAction::ChatJoinedByLink(_))
     );
-    if !joined_by_link && !matches!(message.action(), Some(tl::enums::MessageAction::ChatAddUser(_)))
+    if !joined_by_link
+        && !matches!(
+            message.action(),
+            Some(tl::enums::MessageAction::ChatAddUser(_))
+        )
     {
         return false;
     }
@@ -451,10 +465,22 @@ mod tests {
         let plain = spared_because(true, false, false, false, false, false, false);
         assert_eq!(plain, None, "a plain bot goes");
 
-        assert_eq!(spared_because(false, false, false, false, false, false, false), Some("not a bot"));
-        assert_eq!(spared_because(true, true, false, false, false, false, false), Some("myself"));
-        assert_eq!(spared_because(true, false, true, false, false, false, false), Some("the cleaner"));
-        assert_eq!(spared_because(true, false, false, false, false, true, false), Some("vip"));
+        assert_eq!(
+            spared_because(false, false, false, false, false, false, false),
+            Some("not a bot")
+        );
+        assert_eq!(
+            spared_because(true, true, false, false, false, false, false),
+            Some("myself")
+        );
+        assert_eq!(
+            spared_because(true, false, true, false, false, false, false),
+            Some("the cleaner")
+        );
+        assert_eq!(
+            spared_because(true, false, false, false, false, true, false),
+            Some("vip")
+        );
         assert_eq!(
             spared_because(true, false, false, false, false, false, true),
             Some("allowed"),
@@ -476,6 +502,9 @@ mod tests {
             "the allowlist outranks «اعمال روی ادمین ها هم» — it is the explicit exception"
         );
 
-        assert_eq!(spared_because(true, true, false, true, true, false, false), Some("myself"));
+        assert_eq!(
+            spared_because(true, true, false, true, true, false, false),
+            Some("myself")
+        );
     }
 }

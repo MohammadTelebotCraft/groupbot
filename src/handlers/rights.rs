@@ -1,7 +1,7 @@
 use grammers_client::message::{InputMessage, Message};
 use grammers_client::tl;
 
-use super::{Ctx};
+use super::Ctx;
 
 pub const PREFIX: &str = "perm:";
 
@@ -13,20 +13,62 @@ pub struct Right {
 }
 
 pub const RIGHTS: &[Right] = &[
-    Right { key: "plain", label: "ارسال پیام" },
-    Right { key: "photos", label: "ارسال عکس" },
-    Right { key: "videos", label: "ارسال ویدیو" },
-    Right { key: "rounds", label: "ارسال ویدیو سلفی" },
-    Right { key: "audios", label: "ارسال آهنگ" },
-    Right { key: "voices", label: "ارسال ویس" },
-    Right { key: "docs", label: "ارسال فایل" },
-    Right { key: "stickers", label: "ارسال استیکر و گیف" },
-    Right { key: "polls", label: "ارسال نظرسنجی" },
-    Right { key: "links", label: "پیش نمایش لینک" },
-    Right { key: "reactions", label: "ری اکشن به پیام" },
-    Right { key: "info", label: "تغییر اطلاعات گروه" },
-    Right { key: "invite", label: "دعوت کاربران" },
-    Right { key: "pin", label: "سنجاق کردن پیام" },
+    Right {
+        key: "plain",
+        label: "ارسال پیام",
+    },
+    Right {
+        key: "photos",
+        label: "ارسال عکس",
+    },
+    Right {
+        key: "videos",
+        label: "ارسال ویدیو",
+    },
+    Right {
+        key: "rounds",
+        label: "ارسال ویدیو سلفی",
+    },
+    Right {
+        key: "audios",
+        label: "ارسال آهنگ",
+    },
+    Right {
+        key: "voices",
+        label: "ارسال ویس",
+    },
+    Right {
+        key: "docs",
+        label: "ارسال فایل",
+    },
+    Right {
+        key: "stickers",
+        label: "ارسال استیکر و گیف",
+    },
+    Right {
+        key: "polls",
+        label: "ارسال نظرسنجی",
+    },
+    Right {
+        key: "links",
+        label: "پیش نمایش لینک",
+    },
+    Right {
+        key: "reactions",
+        label: "ری اکشن به پیام",
+    },
+    Right {
+        key: "info",
+        label: "تغییر اطلاعات گروه",
+    },
+    Right {
+        key: "invite",
+        label: "دعوت کاربران",
+    },
+    Right {
+        key: "pin",
+        label: "سنجاق کردن پیام",
+    },
 ];
 
 const OPEN_WORDS: &[&str] = &["باز", "آزاد", "روشن"];
@@ -105,7 +147,7 @@ pub async fn apply(
     let rights = banned_rights(ctx, chat, force_all);
     match ctx
         .client
-        .invoke(&tl::functions::messages::EditChatDefaultBannedRights {
+        .invoke_outbound(&tl::functions::messages::EditChatDefaultBannedRights {
             peer: chat_ref.into(),
             banned_rights: rights.into(),
         })
@@ -167,7 +209,11 @@ pub fn status(ctx: &Ctx, chat: i64) -> String {
         .map(|right| {
             format!(
                 "{} {}",
-                if closed(ctx, chat, right.key) { "✗" } else { "✓" },
+                if closed(ctx, chat, right.key) {
+                    "✗"
+                } else {
+                    "✓"
+                },
                 right.label
             )
         })
@@ -228,10 +274,9 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         .find(|right| right.label == name || right.label.ends_with(name))
     else {
         let _ = message
-            .reply(InputMessage::new().html(format!(
-                "چنین اختیاری نداریم.\n\n{}",
-                status(ctx, chat)
-            )))
+            .reply(
+                InputMessage::new().html(format!("چنین اختیاری نداریم.\n\n{}", status(ctx, chat))),
+            )
             .await;
         return true;
     };
@@ -249,9 +294,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         .reply(match (done, shut) {
             (true, true) => format!("✗ {} برای اعضای عادی بسته شد.", right.label),
             (true, false) => format!("✓ {} برای اعضای عادی باز شد.", right.label),
-            (false, _) => {
-                "انجام نشد. مطمئن شوید ربات اجازه تغییر اطلاعات گروه دارد.".to_owned()
-            }
+            (false, _) => "انجام نشد. مطمئن شوید ربات اجازه تغییر اطلاعات گروه دارد.".to_owned(),
         })
         .await;
     true

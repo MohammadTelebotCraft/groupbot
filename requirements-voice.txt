@@ -1,0 +1,4 @@
+# Pinned to the requested upstream SpeechRecognition repository revision.
+SpeechRecognition @ git+https://github.com/Uberi/speech_recognition.git@0a675d1e5232dbeae1be8d071c923fb37f0f163a
+# Optional local/GPU backend: install `faster-whisper` and its model separately, then set
+# VOICE_BACKEND=faster-whisper. The default remains SpeechRecognition above.

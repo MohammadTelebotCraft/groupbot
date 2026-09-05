@@ -39,7 +39,10 @@ pub fn channel(ctx: &Ctx, chat: i64) -> Option<String> {
 }
 
 pub fn required_adds(ctx: &Ctx, chat: i64) -> u64 {
-    ctx.settings.value_parsed(chat, ADD_REQUIRED).unwrap_or(0)
+    ctx.settings
+        .value_parsed(chat, ADD_REQUIRED)
+        .unwrap_or(0)
+        .clamp(u64::from(ADD_RANGE.0), u64::from(ADD_RANGE.1))
 }
 
 pub fn exempt_key(user: i64) -> String {
@@ -58,15 +61,23 @@ pub fn prompt_every(ctx: &Ctx, chat: i64) -> u32 {
     ctx.settings
         .value_parsed(chat, PROMPT_EVERY)
         .unwrap_or(DEFAULT_EVERY)
+        .clamp(EVERY_RANGE.0, EVERY_RANGE.1)
 }
 
 pub fn prompt_ttl(ctx: &Ctx, chat: i64) -> u32 {
     ctx.settings
         .value_parsed(chat, PROMPT_TTL)
         .unwrap_or(DEFAULT_TTL)
+        .clamp(TTL_RANGE.0, TTL_RANGE.1)
 }
 
 pub async fn set_prompt(ctx: &Ctx, chat: i64, key: &str, seconds: u32) {
+    let range = if key == PROMPT_TTL {
+        TTL_RANGE
+    } else {
+        EVERY_RANGE
+    };
+    let seconds = seconds.clamp(range.0, range.1);
     ctx.settings
         .set_value(chat, key, &seconds.to_string())
         .await;
@@ -81,6 +92,7 @@ pub fn seconds_label(seconds: u32, off: &'static str) -> String {
 }
 
 pub async fn set_required_adds(ctx: &Ctx, chat: i64, count: u64) {
+    let count = count.clamp(u64::from(ADD_RANGE.0), u64::from(ADD_RANGE.1));
     ctx.settings
         .set_value(chat, ADD_REQUIRED, &count.to_string())
         .await;
@@ -107,9 +119,18 @@ pub async fn prime(ctx: &Ctx) {
     gated.extend(ctx.settings.flagged_with(GATE).await);
     gated.sort_unstable();
     gated.dedup();
+    let mut on = Vec::new();
+    let mut off = Vec::new();
     for chat in gated {
-        sync_gate(ctx, chat).await;
+        if channel(ctx, chat).is_some() || required_adds(ctx, chat) > 0 {
+            on.push(chat);
+        } else {
+            off.push(chat);
+        }
     }
+
+    let _ = ctx.settings.set_flags(&on, GATE, true).await;
+    let _ = ctx.settings.set_flags(&off, GATE, false).await;
 }
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
@@ -183,15 +204,25 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         let rest = text.strip_prefix(command)?;
         (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
     }) {
-        if !super::limits::allows(ctx, message, super::limits::SET).await {
-            return true;
-        }
         let Some(numbers) = super::numbers_in(rest) else {
             return false;
         };
-        if let [every, ttl] = numbers[..] {
-            set_prompt(ctx, chat, PROMPT_EVERY, every).await;
-            set_prompt(ctx, chat, PROMPT_TTL, ttl).await;
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
+            return true;
+        }
+
+        match numbers[..] {
+            [] => {}
+            [every, ttl] => {
+                set_prompt(ctx, chat, PROMPT_EVERY, every).await;
+                set_prompt(ctx, chat, PROMPT_TTL, ttl).await;
+            }
+            _ => {
+                let _ = message
+                    .reply("مثال: «تنظیم اعلان شرط 120 30» یعنی هر ۱۲۰ ثانیه یک بار، حذف بعد از ۳۰ ثانیه.")
+                    .await;
+                return true;
+            }
         }
         let _ = message
             .reply(InputMessage::new().html(format!(
@@ -251,24 +282,30 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }) else {
         return false;
     };
+
+    if !rest.is_empty() && !rest.starts_with('@') {
+        return false;
+    }
     if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
 
     if rest.is_empty() {
         let _ = message
-            .reply(InputMessage::new().html(match channel(ctx, chat) {
-                Some(name) => format!(
-                    "<b>عضویت اجباری</b>\n\n\
+            .reply(
+                InputMessage::new().html(match channel(ctx, chat) {
+                    Some(name) => format!(
+                        "<b>عضویت اجباری</b>\n\n\
                      کانال · @{}\n\n\
                      <i>برداشتن: «حذف عضویت اجباری»</i>",
-                    esc(&name)
-                ),
-                None => "<b>عضویت اجباری</b>\n\n\
+                        esc(&name)
+                    ),
+                    None => "<b>عضویت اجباری</b>\n\n\
                      خاموش است. «تنظیم عضویت اجباری @channel» را بفرستید.\n\n\
                      <i>ربات باید در آن کانال ادمین باشد تا بتواند عضویت را ببیند.</i>"
-                    .to_owned(),
-            }))
+                        .to_owned(),
+                }),
+            )
             .await;
         return true;
     }
@@ -391,12 +428,11 @@ pub async fn enforce(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
 
         let ttl = prompt_ttl(ctx, chat);
         if let (Ok(sent), true) = (sent, ttl > 0) {
-            let ctx = std::sync::Arc::clone(ctx);
-            let id = sent.id();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(u64::from(ttl))).await;
-                let _ = ctx.client.delete_messages(chat_ref, &[id]).await;
-            });
+            ctx.schedule_delete(
+                chat,
+                sent.id(),
+                std::time::Instant::now() + std::time::Duration::from_secs(u64::from(ttl)),
+            );
         }
     }
     true
@@ -478,4 +514,23 @@ async fn channel_ref(ctx: &Ctx, name: &str) -> Option<PeerRef> {
     let peer = peer.to_ref().await.ok()??;
     ctx.remember_join_ref(name, peer);
     Some(peer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_defaults_sit_inside_their_ranges() {
+        for (name, value, range) in [
+            ("DEFAULT_EVERY", DEFAULT_EVERY, EVERY_RANGE),
+            ("DEFAULT_TTL", DEFAULT_TTL, TTL_RANGE),
+        ] {
+            assert!(
+                (range.0..=range.1).contains(&value),
+                "{name} is {value}, outside {range:?}"
+            );
+        }
+        assert!(ADD_RANGE.0 == 0, "zero has to stay a way to switch it off");
+    }
 }

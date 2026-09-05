@@ -6,53 +6,69 @@ pub mod bots;
 pub mod callbacks;
 pub mod captcha;
 pub mod cleaner;
+pub mod comment;
 pub mod concept_vectors;
 pub mod concepts;
-pub mod emoji_image;
 pub mod config;
+pub mod currency;
+pub mod emoji_image;
 pub mod extras;
 pub mod filters;
 pub mod flood;
 pub mod help;
+pub mod imgfilter;
+pub mod imgtext;
+pub mod install;
+pub mod intent;
+pub mod invite;
 pub mod join;
+pub mod leftback;
 pub mod limits;
 pub mod lists;
-pub mod log;
 pub mod locks;
+pub mod log;
 pub mod notice;
-pub mod ocr;
 pub mod nsfw;
+pub mod nsfw_head;
+pub mod nsfw_head_vectors;
+pub mod ocr;
 pub mod packs;
 pub mod panel;
 pub mod ping;
+pub mod pinlock;
 pub mod promote;
 pub mod purge;
-pub mod report;
-pub mod rights;
-pub mod pinlock;
 pub mod raid;
+pub mod report;
 pub mod restrict;
+pub mod rights;
 pub mod setting;
 pub mod stats;
 pub mod strict;
 pub mod style;
+pub mod sudo;
 pub mod tempmedia;
+pub mod toggles;
+pub mod trade;
+pub mod tune;
 pub mod vip;
+pub mod vision;
+pub mod voicemonitor;
 pub mod warns;
 pub mod welcome;
-pub mod toggles;
-pub mod tune;
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::cmp::Ordering as CmpOrdering;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::hash::Hash;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use grammers_client::Client;
 use grammers_client::message::Message;
 use grammers_client::peer::Peer;
-use grammers_client::update::Update;
 use grammers_client::session::types::{PeerAuth, PeerId, PeerKind, PeerRef};
+use grammers_client::update::Update;
 
 use crate::state::Settings;
 
@@ -69,9 +85,10 @@ pub struct ChatState {
 
     admin_fetch: tokio::sync::Mutex<()>,
 
-    messages: std::sync::Mutex<HashMap<i64, Vec<Instant>>>,
-    removals: std::sync::Mutex<HashMap<i64, Vec<Instant>>>,
-    notices: std::sync::Mutex<HashMap<(u8, i64), Instant>>,
+    messages: std::sync::Mutex<HashMap<i64, VecDeque<Instant>>>,
+    removals: std::sync::Mutex<HashMap<i64, VecDeque<Instant>>>,
+
+    notices: std::sync::Mutex<HashMap<(u8, i64), (Instant, Duration)>>,
     members: std::sync::Mutex<HashMap<i64, Instant>>,
     adds: std::sync::Mutex<HashMap<i64, (Instant, u64)>>,
     captchas: std::sync::Mutex<HashMap<i64, captcha::Pending>>,
@@ -80,11 +97,55 @@ pub struct ChatState {
     logs: std::sync::Mutex<Vec<String>>,
     temp_media: std::sync::Mutex<VecDeque<(Instant, i32)>>,
 
-    swept_bots: AtomicBool,
-    joined: std::sync::Mutex<HashMap<i32, Vec<Joined>>>,
-    pending_numbers: std::sync::Mutex<HashMap<i64, PendingNumber>>,
+    said: std::sync::Mutex<VecDeque<(i64, i32)>>,
 
-    inflight: OnceLock<tokio::sync::Semaphore>,
+    roots: std::sync::Mutex<HashMap<i32, (Instant, Root)>>,
+
+    swept_bots: AtomicBool,
+
+    tag_run: AtomicU64,
+    joined: std::sync::Mutex<HashMap<i32, Vec<Joined>>>,
+
+    inflight: AtomicUsize,
+    inflight_notify: tokio::sync::Notify,
+}
+
+pub struct Queued {
+    pub message: i32,
+    pub sender: Option<i64>,
+    pub name: String,
+}
+
+pub enum Root {
+    Post,
+
+    NotPost,
+
+    Pending(Vec<Queued>),
+}
+
+pub enum RootClaim {
+    Known(bool),
+
+    Mine,
+
+    Waiting,
+}
+
+const ROOTS_MAX: usize = 1_024;
+
+const ROOT_QUEUE_MAX: usize = 32;
+
+pub struct ChatPermit<'a> {
+    state: &'a ChatState,
+}
+
+impl Drop for ChatPermit<'_> {
+    fn drop(&mut self) {
+        let previous = self.state.inflight.fetch_sub(1, Ordering::Release);
+        debug_assert!(previous > 0);
+        self.state.inflight_notify.notify_one();
+    }
 }
 
 impl ChatState {
@@ -97,11 +158,34 @@ impl ChatState {
         }
     }
 
+    pub fn remember_said(&self, user: i64, id: i32) {
+        let mut said = self.said.lock().unwrap();
+        while said.len() >= SAID_MAX {
+            said.pop_front();
+        }
+        said.push_back((user, id));
+    }
+
+    pub fn take_said(&self, user: i64) -> Vec<i32> {
+        let mut said = self.said.lock().unwrap();
+        let mut mine = Vec::new();
+        said.retain(|(who, id)| {
+            if *who == user {
+                mine.push(*id);
+                return false;
+            }
+            true
+        });
+        mine
+    }
+
     pub fn count(&self, user: i64, name: impl FnOnce() -> String, tallies: [&'static str; 2]) {
         {
             let mut counts = self.counts.lock().unwrap();
             let was_empty = counts.is_empty();
-            counts.entry(user).or_insert_with(|| (0, name())).0 += 1;
+            if counts.contains_key(&user) || counts.len() < PER_CHAT_MAX {
+                counts.entry(user).or_insert_with(|| (0, name())).0 += 1;
+            }
             if was_empty {
                 Dirty::mark(&self.dirty.stats, self.chat);
             }
@@ -116,12 +200,45 @@ impl ChatState {
         }
     }
 
-    pub async fn slot(&self) -> tokio::sync::SemaphorePermit<'_> {
-        self.inflight
-            .get_or_init(|| tokio::sync::Semaphore::new(PER_CHAT_UPDATES))
-            .acquire()
-            .await
-            .expect("the per-chat semaphore is never closed")
+    pub fn claim_tagging(&self, command: i32) -> u64 {
+        let token = u64::from(command.max(0) as u32);
+        self.tag_run.fetch_max(token, Ordering::AcqRel);
+        token
+    }
+
+    pub fn tagging(&self, token: u64) -> bool {
+        self.tag_run.load(Ordering::Acquire) == token
+    }
+
+    pub fn tagging_now(&self) -> bool {
+        self.tag_run.load(Ordering::Acquire) != 0
+    }
+
+    pub fn stop_tagging(&self) {
+        self.tag_run.store(0, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn finish_tagging(&self, token: u64) -> bool {
+        self.tag_run
+            .compare_exchange(token, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub async fn slot(&self) -> ChatPermit<'_> {
+        loop {
+            let notified = self.inflight_notify.notified();
+            let acquired = self
+                .inflight
+                .fetch_update(Ordering::Acquire, Ordering::Relaxed, |current| {
+                    (current < PER_CHAT_UPDATES).then_some(current + 1)
+                })
+                .is_ok();
+            if acquired {
+                return ChatPermit { state: self };
+            }
+            notified.await;
+        }
     }
 
     fn is_quiet(&self, idle: Duration, now: u64) -> bool {
@@ -135,33 +252,133 @@ impl ChatState {
         self.logs.lock().unwrap().is_empty()
             && self.temp_media.lock().unwrap().is_empty()
             && self.captchas.lock().unwrap().is_empty()
-            && self.pending_numbers.lock().unwrap().is_empty()
             && self.counts.lock().unwrap().is_empty()
             && self.tallies.lock().unwrap().is_empty()
+    }
+
+    pub fn remember_post(&self, id: i32) {
+        let mut roots = self.roots.lock().unwrap();
+        if !roots.contains_key(&id) && roots.len() >= ROOTS_MAX {
+            make_room(&mut roots, ROOTS_MAX, |(at, _)| *at);
+        }
+        roots.insert(id, (Instant::now(), Root::Post));
+    }
+
+    pub fn root_known(&self, root: i32) -> Option<bool> {
+        match self.roots.lock().unwrap().get(&root) {
+            Some((_, Root::Post)) => Some(true),
+            Some((_, Root::NotPost)) => Some(false),
+            Some((_, Root::Pending(_))) | None => None,
+        }
+    }
+
+    pub fn claim_root(&self, root: i32, waiting: Queued) -> RootClaim {
+        let mut roots = self.roots.lock().unwrap();
+        match roots.get_mut(&root) {
+            Some((_, Root::Post)) => return RootClaim::Known(true),
+            Some((_, Root::NotPost)) => return RootClaim::Known(false),
+            Some((_, Root::Pending(queue))) => {
+                if queue.len() < ROOT_QUEUE_MAX {
+                    queue.push(waiting);
+                }
+                return RootClaim::Waiting;
+            }
+            None => {}
+        }
+        if roots.len() >= ROOTS_MAX {
+            make_room(&mut roots, ROOTS_MAX, |(at, _)| *at);
+        }
+        roots.insert(root, (Instant::now(), Root::Pending(vec![waiting])));
+        RootClaim::Mine
+    }
+
+    pub fn settle_root(&self, root: i32, post: bool) -> Vec<Queued> {
+        let mut roots = self.roots.lock().unwrap();
+        if !roots.contains_key(&root) && roots.len() >= ROOTS_MAX {
+            make_room(&mut roots, ROOTS_MAX, |(at, _)| *at);
+        }
+        let settled = if post { Root::Post } else { Root::NotPost };
+        match roots.insert(root, (Instant::now(), settled)) {
+            Some((_, Root::Pending(queue))) => queue,
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn forget_root(&self, root: i32) {
+        self.roots.lock().unwrap().remove(&root);
     }
 }
 
 #[derive(Default)]
-struct Dirty {
-    logs: std::sync::Mutex<Vec<i64>>,
-    media: std::sync::Mutex<Vec<i64>>,
+struct DirtyList(std::sync::Mutex<HashSet<i64>>);
 
-    stats: std::sync::Mutex<Vec<i64>>,
+#[derive(Default)]
+struct Dirty {
+    logs: DirtyList,
+    media: DirtyList,
+
+    stats: DirtyList,
 }
 
 impl Dirty {
-    fn mark(list: &std::sync::Mutex<Vec<i64>>, chat: i64) {
-        list.lock().unwrap().push(chat);
+    fn mark(list: &DirtyList, chat: i64) {
+        list.0.lock().unwrap().insert(chat);
     }
 
-    fn drain(list: &std::sync::Mutex<Vec<i64>>) -> Vec<i64> {
-        std::mem::take(&mut *list.lock().unwrap())
+    fn take(list: &DirtyList, limit: usize) -> Vec<i64> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut dirty = list.0.lock().unwrap();
+        let selected: Vec<i64> = dirty.iter().copied().take(limit).collect();
+        for chat in &selected {
+            dirty.remove(chat);
+        }
+        selected
     }
+
+    #[cfg(test)]
+    fn drain(list: &DirtyList) -> Vec<i64> {
+        let count = list.0.lock().unwrap().len();
+        Self::take(list, count)
+    }
+}
+
+type LoadedFilters = RwLock<HashMap<i64, (Instant, Arc<Vec<imgfilter::Filter>>)>>;
+type VoiceVerdict = (Instant, bool, Option<Arc<str>>);
+type FilteredVoice = (Instant, i64, Option<i64>, String);
+type CachedVerdict = (Instant, nsfw::Judgement, bool);
+type CachedMargins = (Instant, [f32; CONCEPT_SLOTS], bool);
+type CachedCustom = (Instant, f32, bool);
+
+#[derive(Clone, Copy)]
+pub struct CapacitySnapshot {
+    pub runtime_chats: usize,
+    pub settings_chats: usize,
+    pub settings_rows: usize,
+    pub settings_bytes: usize,
+    pub user_chats: usize,
+    pub dirty_logs: usize,
+    pub dirty_media: usize,
+    pub dirty_stats: usize,
+    pub pending_writes: usize,
+    pub pending_drops: usize,
+    pub deferred: usize,
+    pub pending_admins: usize,
+    pub deleted: usize,
+    pub verdicts: usize,
+    pub voice_verdicts: usize,
+    pub filtered_voices: usize,
+    pub outbound_active: usize,
+    pub outbound_waiting: usize,
 }
 
 pub struct Ctx {
     pub client: Client,
     pub settings: Arc<Settings>,
+    max_runtime_chats: usize,
+
+    allowed_chats: Option<Arc<HashSet<i64>>>,
 
     chats: RwLock<HashMap<i64, Arc<ChatState>>>,
 
@@ -188,33 +405,208 @@ pub struct Ctx {
 
     pending_writes: std::sync::Mutex<Vec<(i64, i32, i64)>>,
 
+    pending_drops: std::sync::Mutex<Vec<(i64, i32)>>,
+
+    deferred_deletes: std::sync::Mutex<BinaryHeap<DeferredEntry>>,
+    next_deferred: AtomicU64,
+
     last_armed: AtomicU64,
+
+    pending_numbers: std::sync::Mutex<PendingNumbers>,
 
     bios: RwLock<HashMap<i64, (Instant, bool)>>,
 
-    bio_fetch: OnceLock<tokio::sync::Semaphore>,
+    bio_fetch: OnceLock<Arc<tokio::sync::Semaphore>>,
 
-    bot_sweeps: OnceLock<tokio::sync::Semaphore>,
+    bot_sweeps: OnceLock<Arc<tokio::sync::Semaphore>>,
 
-    verdicts: RwLock<HashMap<i64, (Instant, f32, bool, bool)>>,
+    comment_lookups: OnceLock<Arc<tokio::sync::Semaphore>>,
+
+    cleaner_joins: OnceLock<Arc<tokio::sync::Semaphore>>,
+
+    tag_runs: OnceLock<Arc<tokio::sync::Semaphore>>,
+
+    verdicts: RwLock<HashMap<i64, CachedVerdict>>,
+
+    voice_verdicts: RwLock<HashMap<(i64, u64), VoiceVerdict>>,
+
+    filtered_voices: RwLock<HashMap<u64, FilteredVoice>>,
+
+    voice_pool: OnceLock<Arc<voicemonitor::VoicePool>>,
+
+    voice_jobs: OnceLock<Arc<tokio::sync::Semaphore>>,
 
     nsfw_slots: OnceLock<Arc<tokio::sync::Semaphore>>,
 
+    nsfw_tasks: OnceLock<Arc<tokio::sync::Semaphore>>,
+
     nsfw_fetches: OnceLock<tokio::sync::Semaphore>,
 
-    margins: RwLock<HashMap<i64, (Instant, [f32; CONCEPT_SLOTS])>>,
+    margins: RwLock<HashMap<i64, CachedMargins>>,
 
     adverts: RwLock<HashMap<i64, (Instant, Option<&'static str>)>>,
+
+    image_filters: LoadedFilters,
+
+    custom: RwLock<HashMap<(i64, u64), CachedCustom>>,
+
+    intents: RwLock<HashMap<u64, (Instant, f32)>>,
+
+    intent_tasks: OnceLock<Arc<tokio::sync::Semaphore>>,
+
+    samples: RwLock<Vec<Box<[f32]>>>,
+    sample_at: AtomicUsize,
+
+    samples_dirty: std::sync::atomic::AtomicBool,
 }
 
 pub const CONCEPT_SLOTS: usize = 8;
 
+fn cache_source_matches(animated: bool, from_animation: bool) -> bool {
+    !animated || from_animation
+}
+
 pub const NOTICE_EVERY: Duration = Duration::from_secs(120);
+
+mod kind {
+    pub const FILTER_NOTICE: u8 = 0;
+    pub const REPORT: u8 = 1;
+
+    pub const LOCK_NOTICE: u8 = 2;
+
+    pub const GATE_NOTICE: u8 = 3;
+
+    pub const SIGHTING: u8 = 4;
+
+    pub const MODERATION: u8 = 5;
+    pub const FLOOD_NOTICE: u8 = 6;
+
+    pub const BOT_REMOVAL: u8 = 7;
+
+    pub const AUTOCONFIG: u8 = 8;
+
+    pub const INSTALL_NOTICE: u8 = 9;
+
+    pub const CLEANER_INSTALL: u8 = 10;
+
+    pub const COMMENT_SIGN: u8 = 11;
+
+    #[cfg(test)]
+    pub const ALL: &[(&str, u8)] = &[
+        ("FILTER_NOTICE", FILTER_NOTICE),
+        ("REPORT", REPORT),
+        ("LOCK_NOTICE", LOCK_NOTICE),
+        ("GATE_NOTICE", GATE_NOTICE),
+        ("SIGHTING", SIGHTING),
+        ("MODERATION", MODERATION),
+        ("FLOOD_NOTICE", FLOOD_NOTICE),
+        ("BOT_REMOVAL", BOT_REMOVAL),
+        ("AUTOCONFIG", AUTOCONFIG),
+        ("INSTALL_NOTICE", INSTALL_NOTICE),
+        ("CLEANER_INSTALL", CLEANER_INSTALL),
+        ("COMMENT_SIGN", COMMENT_SIGN),
+    ];
+}
 
 const DELETED_TTL: Duration = Duration::from_secs(3600);
 const DELETED_MAX: usize = 5_000;
+const DEFERRED_DELETE_MAX: usize = 100_000;
+const PENDING_WRITE_MAX: usize = 200_000;
+const PENDING_ADMIN_MAX: usize = 10_000;
 
-type PendingNumber = (Instant, &'static str);
+pub(super) enum DeferredAction {
+    Delete {
+        chat: i64,
+        message: i32,
+    },
+    Captcha {
+        chat: i64,
+        user: i64,
+        target: PeerRef,
+    },
+}
+
+struct DeferredEntry {
+    due: Instant,
+    sequence: u64,
+    action: DeferredAction,
+}
+
+impl PartialEq for DeferredEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.due == other.due && self.sequence == other.sequence
+    }
+}
+
+impl Eq for DeferredEntry {}
+
+impl Ord for DeferredEntry {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        other
+            .due
+            .cmp(&self.due)
+            .then_with(|| other.sequence.cmp(&self.sequence))
+    }
+}
+
+impl PartialOrd for DeferredEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+struct PendingNumber {
+    armed: Instant,
+    target_chat: i64,
+    setting: &'static str,
+}
+
+#[derive(Default)]
+struct PendingNumbers {
+    entries: HashMap<(i64, i64), PendingNumber>,
+}
+
+impl PendingNumbers {
+    fn arm(&mut self, input_chat: i64, user: i64, target_chat: i64, setting: &'static str) {
+        self.entries
+            .retain(|_, pending| pending.armed.elapsed() < PENDING_NUMBER_TTL);
+        make_room(&mut self.entries, PENDING_NUMBERS_MAX, |pending| pending.armed);
+        self.entries.insert(
+            (input_chat, user),
+            PendingNumber {
+                armed: Instant::now(),
+                target_chat,
+                setting,
+            },
+        );
+    }
+
+    fn expected(&self, input_chat: i64, user: i64) -> Option<(i64, &'static str)> {
+        let pending = self.entries.get(&(input_chat, user))?;
+        (pending.armed.elapsed() < PENDING_NUMBER_TTL)
+            .then_some((pending.target_chat, pending.setting))
+    }
+
+    fn take(
+        &mut self,
+        input_chat: i64,
+        user: i64,
+        target_chat: i64,
+        setting: &'static str,
+    ) -> bool {
+        let Some(pending) = self.entries.get(&(input_chat, user)) else {
+            return false;
+        };
+        if pending.target_chat != target_chat || pending.setting != setting {
+            return false;
+        }
+        let pending = self
+            .entries
+            .remove(&(input_chat, user))
+            .expect("pending number was checked above");
+        pending.armed.elapsed() < PENDING_NUMBER_TTL
+    }
+}
 
 type Tallies = HashMap<(i64, &'static str), u64>;
 
@@ -226,15 +618,57 @@ const PENDING_PASSWORD_TTL: Duration = Duration::from_secs(300);
 
 const PENDING_NUMBER_TTL: Duration = Duration::from_secs(120);
 
+const PENDING_NUMBERS_MAX: usize = 20_000;
+
 const ARMED_WINDOW: u64 = 130_000;
 
 const ADMIN_CACHE_TTL: Duration = Duration::from_secs(1800);
+const ADMIN_CACHE_MAX: usize = 20_000;
 
 const PER_CHAT_UPDATES: usize = 8;
 
 const ADDS_TTL: Duration = Duration::from_secs(300);
 
 const PER_CHAT_MAX: usize = 20_000;
+
+const FLUSH_CHAT_BATCH: usize = 512;
+const STATS_ROWS_PER_FLUSH: usize = 50_000;
+const LOG_ENTRIES_PER_FLUSH: usize = 50_000;
+const MEDIA_IDS_PER_FLUSH: usize = 50_000;
+
+fn make_room<K, V, F>(map: &mut HashMap<K, V>, limit: usize, at: F)
+where
+    K: Clone + Eq + Hash,
+    F: Fn(&V) -> Instant,
+{
+    if limit == 0 {
+        map.clear();
+        return;
+    }
+    while map.len() >= limit {
+        let Some(oldest) = map
+            .iter()
+            .min_by_key(|(_, value)| at(value))
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        map.remove(&oldest);
+    }
+}
+
+const EVENTS_PER_SUBJECT_MAX: usize = 4_096;
+
+fn record_event(times: &mut VecDeque<Instant>, window: Duration) -> usize {
+    times.retain(|time| time.elapsed() < window);
+    while times.len() >= EVENTS_PER_SUBJECT_MAX {
+        times.pop_front();
+    }
+    times.push_back(Instant::now());
+    times.len()
+}
+
+const SAID_MAX: usize = 5_000;
 const CAPTCHA_TTL: Duration = Duration::from_secs(900);
 
 const BIO_TTL: Duration = Duration::from_secs(600);
@@ -243,17 +677,36 @@ const BIO_MAX: usize = 10_000;
 
 const BIO_FETCHES: usize = 4;
 
+const COMMENT_LOOKUPS: usize = 4;
+
 const VERDICT_TTL: Duration = Duration::from_secs(86_400);
 
 const VERDICT_MAX: usize = 50_000;
+const VOICE_CACHE_TTL: Duration = Duration::from_secs(3_600);
+const VOICE_CACHE_MAX: usize = 4_096;
+const VOICE_TEXT_TTL: Duration = Duration::from_secs(900);
+const VOICE_TEXT_CACHE_MAX: usize = 4_096;
 
-const NSFW_SLOTS: usize = 2;
+const FILTERS_TTL: Duration = Duration::from_secs(1_800);
+
+const SAMPLE_CAP: usize = 1_024;
+
+const DEFAULT_NSFW_SLOTS: usize = 2;
 
 const NSFW_FETCHES: usize = 4;
+
+const NSFW_TASKS: usize = 32;
+
+const INTENT_TASKS: usize = 16;
 
 pub const FLEET_CONCURRENCY: usize = 8;
 
 pub const FLEET_CAMPAIGNS: usize = 4;
+
+pub fn recent_minutes(now: u32) -> [String; 3] {
+    let now = now % 1_440;
+    [now, (now + 1_439) % 1_440, (now + 1_438) % 1_440].map(|minute| minute.to_string())
+}
 
 pub async fn bounded<T, F>(items: Vec<T>, cap: usize, run: impl Fn(T) -> F)
 where
@@ -263,10 +716,28 @@ where
     let permits = Arc::new(tokio::sync::Semaphore::new(cap));
     let mut tasks = tokio::task::JoinSet::new();
     for item in items {
-        let permit = Arc::clone(&permits)
-            .acquire_owned()
-            .await
-            .expect("the fleet semaphore is never closed");
+        while let Some(done) = tasks.try_join_next() {
+            if let Err(e) = done {
+                eprintln!("fleet job task failed: {e}");
+            }
+        }
+
+        let permit = loop {
+            let acquire = Arc::clone(&permits).acquire_owned();
+            if tasks.is_empty() {
+                break acquire.await.expect("the fleet semaphore is never closed");
+            }
+            tokio::select! {
+                permit = acquire => {
+                    break permit.expect("the fleet semaphore is never closed");
+                }
+                done = tasks.join_next() => {
+                    if let Some(Err(e)) = done {
+                        eprintln!("fleet job task failed: {e}");
+                    }
+                }
+            }
+        };
         let work = run(item);
         tasks.spawn(async move {
             let _permit = permit;
@@ -281,10 +752,17 @@ where
 }
 
 impl Ctx {
-    pub fn new(client: Client, settings: Arc<Settings>) -> Self {
+    pub fn new_with_allowed_chats(
+        client: Client,
+        settings: Arc<Settings>,
+        max_runtime_chats: usize,
+        allowed_chats: Option<Arc<HashSet<i64>>>,
+    ) -> Self {
         Self {
             client,
             settings,
+            max_runtime_chats,
+            allowed_chats,
             chats: RwLock::new(HashMap::new()),
             dirty: Arc::default(),
             deleted: RwLock::new(HashMap::new()),
@@ -298,16 +776,41 @@ impl Ctx {
             pending_password: RwLock::new(None),
             join_refs: RwLock::new(HashMap::new()),
             pending_writes: std::sync::Mutex::new(Vec::new()),
+            pending_drops: std::sync::Mutex::new(Vec::new()),
+            deferred_deletes: std::sync::Mutex::new(BinaryHeap::new()),
+            next_deferred: AtomicU64::new(0),
             last_armed: AtomicU64::new(0),
+            pending_numbers: std::sync::Mutex::new(PendingNumbers::default()),
             bios: RwLock::new(HashMap::new()),
             bio_fetch: OnceLock::new(),
             bot_sweeps: OnceLock::new(),
+            comment_lookups: OnceLock::new(),
+            cleaner_joins: OnceLock::new(),
+            tag_runs: OnceLock::new(),
             verdicts: RwLock::new(HashMap::new()),
+            voice_verdicts: RwLock::new(HashMap::new()),
+            filtered_voices: RwLock::new(HashMap::new()),
+            voice_pool: OnceLock::new(),
+            voice_jobs: OnceLock::new(),
             nsfw_slots: OnceLock::new(),
+            nsfw_tasks: OnceLock::new(),
             nsfw_fetches: OnceLock::new(),
             margins: RwLock::new(HashMap::new()),
             adverts: RwLock::new(HashMap::new()),
+            image_filters: RwLock::new(HashMap::new()),
+            custom: RwLock::new(HashMap::new()),
+            intents: RwLock::new(HashMap::new()),
+            intent_tasks: OnceLock::new(),
+            samples: RwLock::new(Vec::new()),
+            sample_at: AtomicUsize::new(0),
+            samples_dirty: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub fn owns_chat(&self, chat: i64) -> bool {
+        self.allowed_chats
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(&chat))
     }
 
     pub fn state(&self, chat: i64) -> Arc<ChatState> {
@@ -315,19 +818,37 @@ impl Ctx {
             return Arc::clone(state);
         }
         let dirty = Arc::clone(&self.dirty);
-        Arc::clone(
-            self.chats
-                .write()
-                .unwrap()
-                .entry(chat)
-                .or_insert_with(|| {
-                    Arc::new(ChatState {
-                        chat,
-                        dirty,
-                        ..Default::default()
-                    })
-                }),
-        )
+        Arc::clone(self.chats.write().unwrap().entry(chat).or_insert_with(|| {
+            Arc::new(ChatState {
+                chat,
+                dirty,
+                ..Default::default()
+            })
+        }))
+    }
+
+    pub fn try_state(&self, chat: i64) -> Option<Arc<ChatState>> {
+        if !self.owns_chat(chat) {
+            return None;
+        }
+        if let Some(state) = self.chats.read().unwrap().get(&chat) {
+            return Some(Arc::clone(state));
+        }
+        let dirty = Arc::clone(&self.dirty);
+        let mut chats = self.chats.write().unwrap();
+        if let Some(state) = chats.get(&chat) {
+            return Some(Arc::clone(state));
+        }
+        if chats.len() >= self.max_runtime_chats {
+            return None;
+        }
+        Some(Arc::clone(chats.entry(chat).or_insert_with(|| {
+            Arc::new(ChatState {
+                chat,
+                dirty,
+                ..Default::default()
+            })
+        })))
     }
 
     fn peek(&self, chat: i64) -> Option<Arc<ChatState>> {
@@ -346,6 +867,30 @@ impl Ctx {
         self.me_id.store(user, Ordering::Relaxed);
     }
 
+    pub fn capacity_snapshot(&self) -> CapacitySnapshot {
+        let (outbound_active, outbound_waiting) = self.client.outbound_snapshot();
+        CapacitySnapshot {
+            runtime_chats: self.chats.read().unwrap().len(),
+            settings_chats: self.settings.chat_count(),
+            settings_rows: self.settings.setting_count(),
+            settings_bytes: self.settings.setting_bytes(),
+            user_chats: self.user_chats.read().unwrap().len(),
+            dirty_logs: self.dirty.logs.0.lock().unwrap().len(),
+            dirty_media: self.dirty.media.0.lock().unwrap().len(),
+            dirty_stats: self.dirty.stats.0.lock().unwrap().len(),
+            pending_writes: self.pending_writes.lock().unwrap().len(),
+            pending_drops: self.pending_drops.lock().unwrap().len(),
+            deferred: self.deferred_deletes.lock().unwrap().len(),
+            pending_admins: self.pending_admins.read().unwrap().len(),
+            deleted: self.deleted.read().unwrap().len(),
+            verdicts: self.verdicts.read().unwrap().len(),
+            voice_verdicts: self.voice_verdicts.read().unwrap().len(),
+            filtered_voices: self.filtered_voices.read().unwrap().len(),
+            outbound_active,
+            outbound_waiting,
+        }
+    }
+
     pub fn channel_member(&self, chat: i64, user: i64) -> bool {
         self.peek(chat).is_some_and(|state| {
             state
@@ -358,10 +903,13 @@ impl Ctx {
     }
 
     pub fn remember_member(&self, chat: i64, user: i64) {
-        let state = self.state(chat);
+        let Some(state) = self.try_state(chat) else {
+            return;
+        };
         let mut members = state.members.lock().unwrap();
         if members.len() >= PER_CHAT_MAX {
             members.retain(|_, seen| seen.elapsed() < MEMBER_TRUST);
+            make_room(&mut members, PER_CHAT_MAX, |seen| *seen);
         }
         members.insert(user, Instant::now());
     }
@@ -381,62 +929,166 @@ impl Ctx {
         }
         if bios.len() >= BIO_MAX {
             bios.retain(|_, (at, _)| at.elapsed() < BIO_TTL);
+            make_room(&mut bios, BIO_MAX, |(at, _)| *at);
         }
         bios.insert(user, (Instant::now(), false));
         None
     }
 
     pub fn remember_bio(&self, user: i64, has_link: bool) {
-        self.bios
-            .write()
-            .unwrap()
-            .insert(user, (Instant::now(), has_link));
+        let mut bios = self.bios.write().unwrap();
+        if !bios.contains_key(&user) && bios.len() >= BIO_MAX {
+            bios.retain(|_, (at, _)| at.elapsed() < BIO_TTL);
+            make_room(&mut bios, BIO_MAX, |(at, _)| *at);
+        }
+        bios.insert(user, (Instant::now(), has_link));
     }
 
     pub fn forget_bio(&self, user: i64) {
         self.bios.write().unwrap().remove(&user);
     }
 
-    pub async fn bio_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
-        self.bio_fetch
-            .get_or_init(|| tokio::sync::Semaphore::new(BIO_FETCHES))
-            .acquire()
-            .await
-            .expect("the bio semaphore is never closed")
+    pub async fn bio_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(
+            self.bio_fetch
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(BIO_FETCHES))),
+        )
+        .acquire_owned()
+        .await
+        .expect("the bio semaphore is never closed")
     }
 
-    pub fn known_verdict(&self, file: i64) -> Option<(f32, bool, bool)> {
+    pub async fn comment_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(
+            self.comment_lookups
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(COMMENT_LOOKUPS))),
+        )
+        .acquire_owned()
+        .await
+        .expect("the comment semaphore is never closed")
+    }
+
+    pub fn known_verdict(&self, file: i64, animated: bool) -> Option<nsfw::Judgement> {
         let verdicts = self.verdicts.read().unwrap();
         verdicts
             .get(&file)
-            .filter(|(at, ..)| at.elapsed() < VERDICT_TTL)
-            .map(|(_, score, innocent, explicit)| (*score, *innocent, *explicit))
+            .filter(|(at, _, from_animation)| {
+                at.elapsed() < VERDICT_TTL && cache_source_matches(animated, *from_animation)
+            })
+            .map(|(_, judged, _)| *judged)
     }
 
-    pub fn remember_verdict(&self, file: i64, score: f32, innocent: bool, explicit: bool) {
+    pub fn remember_verdict(&self, file: i64, judged: nsfw::Judgement, from_animation: bool) {
         let mut verdicts = self.verdicts.write().unwrap();
-        if verdicts.len() >= VERDICT_MAX {
+        if !verdicts.contains_key(&file) && verdicts.len() >= VERDICT_MAX {
             verdicts.retain(|_, (at, ..)| at.elapsed() < VERDICT_TTL);
+            make_room(&mut verdicts, VERDICT_MAX, |(at, ..)| *at);
         }
-        verdicts.insert(file, (Instant::now(), score, innocent, explicit));
+        verdicts.insert(file, (Instant::now(), judged, from_animation));
+    }
+
+    pub fn known_voice(&self, file: i64, profile: u64) -> Option<bool> {
+        self.voice_verdicts
+            .read()
+            .unwrap()
+            .get(&(file, profile))
+            .filter(|(at, _, _)| at.elapsed() < VOICE_CACHE_TTL)
+            .map(|(_, bad, _)| *bad)
+    }
+
+    pub fn known_voice_text(&self, file: i64, profile: u64) -> Option<String> {
+        self.voice_verdicts
+            .read()
+            .unwrap()
+            .get(&(file, profile))
+            .filter(|(at, _, _)| at.elapsed() < VOICE_CACHE_TTL)
+            .and_then(|(_, _, text)| text.as_ref().map(|text| text.to_string()))
+    }
+
+    pub fn remember_voice(&self, file: i64, profile: u64, bad: bool, text: Option<String>) {
+        let mut verdicts = self.voice_verdicts.write().unwrap();
+        if !verdicts.contains_key(&(file, profile)) && verdicts.len() >= VOICE_CACHE_MAX {
+            verdicts.retain(|_, (at, _, _)| at.elapsed() < VOICE_CACHE_TTL);
+            make_room(&mut verdicts, VOICE_CACHE_MAX, |(at, _, _)| *at);
+        }
+        verdicts.insert(
+            (file, profile),
+            (Instant::now(), bad, text.map(Arc::<str>::from)),
+        );
+    }
+
+    pub fn remember_filtered_voice(&self, chat: i64, speaker: Option<i64>, text: String) -> u64 {
+        let key = self.next_deleted_key.fetch_add(1, Ordering::Relaxed);
+        let mut voices = self.filtered_voices.write().unwrap();
+        if voices.len() >= VOICE_TEXT_CACHE_MAX {
+            voices.retain(|_, (at, ..)| at.elapsed() < VOICE_TEXT_TTL);
+            make_room(&mut voices, VOICE_TEXT_CACHE_MAX, |(at, ..)| *at);
+        }
+        voices.insert(key, (Instant::now(), chat, speaker, text));
+        key
+    }
+
+    pub fn filtered_voice(&self, key: u64) -> Option<(i64, Option<i64>, String)> {
+        let voices = self.filtered_voices.read().unwrap();
+        voices
+            .get(&key)
+            .filter(|(at, ..)| at.elapsed() < VOICE_TEXT_TTL)
+            .map(|(_, chat, speaker, text)| (*chat, *speaker, text.clone()))
+    }
+
+    pub fn voice_pool(&self) -> Arc<voicemonitor::VoicePool> {
+        Arc::clone(
+            self.voice_pool
+                .get_or_init(|| Arc::new(voicemonitor::VoicePool::new())),
+        )
+    }
+
+    pub async fn voice_job_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(self.voice_jobs.get_or_init(|| {
+            let jobs = std::env::var("VOICE_ADMISSION")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(32)
+                .clamp(1, 1_024);
+            Arc::new(tokio::sync::Semaphore::new(jobs))
+        }))
+        .acquire_owned()
+        .await
+        .expect("the voice admission semaphore is never closed")
     }
 
     pub async fn nsfw_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
-        Arc::clone(
-            self.nsfw_slots
-                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(NSFW_SLOTS))),
-        )
+        Arc::clone(self.nsfw_slots.get_or_init(|| {
+            let slots = std::env::var("NSFW_SLOTS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_NSFW_SLOTS)
+                .clamp(1, 256);
+            Arc::new(tokio::sync::Semaphore::new(slots))
+        }))
         .acquire_owned()
         .await
         .expect("the nsfw semaphore is never closed")
     }
 
-    pub fn known_margins(&self, file: i64) -> Option<[f32; CONCEPT_SLOTS]> {
+    pub async fn nsfw_task_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(
+            self.nsfw_tasks
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(NSFW_TASKS))),
+        )
+        .acquire_owned()
+        .await
+        .expect("the nsfw task semaphore is never closed")
+    }
+
+    pub fn known_margins(&self, file: i64, animated: bool) -> Option<[f32; CONCEPT_SLOTS]> {
         let margins = self.margins.read().unwrap();
         margins
             .get(&file)
-            .filter(|(at, _)| at.elapsed() < VERDICT_TTL)
-            .map(|(_, all)| *all)
+            .filter(|(at, _, from_animation)| {
+                at.elapsed() < VERDICT_TTL && cache_source_matches(animated, *from_animation)
+            })
+            .map(|(_, all, _)| *all)
     }
 
     pub fn known_advert(&self, file: i64) -> Option<Option<&'static str>> {
@@ -449,18 +1101,176 @@ impl Ctx {
 
     pub fn remember_advert(&self, file: i64, why: Option<&'static str>) {
         let mut adverts = self.adverts.write().unwrap();
-        if adverts.len() >= VERDICT_MAX {
+        if !adverts.contains_key(&file) && adverts.len() >= VERDICT_MAX {
             adverts.retain(|_, (at, _)| at.elapsed() < VERDICT_TTL);
+            make_room(&mut adverts, VERDICT_MAX, |(at, _)| *at);
         }
         adverts.insert(file, (Instant::now(), why));
     }
 
-    pub fn remember_margins(&self, file: i64, all: [f32; CONCEPT_SLOTS]) {
-        let mut margins = self.margins.write().unwrap();
-        if margins.len() >= VERDICT_MAX {
-            margins.retain(|_, (at, _)| at.elapsed() < VERDICT_TTL);
+    pub async fn image_filters(&self, chat: i64) -> Arc<Vec<imgfilter::Filter>> {
+        {
+            let cache = self.image_filters.read().unwrap();
+            if let Some((at, filters)) = cache.get(&chat)
+                && at.elapsed() < FILTERS_TTL
+            {
+                return Arc::clone(filters);
+            }
         }
-        margins.insert(file, (Instant::now(), all));
+        let filters: Vec<imgfilter::Filter> = self
+            .settings
+            .image_filters(chat)
+            .await
+            .into_iter()
+            .filter(|row| row.vector.len() == imgfilter::DIM)
+            .map(|row| imgfilter::Filter {
+                print: imgfilter::fingerprint(&row.vector, row.scale),
+
+                vector: vision::unit(&imgfilter::dequantize(&row.vector, row.scale)),
+                name: row.name,
+
+                cut: if row.samples == 0 {
+                    imgfilter::FIXED_MODEL_CUT
+                } else {
+                    imgfilter::FIXED_EXAMPLE_CUT
+                },
+                live: true,
+            })
+            .collect();
+        let filters = Arc::new(filters);
+        let mut cache = self.image_filters.write().unwrap();
+        if cache.len() >= PER_CHAT_MAX {
+            cache.retain(|_, (at, _)| at.elapsed() < FILTERS_TTL);
+            make_room(&mut cache, PER_CHAT_MAX, |(at, _)| *at);
+        }
+        cache.insert(chat, (Instant::now(), Arc::clone(&filters)));
+        filters
+    }
+
+    pub fn forget_image_filters(&self, chat: i64) {
+        self.image_filters.write().unwrap().remove(&chat);
+    }
+
+    pub fn known_intent(&self, key: u64) -> Option<f32> {
+        let intents = self.intents.read().unwrap();
+        intents
+            .get(&key)
+            .filter(|(at, _)| at.elapsed() < VERDICT_TTL)
+            .map(|(_, margin)| *margin)
+    }
+
+    pub fn remember_intent(&self, key: u64, margin: f32) {
+        let mut intents = self.intents.write().unwrap();
+        if !intents.contains_key(&key) && intents.len() >= VERDICT_MAX {
+            intents.retain(|_, (at, _)| at.elapsed() < VERDICT_TTL);
+            make_room(&mut intents, VERDICT_MAX, |(at, _)| *at);
+        }
+        intents.insert(key, (Instant::now(), margin));
+    }
+
+    pub async fn intent_task_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(self.intent_tasks.get_or_init(|| {
+            let tasks = std::env::var("INTENT_TASKS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(INTENT_TASKS)
+                .clamp(1, 1_024);
+            Arc::new(tokio::sync::Semaphore::new(tasks))
+        }))
+        .acquire_owned()
+        .await
+        .expect("the intent task semaphore is never closed")
+    }
+
+    pub fn known_custom(&self, file: i64, print: u64, animated: bool) -> Option<f32> {
+        let custom = self.custom.read().unwrap();
+        custom
+            .get(&(file, print))
+            .filter(|(at, _, from_animation)| {
+                at.elapsed() < VERDICT_TTL && cache_source_matches(animated, *from_animation)
+            })
+            .map(|(_, margin, _)| *margin)
+    }
+
+    pub fn remember_custom(&self, file: i64, print: u64, margin: f32, from_animation: bool) {
+        let mut custom = self.custom.write().unwrap();
+        if !custom.contains_key(&(file, print)) && custom.len() >= VERDICT_MAX {
+            custom.retain(|_, (at, ..)| at.elapsed() < VERDICT_TTL);
+            make_room(&mut custom, VERDICT_MAX, |(at, ..)| *at);
+        }
+        custom.insert((file, print), (Instant::now(), margin, from_animation));
+    }
+
+    pub fn remember_sample(&self, embedding: &[f32]) {
+        if embedding.len() != imgfilter::DIM {
+            return;
+        }
+        let at = self.sample_at.fetch_add(1, Ordering::Relaxed) % SAMPLE_CAP;
+        let mut samples = self.samples.write().unwrap();
+        match samples.len() < SAMPLE_CAP {
+            true => samples.push(embedding.to_vec().into_boxed_slice()),
+            false => samples[at] = embedding.to_vec().into_boxed_slice(),
+        }
+        self.samples_dirty
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub async fn flush_samples(&self) {
+        if !self
+            .samples_dirty
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let samples = self.samples();
+        if samples.is_empty() {
+            return;
+        }
+        let flat: Vec<f32> = samples.iter().flat_map(|s| s.iter().copied()).collect();
+        let (bytes, scale) = imgfilter::quantize(&flat);
+        self.settings
+            .save_samples(&bytes, scale, samples.len() as u32)
+            .await;
+    }
+
+    pub async fn load_samples(&self) {
+        let Some((bytes, scale, count)) = self.settings.load_samples().await else {
+            return;
+        };
+        let count = (count as usize).min(SAMPLE_CAP);
+        if count == 0 || bytes.len() != count * imgfilter::DIM {
+            if !bytes.is_empty() {
+                eprintln!(
+                    "calibration: stored reservoir is {} bytes for {count} samples, ignoring it",
+                    bytes.len()
+                );
+            }
+            return;
+        }
+        let flat = imgfilter::dequantize(&bytes, scale);
+        let mut samples = self.samples.write().unwrap();
+        *samples = flat
+            .as_chunks::<{ imgfilter::DIM }>()
+            .0
+            .iter()
+            .map(|chunk| chunk.to_vec().into_boxed_slice())
+            .collect();
+        self.sample_at
+            .store(samples.len() % SAMPLE_CAP, Ordering::Relaxed);
+        println!("calibration: {} samples restored", samples.len());
+    }
+
+    pub fn samples(&self) -> Vec<Box<[f32]>> {
+        self.samples.read().unwrap().clone()
+    }
+
+    pub fn remember_margins(&self, file: i64, all: [f32; CONCEPT_SLOTS], from_animation: bool) {
+        let mut margins = self.margins.write().unwrap();
+        if !margins.contains_key(&file) && margins.len() >= VERDICT_MAX {
+            margins.retain(|_, (at, ..)| at.elapsed() < VERDICT_TTL);
+            make_room(&mut margins, VERDICT_MAX, |(at, ..)| *at);
+        }
+        margins.insert(file, (Instant::now(), all, from_animation));
     }
 
     pub async fn nsfw_fetch(&self) -> tokio::sync::SemaphorePermit<'_> {
@@ -471,12 +1281,30 @@ impl Ctx {
             .expect("the nsfw fetch semaphore is never closed")
     }
 
-    pub async fn sweep_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
-        self.bot_sweeps
-            .get_or_init(|| tokio::sync::Semaphore::new(FLEET_CAMPAIGNS))
-            .acquire()
+    pub fn tag_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        Arc::clone(
+            self.tag_runs
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(FLEET_CONCURRENCY))),
+        )
+        .try_acquire_owned()
+        .ok()
+    }
+
+    pub async fn sweep_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(
+            self.bot_sweeps
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(FLEET_CAMPAIGNS))),
+        )
+        .acquire_owned()
+        .await
+        .expect("the sweep semaphore is never closed")
+    }
+
+    pub async fn cleaner_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(self.cleaner_joins.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2))))
+            .acquire_owned()
             .await
-            .expect("the sweep semaphore is never closed")
+            .expect("the cleaner semaphore is never closed")
     }
 
     pub fn cached_adds(&self, chat: i64, user: i64) -> Option<u64> {
@@ -490,17 +1318,22 @@ impl Ctx {
     }
 
     pub fn remember_adds(&self, chat: i64, user: i64, added: u64) {
-        let state = self.state(chat);
+        let Some(state) = self.try_state(chat) else {
+            return;
+        };
         let mut adds = state.adds.lock().unwrap();
         if adds.len() >= PER_CHAT_MAX {
             adds.retain(|_, (at, _)| at.elapsed() < ADDS_TTL);
+            make_room(&mut adds, PER_CHAT_MAX, |(at, _)| *at);
         }
         adds.insert(user, (Instant::now(), added));
     }
 
     pub fn queue_log(&self, chat: i64, entry: String) {
         const MAX_PER_CHAT: usize = 200;
-        let state = self.state(chat);
+        let Some(state) = self.try_state(chat) else {
+            return;
+        };
         let mut entries = state.logs.lock().unwrap();
         let was_empty = entries.is_empty();
         if entries.len() >= MAX_PER_CHAT {
@@ -512,37 +1345,125 @@ impl Ctx {
         }
     }
 
+    pub fn remember_said(&self, chat: i64, user: i64, id: i32) {
+        if let Some(state) = self.try_state(chat) {
+            state.remember_said(user, id);
+        }
+    }
+
+    pub fn take_said(&self, chat: i64, user: i64) -> Vec<i32> {
+        self.peek(chat)
+            .map(|state| state.take_said(user))
+            .unwrap_or_default()
+    }
+
     pub fn queue_temp_media(&self, chat: i64, id: i32, due: Instant, due_at: i64) {
-        let state = self.state(chat);
+        let Some(state) = self.try_state(chat) else {
+            return;
+        };
         {
             let mut queue = state.temp_media.lock().unwrap();
             let was_empty = queue.is_empty();
-            tempmedia::queue(&mut queue, id, due);
+            let can_persist = tempmedia::queue(&mut queue, id, due)
+                .is_none_or(|dropped| self.remember_pending_drop(chat, dropped));
             if was_empty {
                 Dirty::mark(&self.dirty.media, chat);
             }
+            if !can_persist {
+                return;
+            }
         }
-        self.pending_writes.lock().unwrap().push((chat, id, due_at));
+        let mut writes = self.pending_writes.lock().unwrap();
+
+        if writes.len() < PENDING_WRITE_MAX {
+            writes.push((chat, id, due_at));
+        }
     }
 
     pub fn restore_temp_media(&self, chat: i64, id: i32, due: Instant) {
-        let state = self.state(chat);
+        let Some(state) = self.try_state(chat) else {
+            return;
+        };
         let mut queue = state.temp_media.lock().unwrap();
         let was_empty = queue.is_empty();
-        tempmedia::queue(&mut queue, id, due);
+        if let Some(dropped) = tempmedia::queue(&mut queue, id, due) {
+            self.remember_pending_drop(chat, dropped);
+        }
         if was_empty {
             Dirty::mark(&self.dirty.media, chat);
         }
+    }
+
+    fn remember_pending_drop(&self, chat: i64, id: i32) -> bool {
+        let mut drops = self.pending_drops.lock().unwrap();
+        if drops.len() < PENDING_WRITE_MAX {
+            drops.push((chat, id));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn retry_pending_drops(&self, rows: &[(i64, i32)]) {
+        let mut drops = self.pending_drops.lock().unwrap();
+        let room = PENDING_WRITE_MAX.saturating_sub(drops.len());
+        drops.extend(rows.iter().copied().take(room));
     }
 
     pub fn take_pending_writes(&self) -> Vec<(i64, i32, i64)> {
         std::mem::take(&mut *self.pending_writes.lock().unwrap())
     }
 
+    pub fn take_pending_drops(&self) -> Vec<(i64, i32)> {
+        std::mem::take(&mut *self.pending_drops.lock().unwrap())
+    }
+
+    pub fn schedule_delete(&self, chat: i64, message: i32, due: Instant) {
+        let mut queue = self.deferred_deletes.lock().unwrap();
+        if queue.len() >= DEFERRED_DELETE_MAX {
+            return;
+        }
+        let sequence = self.next_deferred.fetch_add(1, Ordering::Relaxed);
+        queue.push(DeferredEntry {
+            due,
+            sequence,
+            action: DeferredAction::Delete { chat, message },
+        });
+    }
+
+    pub fn schedule_captcha(&self, chat: i64, user: i64, target: PeerRef, due: Instant) {
+        let mut queue = self.deferred_deletes.lock().unwrap();
+        if queue.len() >= DEFERRED_DELETE_MAX {
+            return;
+        }
+        let sequence = self.next_deferred.fetch_add(1, Ordering::Relaxed);
+        queue.push(DeferredEntry {
+            due,
+            sequence,
+            action: DeferredAction::Captcha { chat, user, target },
+        });
+    }
+
+    pub fn take_due_actions(&self, limit: usize) -> Vec<DeferredAction> {
+        let now = Instant::now();
+        let mut queue = self.deferred_deletes.lock().unwrap();
+        let mut due = Vec::with_capacity(limit.min(queue.len()));
+        while due.len() < limit && queue.peek().is_some_and(|entry| entry.due <= now) {
+            due.push(queue.pop().expect("peeked deferred action").action);
+        }
+        due
+    }
+
     pub fn take_due_media(&self) -> Vec<(i64, Vec<i32>)> {
         let now = Instant::now();
         let mut ready = Vec::new();
-        for chat in Dirty::drain(&self.dirty.media) {
+        let mut remaining = MEDIA_IDS_PER_FLUSH;
+        let chats = Dirty::take(&self.dirty.media, FLUSH_CHAT_BATCH);
+        for chat in chats {
+            if remaining == 0 {
+                Dirty::mark(&self.dirty.media, chat);
+                continue;
+            }
             let Some(state) = self.peek(chat) else {
                 continue;
             };
@@ -553,14 +1474,17 @@ impl Ctx {
             }
             let due = {
                 let mut queue = state.temp_media.lock().unwrap();
-                let due = tempmedia::drain_due(&mut queue, now);
+                let due = tempmedia::drain_due_up_to(&mut queue, now, remaining);
 
                 if !queue.is_empty() {
                     Dirty::mark(&self.dirty.media, chat);
+                } else {
+                    queue.shrink_to_fit();
                 }
                 due
             };
             if !due.is_empty() {
+                remaining = remaining.saturating_sub(due.len());
                 ready.push((chat, due));
             }
         }
@@ -568,26 +1492,57 @@ impl Ctx {
     }
 
     pub fn take_logs(&self) -> Vec<(i64, Vec<String>)> {
-        Dirty::drain(&self.dirty.logs)
-            .into_iter()
-            .filter_map(|chat| {
-                let state = self.peek(chat)?;
-                let queued = std::mem::take(&mut *state.logs.lock().unwrap());
-                (!queued.is_empty()).then_some((chat, queued))
-            })
-            .collect()
+        let mut remaining = LOG_ENTRIES_PER_FLUSH;
+        let chats = Dirty::take(&self.dirty.logs, FLUSH_CHAT_BATCH);
+        let mut ready = Vec::new();
+        for chat in chats {
+            if remaining == 0 {
+                Dirty::mark(&self.dirty.logs, chat);
+                continue;
+            }
+            let Some(state) = self.peek(chat) else {
+                continue;
+            };
+            let mut logs = state.logs.lock().unwrap();
+            if logs.is_empty() {
+                continue;
+            }
+            let count = logs.len().min(remaining);
+
+            let queued: Vec<String> = if count == logs.len() {
+                std::mem::take(&mut *logs)
+            } else {
+                logs.drain(..count).collect()
+            };
+            remaining -= queued.len();
+            if !logs.is_empty() {
+                Dirty::mark(&self.dirty.logs, chat);
+            }
+            ready.push((chat, queued));
+        }
+        ready
     }
 
     fn joined_cached(&self, key: (i64, i32)) -> Option<Vec<Joined>> {
-        self.peek(key.0)?.joined.lock().unwrap().get(&key.1).cloned()
+        self.peek(key.0)?
+            .joined
+            .lock()
+            .unwrap()
+            .get(&key.1)
+            .cloned()
     }
 
     fn remember_joined(&self, key: (i64, i32), joined: Vec<Joined>) {
         const MAX: usize = 200;
-        let state = self.state(key.0);
+        let Some(state) = self.try_state(key.0) else {
+            return;
+        };
         let mut cache = state.joined.lock().unwrap();
         if cache.len() >= MAX {
-            cache.clear();
+            let mut ids: Vec<i32> = cache.keys().copied().collect();
+            ids.sort_unstable();
+            let cutoff = ids[ids.len() / 2];
+            cache.retain(|id, _| *id >= cutoff);
         }
         cache.insert(key.1, joined);
     }
@@ -652,22 +1607,39 @@ impl Ctx {
         None
     }
 
-    pub fn expect_number(&self, chat: i64, user: i64, setting: &'static str) {
-        self.last_armed.store(
-            self.started.elapsed().as_millis() as u64,
-            Ordering::Relaxed,
-        );
-        let state = self.state(chat);
-        let mut pending = state.pending_numbers.lock().unwrap();
-        pending.retain(|_, (armed, _)| armed.elapsed() < PENDING_NUMBER_TTL);
-        pending.insert(user, (Instant::now(), setting));
+    pub fn expect_number(
+        &self,
+        input_chat: i64,
+        user: i64,
+        target_chat: i64,
+        setting: &'static str,
+    ) {
+        self.last_armed
+            .store(self.started.elapsed().as_millis() as u64, Ordering::Relaxed);
+        self.pending_numbers
+            .lock()
+            .unwrap()
+            .arm(input_chat, user, target_chat, setting);
     }
 
-    pub fn take_expected_number(&self, chat: i64, user: i64) -> Option<&'static str> {
-        let state = self.peek(chat)?;
-        let mut pending = state.pending_numbers.lock().unwrap();
-        let (armed, setting) = pending.remove(&user)?;
-        (armed.elapsed() < PENDING_NUMBER_TTL).then_some(setting)
+    pub fn expected_number(&self, input_chat: i64, user: i64) -> Option<(i64, &'static str)> {
+        self.pending_numbers
+            .lock()
+            .unwrap()
+            .expected(input_chat, user)
+    }
+
+    pub fn take_expected_number(
+        &self,
+        input_chat: i64,
+        user: i64,
+        target_chat: i64,
+        setting: &'static str,
+    ) -> bool {
+        self.pending_numbers
+            .lock()
+            .unwrap()
+            .take(input_chat, user, target_chat, setting)
     }
 
     pub fn maybe_expecting_number(&self) -> bool {
@@ -689,7 +1661,10 @@ impl Ctx {
     pub fn pending_admin_new(&self, pending: promote::Pending) -> u64 {
         let key = self.next_deleted_key.fetch_add(1, Ordering::Relaxed);
         let mut pendings = self.pending_admins.write().unwrap();
-        pendings.retain(|_, p| p.started.elapsed() < promote::PENDING_TTL);
+        if pendings.len() >= PENDING_ADMIN_MAX {
+            pendings.retain(|_, p| p.started.elapsed() < promote::PENDING_TTL);
+            make_room(&mut pendings, PENDING_ADMIN_MAX, |pending| pending.started);
+        }
         pendings.insert(key, pending);
         key
     }
@@ -714,37 +1689,78 @@ impl Ctx {
     }
 
     pub fn may_notify(&self, chat: i64, user: i64) -> bool {
-        self.throttle(0, chat, user, NOTICE_EVERY)
+        self.throttle(kind::FILTER_NOTICE, chat, user, NOTICE_EVERY)
     }
 
     pub fn may_notify_every(&self, chat: i64, user: i64, every: Duration) -> bool {
-        every.is_zero() || self.throttle(3, chat, user, every)
+        every.is_zero() || self.throttle(kind::GATE_NOTICE, chat, user, every)
     }
 
     pub fn may_notify_lock(&self, chat: i64, user: i64) -> bool {
-        self.throttle(2, chat, user, Duration::from_secs(20))
+        self.throttle(kind::LOCK_NOTICE, chat, user, Duration::from_secs(20))
+    }
+
+    pub fn may_notify_flood(&self, chat: i64, user: i64) -> bool {
+        self.throttle(kind::FLOOD_NOTICE, chat, user, NOTICE_EVERY)
+    }
+
+    pub fn claim_autoconfig(&self, chat: i64) -> bool {
+        self.throttle(kind::AUTOCONFIG, chat, 0, Duration::from_secs(300))
+    }
+
+    pub fn claim_install_notice(&self, chat: i64, missing: i64) -> bool {
+        self.throttle(kind::INSTALL_NOTICE, chat, missing, Duration::from_secs(2))
+    }
+
+    pub fn claim_cleaner_install(&self, chat: i64) -> bool {
+        self.throttle(kind::CLEANER_INSTALL, chat, 0, Duration::from_secs(300))
+    }
+
+    pub fn claim_bot_removal(&self, chat: i64, user: i64) -> bool {
+        self.throttle(kind::BOT_REMOVAL, chat, user, Duration::from_secs(60))
+    }
+
+    pub fn claim_comment_sign(&self, chat: i64, post: i32) -> bool {
+        self.throttle(
+            kind::COMMENT_SIGN,
+            chat,
+            i64::from(post),
+            Duration::from_secs(300),
+        )
+    }
+
+    pub fn claim_moderation(&self, chat: i64, message: i32) -> bool {
+        self.throttle(
+            kind::MODERATION,
+            chat,
+            i64::from(message),
+            Duration::from_secs(120),
+        )
     }
 
     pub fn first_sighting(&self, chat: i64, user: i64, window: Duration) -> bool {
-        self.throttle(4, chat, user, window)
+        self.throttle(kind::SIGHTING, chat, user, window)
     }
 
     pub fn may_report(&self, chat: i64, user: i64) -> bool {
-        self.throttle(1, chat, user, report::EVERY)
+        self.throttle(kind::REPORT, chat, user, report::EVERY)
     }
 
     fn throttle(&self, kind: u8, chat: i64, user: i64, every: Duration) -> bool {
-        let state = self.state(chat);
+        let Some(state) = self.try_state(chat) else {
+            return false;
+        };
         let mut notices = state.notices.lock().unwrap();
-        if let Some(last) = notices.get(&(kind, user))
+        if let Some((last, _)) = notices.get(&(kind, user))
             && last.elapsed() < every
         {
             return false;
         }
         if notices.len() >= PER_CHAT_MAX {
-            notices.retain(|_, last| last.elapsed() < NOTICE_EVERY);
+            notices.retain(|_, (last, window)| last.elapsed() < *window);
+            make_room(&mut notices, PER_CHAT_MAX, |(last, _)| *last);
         }
-        notices.insert((kind, user), Instant::now());
+        notices.insert((kind, user), (Instant::now(), every));
         true
     }
 
@@ -753,6 +1769,7 @@ impl Ctx {
         let mut deleted = self.deleted.write().unwrap();
         if deleted.len() >= DELETED_MAX {
             deleted.retain(|_, (kept, _)| kept.elapsed() < DELETED_TTL);
+            make_room(&mut deleted, DELETED_MAX, |(kept, _)| *kept);
         }
         deleted.insert(key, (Instant::now(), text));
         key
@@ -767,35 +1784,56 @@ impl Ctx {
     }
 
     pub fn record_message(&self, chat: i64, user: i64, window: Duration) -> usize {
-        let state = self.state(chat);
+        let Some(state) = self.try_state(chat) else {
+            return 0;
+        };
         let mut messages = state.messages.lock().unwrap();
         if messages.len() >= PER_CHAT_MAX {
             messages.retain(|_, times| times.iter().any(|t| t.elapsed() < window));
+            make_room(&mut messages, PER_CHAT_MAX, |times| {
+                times.front().copied().unwrap_or_else(Instant::now)
+            });
         }
         let times = messages.entry(user).or_default();
-        times.retain(|t| t.elapsed() < window);
-        times.push(Instant::now());
-        times.len()
+        record_event(times, window)
     }
 
     pub fn record_removal(&self, chat: i64, actor: i64, window: Duration) -> usize {
-        let state = self.state(chat);
+        let Some(state) = self.try_state(chat) else {
+            return 0;
+        };
         let mut removals = state.removals.lock().unwrap();
         if removals.len() >= PER_CHAT_MAX {
             removals.retain(|_, times| times.iter().any(|t| t.elapsed() < window));
+            make_room(&mut removals, PER_CHAT_MAX, |times| {
+                times.front().copied().unwrap_or_else(Instant::now)
+            });
         }
         let times = removals.entry(actor).or_default();
-        times.retain(|t| t.elapsed() < window);
-        times.push(Instant::now());
-        times.len()
+        record_event(times, window)
     }
 
-    pub fn remember_chat(&self, chat: i64, peer: PeerRef) {
-        *self.state(chat).peer.write().unwrap() = Some(peer);
+    pub async fn admit_chat(&self, chat: i64, peer: PeerRef) -> bool {
+        if !self.owns_chat(chat) {
+            return false;
+        }
+        let hash = peer.auth.hash();
+        if self.settings.value_parsed::<i64>(chat, HASH) != Some(hash)
+            && !self.settings.set_value(chat, HASH, &hash.to_string()).await
+        {
+            return false;
+        }
+        let Some(state) = self.try_state(chat) else {
+            return false;
+        };
+        *state.peer.write().unwrap() = Some(peer);
+        true
     }
 
     pub fn bump(&self, chat: i64, counter: &'static str) {
-        self.state(chat).bump(counter);
+        if let Some(state) = self.try_state(chat) {
+            state.bump(counter);
+        }
     }
 
     fn cached_admin(&self, chat: i64, user: i64) -> Option<bool> {
@@ -810,7 +1848,9 @@ impl Ctx {
     }
 
     pub fn touch(&self, state: &ChatState) {
-        state.last_seen.store(self.uptime_millis(), Ordering::Relaxed);
+        state
+            .last_seen
+            .store(self.uptime_millis(), Ordering::Relaxed);
     }
 
     pub fn evict_idle(&self, idle: Duration) -> usize {
@@ -850,31 +1890,59 @@ impl Ctx {
     pub fn take_stats(&self) -> (Tallies, Counts) {
         let mut tallies = HashMap::new();
         let mut counts = HashMap::new();
-        for chat in Dirty::drain(&self.dirty.stats) {
+        let mut remaining = STATS_ROWS_PER_FLUSH;
+        for chat in Dirty::take(&self.dirty.stats, FLUSH_CHAT_BATCH) {
             let Some(state) = self.peek(chat) else {
                 continue;
             };
             for (counter, count) in std::mem::take(&mut *state.tallies.lock().unwrap()) {
                 tallies.insert((chat, counter), count);
             }
+            if remaining == 0 {
+                Dirty::mark(&self.dirty.stats, chat);
+                continue;
+            }
             let mut per_user = state.counts.lock().unwrap();
             let room = per_user.len();
-            for (user, count) in std::mem::replace(&mut *per_user, HashMap::with_capacity(room)) {
-                counts.insert((chat, user), count);
+            let taken = room.min(remaining);
+            let mut left = HashMap::with_capacity(room.saturating_sub(taken));
+            for (index, (user, count)) in
+                std::mem::replace(&mut *per_user, HashMap::with_capacity(room))
+                    .into_iter()
+                    .enumerate()
+            {
+                if index < taken {
+                    counts.insert((chat, user), count);
+                } else {
+                    left.insert(user, count);
+                }
+            }
+            remaining -= taken;
+            *per_user = left;
+            if !per_user.is_empty() {
+                Dirty::mark(&self.dirty.stats, chat);
             }
         }
         (tallies, counts)
     }
 
     pub fn captcha_start(&self, chat: i64, user: i64, pending: captcha::Pending) {
-        let state = self.state(chat);
+        let Some(state) = self.try_state(chat) else {
+            return;
+        };
         let mut captchas = state.captchas.lock().unwrap();
         captchas.retain(|_, p| p.started.elapsed() < CAPTCHA_TTL);
+        make_room(&mut captchas, PER_CHAT_MAX, |pending| pending.started);
         captchas.insert(user, pending);
     }
 
     pub fn captcha_pending(&self, chat: i64, user: i64) -> Option<captcha::Pending> {
-        self.peek(chat)?.captchas.lock().unwrap().get(&user).cloned()
+        self.peek(chat)?
+            .captchas
+            .lock()
+            .unwrap()
+            .get(&user)
+            .cloned()
     }
 
     pub fn captcha_done(&self, chat: i64, user: i64) {
@@ -888,6 +1956,9 @@ impl Ctx {
     }
 
     pub fn chat_ref(&self, chat: i64) -> Option<PeerRef> {
+        if !self.owns_chat(chat) {
+            return None;
+        }
         if let Some(peer) = self.live_ref(chat) {
             return Some(peer);
         }
@@ -905,7 +1976,9 @@ impl Ctx {
     }
 
     fn cache_admins(&self, chat: i64, admins: HashSet<i64>) {
-        *self.state(chat).admins.write().unwrap() = Some((Instant::now(), admins));
+        if let Some(state) = self.try_state(chat) {
+            *state.admins.write().unwrap() = Some((Instant::now(), admins));
+        }
     }
 
     fn cached_admins(&self, chat: i64) -> Option<HashSet<i64>> {
@@ -931,27 +2004,88 @@ fn holds_the_group(participant: &grammers_client::peer::Participant) -> bool {
     )
 }
 
+fn is_badge_only(permissions: &grammers_client::peer::Permissions) -> bool {
+    let grammers_client::tl::types::ChatAdminRights {
+        anonymous,
+        change_info,
+        post_messages,
+        edit_messages,
+        delete_messages,
+        ban_users,
+        invite_users,
+        pin_messages,
+        add_admins,
+        manage_call,
+        other,
+        manage_topics,
+        post_stories,
+        edit_stories,
+        delete_stories,
+        manage_direct_messages,
+        manage_ranks,
+        manage_linked_peers,
+    } = permissions.raw;
+    invite_users
+        && !(anonymous
+            || change_info
+            || post_messages
+            || edit_messages
+            || delete_messages
+            || ban_users
+            || pin_messages
+            || add_admins
+            || manage_call
+            || other
+            || manage_topics
+            || post_stories
+            || edit_stories
+            || delete_stories
+            || manage_direct_messages
+            || manage_ranks
+            || manage_linked_peers)
+}
+
+fn wears_only_a_badge(
+    ctx: &Ctx,
+    chat: i64,
+    user: i64,
+    participant: &grammers_client::peer::Participant,
+) -> bool {
+    let grammers_client::peer::Role::Admin(admin) = &participant.role else {
+        return false;
+    };
+    ctx.settings.is_locked(chat, &stats::badge_key(user)) && is_badge_only(admin.permissions())
+}
+
 pub async fn chat_admins(ctx: &Ctx, chat_ref: PeerRef, chat: i64) -> Option<HashSet<i64>> {
     if let Some(admins) = ctx.cached_admins(chat) {
         return Some(admins);
     }
 
-    let state = ctx.state(chat);
+    let state = ctx.try_state(chat)?;
     let _fetching = state.admin_fetch.lock().await;
     if let Some(admins) = ctx.cached_admins(chat) {
         return Some(admins);
     }
 
-    let mut participants = ctx.client.iter_participants(chat_ref).filter(
-        grammers_client::tl::enums::ChannelParticipantsFilter::ChannelParticipantsAdmins,
-    );
+    let mut participants = ctx
+        .client
+        .iter_participants(chat_ref)
+        .filter(grammers_client::tl::enums::ChannelParticipantsFilter::ChannelParticipantsAdmins);
     let mut admins = HashSet::new();
     let mut failed = false;
+    let mut truncated = false;
     loop {
         match participants.next().await {
             Ok(Some(participant)) => {
-                if holds_the_group(&participant) {
-                    admins.insert(participant.user.id().bare_id_unchecked());
+                let id = participant.user.id().bare_id_unchecked();
+                if holds_the_group(&participant) && !wears_only_a_badge(ctx, chat, id, &participant)
+                {
+                    admins.insert(id);
+                    if admins.len() >= ADMIN_CACHE_MAX {
+                        truncated = true;
+                        break;
+                    }
                 }
             }
             Ok(None) => break,
@@ -963,7 +2097,7 @@ pub async fn chat_admins(ctx: &Ctx, chat_ref: PeerRef, chat: i64) -> Option<Hash
         }
     }
 
-    if failed || admins.is_empty() {
+    if failed || truncated || admins.is_empty() {
         return None;
     }
     ctx.cache_admins(chat, admins.clone());
@@ -976,7 +2110,19 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
 
         Update::MessageEdited(message) if !message.outgoing() => {
             if message.peer_id().kind() != PeerKind::User {
-                locks::on_edit(ctx, &message).await;
+                let Some(chat) = message.peer_id().bot_api_dialog_id() else {
+                    return;
+                };
+                let Ok(Some(peer)) = message.peer_ref().await else {
+                    return;
+                };
+                if !ctx.admit_chat(chat, peer).await {
+                    return;
+                }
+
+                let view = locks::View::new(&message);
+                locks::on_edit(ctx, &message, &view).await;
+                trade::watch(ctx, &message, chat, &view).await;
             }
             return;
         }
@@ -987,11 +2133,26 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
 
         Update::Raw(raw) => {
             invalidate_admins(ctx, &raw);
+
+            let raw_chat = raw_chat_id(&raw);
+            let state = raw_chat.and_then(|chat| {
+                let state = ctx.try_state(chat)?;
+                ctx.touch(&state);
+                Some(state)
+            });
+            if raw_chat.is_some() && state.is_none() {
+                return;
+            }
+            let _slot = match state.as_deref() {
+                Some(state) => Some(state.slot().await),
+                None => None,
+            };
             if let grammers_client::tl::enums::Update::ChannelParticipant(update) = &raw.raw {
                 betrayal::on_participant_update(ctx, update).await;
                 bots::on_participant_update(ctx, update).await;
                 raid::on_participant_update(ctx, update).await;
                 log::on_participant(ctx, update).await;
+                leftback::on_participant_update(ctx, update).await;
             }
             pinlock::on_raw(ctx, &raw).await;
             autoconfig::on_raw(ctx, &raw).await;
@@ -1006,11 +2167,22 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
     }
 
     if message.peer_id().kind() == PeerKind::User {
-        let _ = cleaner::take_password(ctx, message).await
+        let handled = cleaner::take_password(ctx, message).await
             || config::start(ctx, message).await
             || config::help(ctx, message).await
+            || currency::handle(ctx, message).await
             || cleaner::handle(ctx, message).await
+            || sudo::handle(ctx, message).await
             || panel::handle_private(ctx, message).await;
+        if handled {
+            return;
+        }
+        if ctx.maybe_expecting_number() {
+            let view = locks::View::new(message);
+            if panel::typed_number(ctx, message, &view).await {
+                return;
+            }
+        }
         return;
     }
 
@@ -1018,20 +2190,20 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         return;
     };
 
-    if ctx.live_ref(chat).is_none()
-        && let Ok(Some(peer)) = message.peer_ref().await
-    {
-        ctx.remember_chat(chat, peer);
+    if ctx.live_ref(chat).is_none() {
+        let Ok(Some(peer)) = message.peer_ref().await else {
+            return;
+        };
+
+        if !ctx.admit_chat(chat, peer).await {
+            eprintln!("chat admission refused {chat}; shard chat capacity is full");
+            return;
+        }
 
         if let Some(title) = message.peer().and_then(|peer| peer.name())
             && ctx.settings.value(chat, TITLE).as_deref() != Some(title)
         {
-            ctx.settings.set_value(chat, TITLE, title).await;
-        }
-
-        let hash = peer.auth.hash();
-        if ctx.settings.value_parsed::<i64>(chat, HASH) != Some(hash) {
-            ctx.settings.set_value(chat, HASH, &hash.to_string()).await;
+            let _ = ctx.settings.set_value(chat, TITLE, title).await;
         }
     }
 
@@ -1043,9 +2215,10 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         && ctx.settings.is_locked(chat, bots::LOCK)
         && !state.swept_bots.swap(true, Ordering::Relaxed)
     {
+        let permit = ctx.sweep_slot().await;
         let ctx = Arc::clone(ctx);
         tokio::spawn(async move {
-            let _slot = ctx.sweep_slot().await;
+            let _permit = permit;
             bots::sweep(&ctx, chat).await;
         });
     }
@@ -1077,11 +2250,22 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         }
         raid::check(ctx, message, chat).await;
     }
-    flood::check(ctx, message).await;
+
+    if flood::check(ctx, message).await {
+        return;
+    }
 
     tempmedia::watch(ctx, message, &view).await;
 
+    restrict::remember(ctx, chat, message);
+
+    comment::on_post(ctx, &state, message, chat).await;
+
     nsfw::watch(ctx, message, chat, &view).await;
+
+    voicemonitor::watch(ctx, message, chat, &view).await;
+
+    trade::watch(ctx, message, chat, &view).await;
 
     if panel::typed_number(ctx, message, &view).await {
         return;
@@ -1104,16 +2288,24 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
                 || config::handle(ctx, message).await
                 || panel::handle(ctx, message).await
                 || restrict::handle(ctx, message, &view).await
+                || restrict::handle_custom_setup(ctx, message).await
                 || lists::command(ctx, message).await
-                || ping::handle(ctx, message).await
-                || nsfw::test(ctx, message).await
+                || install::handle(ctx, message).await
+                 || voicemonitor::handle(ctx, message).await
+                 || ping::handle(ctx, message).await
+                 || currency::handle(ctx, message).await
+                 || sudo::handle(ctx, message).await
                 || promote::handle(ctx, message, &view).await
                 || stats::handle(ctx, message).await
                 || report::handle(ctx, message).await
                 || packs::handle(ctx, message).await
                 || extras::handle(ctx, message, &view).await
+
+                || captcha::handle(ctx, message).await
                 || tune::handle(ctx, message, &view).await
                 || warns::handle(ctx, message, &view).await
+
+                || imgfilter::handle(ctx, message).await
                 || filters::handle(ctx, message).await
                 || purge::handle(ctx, message, &view).await
                 || purge::handle_all(ctx, message).await
@@ -1124,25 +2316,26 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
                 || cleaner::sweep(ctx, message).await
                 || log::handle(ctx, message).await
                 || rights::handle(ctx, message).await
+                || invite::handle(ctx, message).await
                 || vip::handle(ctx, message).await
-                || bots::allow(ctx, message).await))
+                || bots::allow(ctx, message).await
+
+                || restrict::handle_custom(ctx, message, &view).await))
         || (!bot_authored && answers::handle(ctx, message, &view).await);
 
     locks::service(ctx, message).await;
 }
 
 fn bot_authored(message: &Message) -> bool {
-    message.via_bot_id().is_some()
-        || matches!(message.sender(), Some(Peer::User(user)) if user.is_bot())
+    matches!(message.sender(), Some(Peer::User(user)) if user.is_bot())
 }
 
 fn invalidate_admins(ctx: &Ctx, raw: &grammers_client::update::Raw) {
     use grammers_client::tl;
     use tl::enums::ChannelParticipant as P;
 
-    let admin_change = |participant: &Option<P>| {
-        matches!(participant, Some(P::Admin(_) | P::Creator(_)))
-    };
+    let admin_change =
+        |participant: &Option<P>| matches!(participant, Some(P::Admin(_) | P::Creator(_)));
     let chat = match &raw.raw {
         tl::enums::Update::ChannelParticipant(u) => {
             if !admin_change(&u.prev_participant) && !admin_change(&u.new_participant) {
@@ -1156,6 +2349,19 @@ fn invalidate_admins(ctx: &Ctx, raw: &grammers_client::update::Raw) {
     if let Some(chat) = chat.and_then(|id| id.bot_api_dialog_id()) {
         ctx.forget_admins(chat);
     }
+}
+
+fn raw_chat_id(raw: &grammers_client::update::Raw) -> Option<i64> {
+    use grammers_client::tl;
+
+    let peer = match &raw.raw {
+        tl::enums::Update::ChannelParticipant(update) => PeerId::channel(update.channel_id),
+        tl::enums::Update::ChatParticipantAdmin(update) => PeerId::chat(update.chat_id),
+        tl::enums::Update::PinnedChannelMessages(update) => PeerId::channel(update.channel_id),
+        tl::enums::Update::PinnedMessages(update) => Some(PeerId::from(update.peer.clone())),
+        _ => return None,
+    }?;
+    peer.bot_api_dialog_id()
 }
 
 const STALE_AFTER: i64 = 120;
@@ -1189,6 +2395,15 @@ pub fn bot_admin_key(user: i64) -> String {
     format!("admin:{user}")
 }
 
+fn saved_from_itself(sender: Option<PeerId>, saved_from: Option<PeerId>) -> bool {
+    match (sender, saved_from) {
+        (Some(sender), Some(saved_from)) => {
+            sender.kind() == PeerKind::Channel && sender == saved_from
+        }
+        _ => false,
+    }
+}
+
 pub fn is_linked_post(message: &Message) -> bool {
     let grammers_client::tl::enums::Message::Message(raw) = &message.raw else {
         return false;
@@ -1197,19 +2412,20 @@ pub fn is_linked_post(message: &Message) -> bool {
     else {
         return false;
     };
-    let Some(origin) = header.saved_from_peer.clone() else {
-        return false;
-    };
-
-    message.sender_id() == Some(PeerId::from(origin))
+    saved_from_itself(
+        message.sender_id(),
+        header.saved_from_peer.clone().map(PeerId::from),
+    )
 }
 
 pub async fn is_exempt(ctx: &Ctx, message: &Message) -> bool {
     if is_linked_post(message) {
         return true;
     }
-    if let (Some(chat), Some(sender)) = (chat_id(message), message.sender_id().and_then(PeerId::bare_id))
-        && vip::is_vip(ctx, chat, sender)
+    if let (Some(chat), Some(sender)) = (
+        chat_id(message),
+        message.sender_id().and_then(PeerId::bare_id),
+    ) && vip::is_vip(ctx, chat, sender)
     {
         return true;
     }
@@ -1245,12 +2461,20 @@ pub async fn can_manage(ctx: &Ctx, message: &Message) -> bool {
     match chat_admins(ctx, chat_ref, chat).await {
         Some(admins) => admins.contains(&sender),
 
-        None => permissions(ctx, message).await.is_some_and(|p| p.is_admin()),
+        None => {
+            !ctx.settings.is_locked(chat, &stats::badge_key(sender))
+                && permissions(ctx, message)
+                    .await
+                    .is_some_and(|p| p.is_admin())
+        }
     }
 }
 
 pub fn is_owner(ctx: &Ctx, message: &Message) -> bool {
-    match (chat_id(message), message.sender_id().and_then(PeerId::bare_id)) {
+    match (
+        chat_id(message),
+        message.sender_id().and_then(PeerId::bare_id),
+    ) {
         (Some(chat), Some(sender)) => owner(ctx, chat) == Some(sender),
         _ => false,
     }
@@ -1273,11 +2497,7 @@ pub fn named<'a>(message: &Message, arg: Option<&'a str>) -> Option<Named<'a>> {
     names_somebody.then_some(Named { arg })
 }
 
-pub async fn resolve(
-    ctx: &Ctx,
-    message: &Message,
-    named: Named<'_>,
-) -> Option<(PeerRef, String)> {
+pub async fn resolve(ctx: &Ctx, message: &Message, named: Named<'_>) -> Option<(PeerRef, String)> {
     if let Some(arg) = named.arg {
         if let Some(username) = arg.strip_prefix('@').filter(|u| !u.is_empty()) {
             let peer = ctx.client.resolve_username(username).await.ok()??;
@@ -1308,7 +2528,7 @@ pub fn numbers_in(tail: &str) -> Option<Vec<u32>> {
 pub fn digits(text: &str) -> std::borrow::Cow<'_, str> {
     if !text
         .chars()
-        .any(|c| matches!(c, '۰'..='۹' | '٠'..='٩'))
+        .any(|c| matches!(c, '۰'..='۹' | '٠'..='٩' | 'ي' | 'ى' | 'ك'))
     {
         return std::borrow::Cow::Borrowed(text);
     }
@@ -1317,6 +2537,8 @@ pub fn digits(text: &str) -> std::borrow::Cow<'_, str> {
             .map(|c| match c {
                 '۰'..='۹' => char::from(b'0' + (c as u32 - '۰' as u32) as u8),
                 '٠'..='٩' => char::from(b'0' + (c as u32 - '٠' as u32) as u8),
+                'ي' | 'ى' => 'ی',
+                'ك' => 'ک',
                 other => other,
             })
             .collect(),
@@ -1390,9 +2612,10 @@ pub async fn joined_users(ctx: &Ctx, message: &Message) -> Vec<Joined> {
         return Vec::new();
     };
 
-    let mut participants = ctx.client.iter_participants(chat_ref).filter(
-        grammers_client::tl::enums::ChannelParticipantsFilter::ChannelParticipantsRecent,
-    );
+    let mut participants = ctx
+        .client
+        .iter_participants(chat_ref)
+        .filter(grammers_client::tl::enums::ChannelParticipantsFilter::ChannelParticipantsRecent);
     let mut found = Vec::new();
     while let Ok(Some(participant)) = participants.next().await {
         let user = participant.user;
@@ -1419,10 +2642,16 @@ pub async fn joined_users(ctx: &Ctx, message: &Message) -> Vec<Joined> {
 }
 
 pub async fn admin_ref(ctx: &Ctx, chat: PeerRef, user_id: i64) -> Option<(PeerRef, String)> {
-    let mut participants = ctx.client.iter_participants(chat).filter(
-        grammers_client::tl::enums::ChannelParticipantsFilter::ChannelParticipantsAdmins,
-    );
+    let mut participants = ctx
+        .client
+        .iter_participants(chat)
+        .filter(grammers_client::tl::enums::ChannelParticipantsFilter::ChannelParticipantsAdmins);
+    let mut seen = 0;
     while let Ok(Some(participant)) = participants.next().await {
+        seen += 1;
+        if seen > ADMIN_CACHE_MAX {
+            break;
+        }
         if participant.user.id().bare_id_unchecked() != user_id || !holds_the_group(&participant) {
             continue;
         }
@@ -1438,28 +2667,55 @@ pub async fn admin_ref(ctx: &Ctx, chat: PeerRef, user_id: i64) -> Option<(PeerRe
     None
 }
 
-pub async fn admins(ctx: &Ctx, chat: PeerRef) -> (Option<(i64, String)>, Vec<String>) {
-    let mut participants = ctx.client.iter_participants(chat).filter(
-        grammers_client::tl::enums::ChannelParticipantsFilter::ChannelParticipantsAdmins,
-    );
-    let (mut creator, mut names) = (None, Vec::new());
+pub struct AdminEntry {
+    pub id: i64,
+    pub name: String,
+    pub is_creator: bool,
+    pub is_bot: bool,
+}
+
+pub async fn admin_entries(ctx: &Ctx, chat: PeerRef) -> Vec<AdminEntry> {
+    let mut participants = ctx
+        .client
+        .iter_participants(chat)
+        .filter(grammers_client::tl::enums::ChannelParticipantsFilter::ChannelParticipantsAdmins);
+    let mut found = Vec::new();
     while let Ok(Some(participant)) = participants.next().await {
         if !holds_the_group(&participant) {
             continue;
         }
-        let name = esc(&participant.user.full_name());
-
-        if participant.user.is_bot() {
-            names.push(format!("‹ {name} · ربات"));
-            continue;
+        if found.len() >= ADMIN_CACHE_MAX {
+            break;
         }
-        if matches!(participant.role, grammers_client::peer::Role::Creator(_)) {
-            creator = Some((participant.user.id().bare_id_unchecked(), name.clone()));
-            names.push(format!("★ {name}"));
-        } else {
-            names.push(format!("‹ {name}"));
-        }
+        found.push(AdminEntry {
+            id: participant.user.id().bare_id_unchecked(),
+            name: esc(&participant.user.full_name()),
+            is_creator: matches!(participant.role, grammers_client::peer::Role::Creator(_)),
+            is_bot: participant.user.is_bot(),
+        });
     }
+    found
+}
+
+pub async fn admins(ctx: &Ctx, chat: PeerRef) -> (Option<(i64, String)>, Vec<String>) {
+    let entries = admin_entries(ctx, chat).await;
+    let creator = entries
+        .iter()
+        .find(|entry| entry.is_creator)
+        .map(|entry| (entry.id, entry.name.clone()));
+
+    let names = entries
+        .into_iter()
+        .map(|entry| {
+            if entry.is_bot {
+                format!("‹ {} · ربات", entry.name)
+            } else if entry.is_creator {
+                format!("★ {}", entry.name)
+            } else {
+                format!("‹ {}", entry.name)
+            }
+        })
+        .collect();
     (creator, names)
 }
 
@@ -1482,13 +2738,196 @@ async fn permissions(
 
 #[cfg(test)]
 mod tests {
+    use super::{PeerId, saved_from_itself};
+
+    #[test]
+    fn pending_numbers_keep_input_and_target_dialogs_separate() {
+        let mut pending = super::PendingNumbers::default();
+        pending.arm(101, 7, -1_001, "fl_lim");
+        pending.arm(202, 7, -2_002, "bt_lim");
+
+        assert_eq!(pending.expected(101, 7), Some((-1_001, "fl_lim")));
+        assert_eq!(pending.expected(202, 7), Some((-2_002, "bt_lim")));
+        assert_eq!(pending.expected(303, 7), None);
+
+        assert!(!pending.take(101, 7, -9_009, "fl_lim"));
+        assert_eq!(pending.expected(101, 7), Some((-1_001, "fl_lim")));
+        assert!(pending.take(101, 7, -1_001, "fl_lim"));
+        assert!(!pending.take(101, 7, -1_001, "fl_lim"));
+        assert_eq!(pending.expected(202, 7), Some((-2_002, "bt_lim")));
+    }
+
+    #[test]
+    fn pending_number_for_one_dialog_is_replaced_by_the_latest_prompt() {
+        let mut pending = super::PendingNumbers::default();
+        pending.arm(101, 7, -1_001, "fl_lim");
+        pending.arm(101, 7, -2_002, "bt_lim");
+
+        assert_eq!(pending.expected(101, 7), Some((-2_002, "bt_lim")));
+    }
+
+    #[test]
+    fn expired_pending_numbers_are_not_read_or_taken() {
+        use std::time::{Duration, Instant};
+
+        let mut pending = super::PendingNumbers::default();
+        pending.entries.insert(
+            (101, 7),
+            super::PendingNumber {
+                armed: Instant::now() - super::PENDING_NUMBER_TTL - Duration::from_secs(1),
+                target_chat: -1_001,
+                setting: "fl_lim",
+            },
+        );
+
+        assert_eq!(pending.expected(101, 7), None);
+        assert!(!pending.take(101, 7, -1_001, "fl_lim"));
+    }
+
+    #[test]
+    fn animated_media_rejects_a_thumbnail_cache_but_accepts_full_animation() {
+        assert!(
+            !super::cache_source_matches(true, false),
+            "a GIF must not reuse a result computed from its cover frame"
+        );
+        assert!(
+            super::cache_source_matches(true, true),
+            "a GIF may reuse a result computed after full animation sampling"
+        );
+        assert!(
+            super::cache_source_matches(false, false),
+            "ordinary still media keeps the existing cache path"
+        );
+    }
+
+    #[test]
+    fn deferred_actions_are_taken_in_deadline_order() {
+        use std::collections::BinaryHeap;
+        use std::time::{Duration, Instant};
+
+        let now = Instant::now();
+        let mut queue = BinaryHeap::new();
+        queue.push(super::DeferredEntry {
+            due: now + Duration::from_secs(3),
+            sequence: 0,
+            action: super::DeferredAction::Delete {
+                chat: 1,
+                message: 3,
+            },
+        });
+        queue.push(super::DeferredEntry {
+            due: now + Duration::from_secs(1),
+            sequence: 1,
+            action: super::DeferredAction::Delete {
+                chat: 1,
+                message: 1,
+            },
+        });
+        queue.push(super::DeferredEntry {
+            due: now + Duration::from_secs(2),
+            sequence: 2,
+            action: super::DeferredAction::Delete {
+                chat: 1,
+                message: 2,
+            },
+        });
+
+        assert_eq!(
+            queue.pop().map(|entry| entry.due),
+            Some(now + Duration::from_secs(1))
+        );
+        assert_eq!(
+            queue.pop().map(|entry| entry.due),
+            Some(now + Duration::from_secs(2))
+        );
+        assert_eq!(
+            queue.pop().map(|entry| entry.due),
+            Some(now + Duration::from_secs(3))
+        );
+    }
+
+    #[test]
+    fn recent_minutes_wrap_at_midnight() {
+        assert_eq!(
+            super::recent_minutes(0),
+            ["0".to_owned(), "1439".to_owned(), "1438".to_owned()]
+        );
+        assert_eq!(
+            super::recent_minutes(1_440),
+            ["0".to_owned(), "1439".to_owned(), "1438".to_owned()]
+        );
+        assert_eq!(
+            super::recent_minutes(732),
+            ["732".to_owned(), "731".to_owned(), "730".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn per_chat_slots_release_without_a_per_chat_semaphore_allocation() {
+        use std::sync::Arc;
+        use tokio::sync::oneshot;
+
+        let state = Arc::new(super::ChatState::default());
+        let mut permits = Vec::new();
+        for _ in 0..super::PER_CHAT_UPDATES {
+            permits.push(state.slot().await);
+        }
+
+        let (ready, mut finished) = oneshot::channel();
+        let waiter_state = Arc::clone(&state);
+        let waiter = tokio::spawn(async move {
+            let _permit = waiter_state.slot().await;
+            let _ = ready.send(());
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            finished.try_recv().is_err(),
+            "the per-chat ceiling must hold"
+        );
+
+        permits.pop();
+        finished
+            .await
+            .expect("a released slot must wake the waiter");
+        waiter.await.expect("the waiter task must finish");
+    }
+
+    #[test]
+    fn no_two_throttles_share_a_discriminant() {
+        for (name, value) in super::kind::ALL {
+            let same: Vec<&str> = super::kind::ALL
+                .iter()
+                .filter(|(other, v)| v == value && other != name)
+                .map(|(other, _)| *other)
+                .collect();
+            assert!(same.is_empty(), "{name} shares {value} with {same:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_channels_own_auto_forward_is_immune() {
+        let channel = PeerId::channel_unchecked(100);
+        let other = PeerId::channel_unchecked(200);
+        let member = PeerId::user_unchecked(300);
+
+        assert!(saved_from_itself(Some(channel), Some(channel)));
+
+        assert!(!saved_from_itself(Some(member), Some(channel)));
+
+        assert!(!saved_from_itself(Some(other), Some(channel)));
+
+        assert!(!saved_from_itself(Some(channel), None));
+        assert!(!saved_from_itself(None, Some(channel)));
+        assert!(!saved_from_itself(None, None));
+    }
+
     #[test]
     fn a_queue_that_refills_during_a_drain_is_not_lost() {
         use std::sync::Mutex;
 
         const CHAT: i64 = 7;
         let queue: Mutex<Vec<&str>> = Mutex::new(Vec::new());
-        let dirty: Mutex<Vec<i64>> = Mutex::new(Vec::new());
+        let dirty = super::DirtyList::default();
 
         let push = |entry| {
             let mut queued = queue.lock().unwrap();
@@ -1508,7 +2947,7 @@ mod tests {
         push("one");
         push("two");
         assert_eq!(
-            dirty.lock().unwrap().len(),
+            dirty.0.lock().unwrap().len(),
             1,
             "a busy chat marks once per window, not once per entry"
         );
@@ -1517,7 +2956,10 @@ mod tests {
         push("three");
         assert_eq!(drain(), vec![vec!["three"]]);
 
-        assert!(drain().is_empty(), "a chat with nothing queued is never visited");
+        assert!(
+            drain().is_empty(),
+            "a chat with nothing queued is never visited"
+        );
     }
 
     #[test]
@@ -1547,7 +2989,8 @@ mod tests {
         let ran = Arc::new(AtomicUsize::new(0));
 
         let (live_in, peak_in, ran_in) = (Arc::clone(&live), Arc::clone(&peak), Arc::clone(&ran));
-        super::bounded((0..100).collect(), CAP, move |_| {
+
+        super::bounded((0..50_000).collect(), CAP, move |_| {
             let (live, peak, ran) = (
                 Arc::clone(&live_in),
                 Arc::clone(&peak_in),
@@ -1563,9 +3006,13 @@ mod tests {
         })
         .await;
 
-        assert_eq!(ran.load(Ordering::SeqCst), 100, "every item has to run");
+        assert_eq!(ran.load(Ordering::SeqCst), 50_000, "every item has to run");
         assert!(peak.load(Ordering::SeqCst) <= CAP, "the cap has to hold");
-        assert_eq!(live.load(Ordering::SeqCst), 0, "it has to wait for all of them");
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            0,
+            "it has to wait for all of them"
+        );
     }
 
     #[test]
@@ -1579,6 +3026,23 @@ mod tests {
         assert_eq!(digits("٠١٢٣٤٥٦٧٨٩"), "0123456789");
         assert_eq!(digits("سکوت ۳۰ دقیقه"), "سکوت 30 دقیقه");
 
+        assert_eq!(digits("قفل عكس"), "قفل عکس");
+        assert_eq!(digits("پاكسازي ۵۰"), "پاکسازی 50");
+        assert_eq!(digits("لينك"), "لینک");
+
+        assert_eq!(digits("علي"), "علی");
+        assert_eq!(digits("عﻟى"), "عﻟی");
+
+        assert!(matches!(
+            digits("كانفيگ"),
+            std::borrow::Cow::Owned(ref folded) if folded == "کانفیگ"
+        ));
+
+        for text in ["قفل عكس", "پاكسازي ۵۰", "۱۲۳"] {
+            assert_eq!(digits(text).chars().count(), text.chars().count());
+        }
+        assert!(digits("۱۲۳").len() < "۱۲۳".len());
+
         assert!(matches!(digits("سلام دوستان"), Cow::Borrowed(_)));
         assert!(matches!(digits("ban 10"), Cow::Borrowed(_)));
         assert!(matches!(digits(""), Cow::Borrowed(_)));
@@ -1591,7 +3055,11 @@ mod tests {
 
         let state = ChatState::default();
         state.count(7, || "Ali".to_owned(), ["k_text", "h9"]);
-        state.count(7, || panic!("the name is read once, not per message"), ["k_photo", "h9"]);
+        state.count(
+            7,
+            || panic!("the name is read once, not per message"),
+            ["k_photo", "h9"],
+        );
 
         let counts = state.counts.lock().unwrap();
         assert_eq!(counts.get(&7), Some(&(2, "Ali".to_owned())));
@@ -1603,9 +3071,130 @@ mod tests {
         drop((counts, tallies));
 
         assert!(
-            state.dirty.stats.lock().unwrap().len() <= 2,
+            state.dirty.stats.0.lock().unwrap().len() <= 2,
             "the mark is a transition, not a per-message write"
         );
+    }
+
+    #[test]
+    fn per_chat_counter_map_stays_bounded_under_unique_users() {
+        use super::{ChatState, PER_CHAT_MAX};
+
+        let state = ChatState::default();
+        for user in 0..=(PER_CHAT_MAX as i64) {
+            state.count(user, || "member".to_owned(), ["total", "today"]);
+        }
+        state.count(
+            0,
+            || panic!("an existing user does not need a name"),
+            ["total", "today"],
+        );
+
+        let counts = state.counts.lock().unwrap();
+        assert_eq!(counts.len(), PER_CHAT_MAX);
+        assert_eq!(counts.get(&0).map(|(count, _)| *count), Some(2));
+    }
+
+    #[test]
+    fn remembered_thread_roots_stay_bounded_and_lose_the_oldest() {
+        use super::{ChatState, Queued, ROOTS_MAX, RootClaim};
+
+        let state = ChatState::default();
+        for post in 1..=(ROOTS_MAX as i32 + 10) {
+            state.remember_post(post);
+        }
+        assert_eq!(state.roots.lock().unwrap().len(), ROOTS_MAX);
+        assert_eq!(state.root_known(1), None, "the oldest went first");
+        assert_eq!(state.root_known(ROOTS_MAX as i32 + 10), Some(true));
+
+        let queued = || Queued {
+            message: 5,
+            sender: Some(9),
+            name: "کاربر".to_owned(),
+        };
+        assert!(matches!(state.claim_root(90_001, queued()), RootClaim::Mine));
+        assert!(matches!(state.claim_root(90_001, queued()), RootClaim::Waiting));
+        assert_eq!(state.root_known(90_001), None, "a claim is not a verdict");
+        assert_eq!(state.settle_root(90_001, true).len(), 2, "both queued comments");
+        assert_eq!(state.root_known(90_001), Some(true));
+
+        assert!(matches!(state.claim_root(90_002, queued()), RootClaim::Mine));
+        state.forget_root(90_002);
+        assert_eq!(state.root_known(90_002), None);
+    }
+
+    #[test]
+    fn flood_windows_have_a_hard_per_subject_cap() {
+        use super::{EVENTS_PER_SUBJECT_MAX, record_event};
+        use std::collections::VecDeque;
+        use std::time::Duration;
+
+        let mut times = VecDeque::new();
+        for _ in 0..(EVENTS_PER_SUBJECT_MAX + 100) {
+            record_event(&mut times, Duration::from_secs(60));
+        }
+
+        assert_eq!(times.len(), EVENTS_PER_SUBJECT_MAX);
+    }
+
+    #[test]
+    fn fresh_cache_entries_still_obey_the_hard_cap() {
+        use super::make_room;
+        use std::collections::HashMap;
+        use std::time::Instant;
+
+        let at = Instant::now();
+        let mut entries: HashMap<u64, (Instant, u8)> = (0..8).map(|key| (key, (at, 0))).collect();
+        make_room(&mut entries, 8, |(at, _)| *at);
+        assert_eq!(entries.len(), 7);
+        entries.insert(99, (Instant::now(), 0));
+        assert_eq!(entries.len(), 8);
+    }
+
+    #[test]
+    fn dirty_take_leaves_unselected_chats_marked() {
+        use super::{Dirty, DirtyList};
+        use std::collections::HashSet;
+        use std::sync::Mutex;
+
+        let list = DirtyList(Mutex::new(HashSet::new()));
+        for chat in 0..10 {
+            Dirty::mark(&list, chat);
+        }
+
+        let first = Dirty::take(&list, 3);
+        assert_eq!(first.len(), 3);
+        assert_eq!(list.0.lock().unwrap().len(), 7);
+
+        let second = Dirty::drain(&list);
+        assert_eq!(second.len(), 7);
+        assert!(list.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_wipe_ring_keeps_a_window_and_hands_back_one_member() {
+        use super::{ChatState, SAID_MAX};
+
+        let state = ChatState::default();
+        for id in 1..=5 {
+            state.remember_said(7, id);
+            state.remember_said(9, id + 100);
+        }
+
+        assert_eq!(state.take_said(7), vec![1, 2, 3, 4, 5]);
+
+        assert!(state.take_said(7).is_empty());
+
+        assert_eq!(state.take_said(9), vec![101, 102, 103, 104, 105]);
+        assert!(state.take_said(11).is_empty(), "a member who never spoke");
+
+        for id in 1..=(SAID_MAX as i32 + 10) {
+            state.remember_said(3, id);
+        }
+        let kept = state.take_said(3);
+        assert_eq!(kept.len(), SAID_MAX);
+        assert_eq!(kept.first(), Some(&11));
+        assert_eq!(kept.last(), Some(&(SAID_MAX as i32 + 10)));
     }
 
     #[test]
@@ -1625,7 +3214,11 @@ mod tests {
         assert!(!state.evictable(IDLE, now));
         state.logs.lock().unwrap().clear();
 
-        state.temp_media.lock().unwrap().push_back((Instant::now(), 1));
+        state
+            .temp_media
+            .lock()
+            .unwrap()
+            .push_back((Instant::now(), 1));
         assert!(!state.evictable(IDLE, now));
         state.temp_media.lock().unwrap().clear();
 
@@ -1658,6 +3251,7 @@ mod tests {
     #[test]
     fn stale_cache_entries_do_not_pin_an_idle_chat() {
         use super::ChatState;
+        use std::collections::VecDeque;
         use std::time::{Duration, Instant};
 
         const IDLE: Duration = Duration::from_secs(3600);
@@ -1665,11 +3259,23 @@ mod tests {
 
         let state = ChatState::default();
 
-        state.messages.lock().unwrap().insert(7, vec![Instant::now()]);
-        state.removals.lock().unwrap().insert(7, vec![Instant::now()]);
+        state
+            .messages
+            .lock()
+            .unwrap()
+            .insert(7, VecDeque::from([Instant::now()]));
+        state
+            .removals
+            .lock()
+            .unwrap()
+            .insert(7, VecDeque::from([Instant::now()]));
         state.members.lock().unwrap().insert(7, Instant::now());
         state.adds.lock().unwrap().insert(7, (Instant::now(), 1));
-        state.notices.lock().unwrap().insert((2, 7), Instant::now());
+        state
+            .notices
+            .lock()
+            .unwrap()
+            .insert((2, 7), (Instant::now(), Duration::from_secs(20)));
         state.joined.lock().unwrap().insert(1, Vec::new());
 
         assert!(
@@ -1728,10 +3334,12 @@ mod tests {
             include_str!("callbacks.rs"),
             include_str!("captcha.rs"),
             include_str!("config.rs"),
+            include_str!("currency.rs"),
             include_str!("extras.rs"),
             include_str!("filters.rs"),
             include_str!("flood.rs"),
             include_str!("help.rs"),
+            include_str!("install.rs"),
             include_str!("limits.rs"),
             include_str!("lists.rs"),
             include_str!("locks.rs"),
@@ -1758,6 +3366,10 @@ mod tests {
             include_str!("tune.rs"),
             include_str!("answers.rs"),
             include_str!("autoconfig.rs"),
+            include_str!("intent.rs"),
+            include_str!("invite.rs"),
+            include_str!("trade.rs"),
+            include_str!("voicemonitor.rs"),
         ] {
             assert!(!file.contains('\u{200c}'), "found U+200C in a handler");
         }

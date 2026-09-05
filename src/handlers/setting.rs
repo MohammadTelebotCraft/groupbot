@@ -2,8 +2,8 @@ use grammers_client::message::Button;
 
 use super::style::{Colour, choice, data as coloured, toggle};
 use super::{
-    Ctx, betrayal, biolink, captcha, concepts, flood, join, limits, notice, nsfw, ocr, purge,
-    raid, strict, tempmedia, warns,
+    Ctx, betrayal, biolink, captcha, concepts, flood, join, leftback, limits, notice, ocr, purge,
+    raid, restrict, strict, tempmedia, trade, voicemonitor, warns, welcome,
 };
 
 pub struct Pick {
@@ -50,10 +50,6 @@ fn duration(value: u32) -> String {
     strict::time_label(value)
 }
 
-fn percent(value: u32) -> String {
-    format!("٪{value}")
-}
-
 fn every(value: u32) -> String {
     join::seconds_label(value, "هر بار")
 }
@@ -87,7 +83,7 @@ fn clock(value: u32) -> String {
     super::extras::clock(value)
 }
 
-const CLOCK: (u32, u32) = (0, 1439);
+pub const CLOCK: (u32, u32) = (0, 1439);
 
 const NIGHT_DEFAULT: (u32, u32) = (23 * 60, 7 * 60);
 
@@ -120,267 +116,654 @@ fn required_adds(ctx: &Ctx, chat: i64) -> u32 {
 }
 
 const MUTE_OR_BAN: &[Pick] = &[
-    Pick { id: "fl_mute", value: "mute", label: "سکوت", danger: false },
-    Pick { id: "fl_ban", value: "ban", label: "بن", danger: true },
+    Pick {
+        id: "fl_mute",
+        value: "mute",
+        label: "سکوت",
+        danger: false,
+    },
+    Pick {
+        id: "fl_ban",
+        value: "ban",
+        label: "بن",
+        danger: true,
+    },
 ];
 
 pub const SETTINGS: &[Setting] = &[
-
-    Setting { id: "fl_on", key: flood::MODE, label: "ضد رگبار", section: "fl", kind: Kind::Flag },
-    Setting { id: "bt_on", key: betrayal::MODE, label: "ضد خیانت ادمین", section: "bt", kind: Kind::Flag },
-    Setting { id: "cp_on", key: captcha::MODE, label: "احراز هویت", section: "cp", kind: Kind::Flag },
-    Setting { id: "nt_on", key: notice::MODE, label: "اعلان حذف", section: "nt", kind: Kind::Flag },
-    Setting { id: "rd_on", key: raid::MODE, label: "ضد هجوم", section: "rd", kind: Kind::Flag },
-    Setting { id: "strict", key: strict::MODE, label: "حالت سختگیرانه", section: "s", kind: Kind::Flag },
-    Setting { id: "rk_on", key: super::stats::RANKS, label: "مقام خودکار", section: "adv", kind: Kind::Flag },
-    Setting { id: "tmed_on", key: tempmedia::MODE, label: "رسانه موقت", section: "tmed", kind: Kind::Flag },
-    Setting { id: "lim_on", key: limits::MODE, label: "محدودیت مدیران", section: "lim", kind: Kind::Flag },
-    Setting { id: "nsfw_live", key: nsfw::LIVE, label: "حذف واقعی غیراخلاقی", section: "nsw", kind: Kind::Flag },
-    Setting { id: "nsfw_soft", key: nsfw::SOFT, label: "نگه داشتن محتوای محرک", section: "nsw", kind: Kind::Flag },
-    Setting { id: "cq_shadow", key: concepts::SHADOW, label: "فقط بررسی، بدون حذف", section: "cq", kind: Kind::Flag },
-    Setting { id: "ad_shadow", key: ocr::SHADOW, label: "فقط بررسی تبلیغ، بدون حذف", section: "cq", kind: Kind::Flag },
-
     Setting {
-        id: "fl_lim", key: flood::LIMIT, label: "پیام", section: "fl",
-        kind: Kind::Number {
-            range: flood::LIMIT_RANGE, presets: flood::LIMIT_PRESETS,
-            per_row: 5, show: plain, read: flood::limit,
-        },
-    },
-    Setting {
-        id: "fl_win", key: flood::WINDOW, label: "ثانیه", section: "fl",
-        kind: Kind::Number {
-            range: flood::WINDOW_RANGE, presets: flood::WINDOW_PRESETS,
-            per_row: 5, show: plain, read: flood::window,
-        },
-    },
-    Setting {
-        id: "bt_lim", key: betrayal::LIMIT, label: "حذف", section: "bt",
-        kind: Kind::Number {
-            range: betrayal::LIMIT_RANGE, presets: betrayal::LIMIT_PRESETS,
-            per_row: 5, show: plain, read: betrayal::limit,
-        },
-    },
-    Setting {
-        id: "bt_win", key: betrayal::WINDOW, label: "دقیقه", section: "bt",
-        kind: Kind::Number {
-            range: betrayal::WINDOW_RANGE, presets: betrayal::WINDOW_PRESETS,
-            per_row: 5, show: plain, read: betrayal::window,
-        },
-    },
-    Setting {
-        id: "wn_lim", key: warns::LIMIT, label: "تعداد اخطار", section: "wn",
-        kind: Kind::Number {
-            range: warns::LIMIT_RANGE, presets: warns::LIMIT_PRESETS,
-            per_row: 5, show: plain, read: warns::limit,
-        },
-    },
-    Setting {
-        id: "s_lim", key: strict::LIMIT, label: "تعداد تخلف", section: "s",
-        kind: Kind::Number {
-            range: strict::LIMIT_RANGE, presets: strict::LIMIT_PRESETS,
-            per_row: 5, show: plain, read: strict::limit,
-        },
-    },
-    Setting {
-        id: "s_time", key: strict::TIME, label: "مدت محدودیت", section: "s",
-        kind: Kind::Number {
-            range: strict::TIME_RANGE, presets: strict::TIME_PRESETS,
-            per_row: 2, show: duration, read: strict::minutes,
-        },
-    },
-    Setting {
-        id: "rd_lim", key: raid::LIMIT, label: "عضو تازه", section: "rd",
-        kind: Kind::Number {
-            range: raid::LIMIT_RANGE, presets: raid::LIMIT_PRESETS,
-            per_row: 5, show: plain, read: raid::limit,
-        },
-    },
-    Setting {
-        id: "rd_win", key: raid::WINDOW, label: "ثانیه", section: "rd",
-        kind: Kind::Number {
-            range: raid::WINDOW_RANGE, presets: raid::WINDOW_PRESETS,
-            per_row: 5, show: plain, read: raid::window,
-        },
-    },
-    Setting {
-        id: "rd_time", key: raid::TIME, label: "مدت سکوت", section: "rd",
-        kind: Kind::Number {
-            range: raid::TIME_RANGE, presets: raid::TIME_PRESETS,
-            per_row: 2, show: duration, read: raid::minutes,
-        },
-    },
-    Setting {
-        id: "cp_t", key: captcha::TIMEOUT, label: "مهلت (ثانیه)", section: "cp",
-        kind: Kind::Number {
-            range: captcha::TIMEOUT_RANGE, presets: captcha::TIMEOUT_PRESETS,
-            per_row: 4, show: plain, read: captcha::timeout,
-        },
-    },
-    Setting {
-        id: "cp_n", key: captcha::CHOICES, label: "تعداد گزینه ها", section: "cp",
-        kind: Kind::Number {
-            range: captcha::CHOICES_RANGE, presets: captcha::CHOICES_PRESETS,
-            per_row: 5, show: plain, read: captcha_choices,
-        },
-    },
-    Setting {
-        id: "nt_t", key: notice::TTL, label: "پاک شدن خودکار (ثانیه)", section: "nt",
-        kind: Kind::Number {
-            range: notice::TTL_RANGE, presets: notice::TTL_PRESETS,
-            per_row: 5, show: never, read: notice::ttl,
-        },
-    },
-    Setting {
-        id: "gpe", key: join::PROMPT_EVERY, label: "فاصله بین اعلان ها", section: "gp",
-        kind: Kind::Number {
-            range: join::EVERY_RANGE, presets: join::EVERY_PRESETS,
-            per_row: 3, show: every, read: join::prompt_every,
-        },
-    },
-    Setting {
-        id: "gpt", key: join::PROMPT_TTL, label: "حذف خودکار اعلان", section: "gp",
-        kind: Kind::Number {
-            range: join::TTL_RANGE, presets: join::TTL_PRESETS,
-            per_row: 3, show: lifetime, read: join::prompt_ttl,
-        },
-    },
-    Setting {
-        id: "ad", key: join::ADD_REQUIRED, label: "تعداد اد اجباری", section: "ad",
-        kind: Kind::Number {
-            range: join::ADD_RANGE, presets: join::ADD_PRESETS,
-            per_row: 3, show: off, read: required_adds,
-        },
-    },
-    Setting {
-        id: "tmed_min", key: tempmedia::MINUTES, label: "زمان حذف رسانه", section: "tmed",
-        kind: Kind::Number {
-            range: tempmedia::MINUTES_RANGE, presets: tempmedia::MINUTES_PRESETS,
-            per_row: 3, show: duration, read: tempmedia::minutes,
-        },
-    },
-    Setting {
-        id: "cq_lim", key: concepts::LIMIT, label: "حساسیت موضوعی", section: "cq",
-        kind: Kind::Number {
-            range: concepts::LIMIT_RANGE, presets: concepts::LIMIT_PRESETS,
-            per_row: 3, show: plain, read: concepts::limit,
-        },
-    },
-    Setting {
-        id: "nsfw_lim", key: nsfw::LIMIT, label: "حساسیت غیراخلاقی", section: "nsw",
-        kind: Kind::Number {
-            range: nsfw::LIMIT_RANGE, presets: nsfw::LIMIT_PRESETS,
-            per_row: 5, show: percent, read: nsfw::limit,
-        },
-    },
-    Setting {
-        id: "apc", key: purge::AUTO_COUNT, label: "چند پیام هر بار", section: "ap",
-        kind: Kind::Number {
-            range: purge::AUTO_COUNT_RANGE, presets: purge::AUTO_COUNT_PRESETS,
-            per_row: 3, show: all, read: purge::auto_count,
-        },
-    },
-
-    Setting {
-        id: "apt", key: purge::AUTO_AT, label: "ساعت پاکسازی", section: "ap",
-        kind: Kind::Number {
-            range: CLOCK, presets: purge::AUTO_AT_PRESETS,
-            per_row: 3, show: clock, read: auto_at,
-        },
-    },
-    Setting {
-        id: "dr", key: super::stats::REPORT_AT, label: "ساعت گزارش، مثل 21:30", section: "dr",
-        kind: Kind::Number {
-            range: CLOCK, presets: super::stats::REPORT_PRESETS,
-            per_row: 3, show: clock, read: report_at,
-        },
-    },
-    Setting {
-        id: "ngf", key: super::extras::NIGHT, label: "ساعت شروع، مثل 23:37", section: "ng",
-        kind: Kind::Number { range: CLOCK, presets: &[], per_row: 3, show: clock, read: night_from },
-    },
-    Setting {
-        id: "ngt", key: super::extras::NIGHT, label: "ساعت پایان، مثل 7:05", section: "ng",
-        kind: Kind::Number { range: CLOCK, presets: &[], per_row: 3, show: clock, read: night_to },
-    },
-
-    Setting {
-        id: "fl_act", key: flood::ACTION, label: "با متخلف", section: "fl",
-        kind: Kind::Pick { options: MUTE_OR_BAN, default: "mute" },
-    },
-    Setting {
-        id: "bl_on", key: biolink::LOCK, label: "قفل لینک در بایو", section: "bl",
+        id: "fl_on",
+        key: flood::MODE,
+        label: "ضد رگبار",
+        section: "fl",
         kind: Kind::Flag,
     },
     Setting {
-        id: "bl_act", key: biolink::ACTION, label: "با متخلف", section: "bl",
+        id: "bt_on",
+        key: betrayal::MODE,
+        label: "ضد خیانت ادمین",
+        section: "bt",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "cp_on",
+        key: captcha::MODE,
+        label: "احراز هویت",
+        section: "cp",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "nt_on",
+        key: notice::MODE,
+        label: "اعلان حذف",
+        section: "nt",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "rd_on",
+        key: raid::MODE,
+        label: "ضد هجوم",
+        section: "rd",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "strict",
+        key: strict::MODE,
+        label: "حالت سختگیرانه",
+        section: "s",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "lb_on",
+        key: leftback::MODE,
+        label: "بازگشت اعضای خارج شده",
+        section: "sec",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "vm_on",
+        key: voicemonitor::MODE,
+        label: "نظارت واژه های نامناسب در ویس",
+        section: "sec",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "wp_ban",
+        key: restrict::WIPE_BAN,
+        label: "پاکسازی پیام ها با بن",
+        section: "sec",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "wp_mute",
+        key: restrict::WIPE_MUTE,
+        label: "پاکسازی پیام ها با سکوت",
+        section: "sec",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "rk_on",
+        key: super::stats::RANKS,
+        label: "مقام خودکار",
+        section: "adv",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "tmed_on",
+        key: tempmedia::MODE,
+        label: "رسانه موقت",
+        section: "tmed",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "lim_on",
+        key: limits::MODE,
+        label: "محدودیت مدیران",
+        section: "lim",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "cq_shadow",
+        key: concepts::SHADOW,
+        label: "فقط بررسی، بدون حذف",
+        section: "cq",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "ad_shadow",
+        key: ocr::SHADOW,
+        label: "فقط بررسی تبلیغ، بدون حذف",
+        section: "cq",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "tr_shadow",
+        key: trade::SHADOW,
+        label: "فقط بررسی خرید و فروش، بدون حذف",
+        section: "cq",
+        kind: Kind::Flag,
+    },
+
+    Setting {
+        id: "fl_lim",
+        key: flood::LIMIT,
+        label: "پیام",
+        section: "fl",
+        kind: Kind::Number {
+            range: flood::LIMIT_RANGE,
+            presets: flood::LIMIT_PRESETS,
+            per_row: 5,
+            show: plain,
+            read: flood::limit,
+        },
+    },
+    Setting {
+        id: "fl_win",
+        key: flood::WINDOW,
+        label: "ثانیه",
+        section: "fl",
+        kind: Kind::Number {
+            range: flood::WINDOW_RANGE,
+            presets: flood::WINDOW_PRESETS,
+            per_row: 5,
+            show: plain,
+            read: flood::window,
+        },
+    },
+    Setting {
+        id: "bt_lim",
+        key: betrayal::LIMIT,
+        label: "حذف",
+        section: "bt",
+        kind: Kind::Number {
+            range: betrayal::LIMIT_RANGE,
+            presets: betrayal::LIMIT_PRESETS,
+            per_row: 5,
+            show: plain,
+            read: betrayal::limit,
+        },
+    },
+    Setting {
+        id: "bt_win",
+        key: betrayal::WINDOW,
+        label: "دقیقه",
+        section: "bt",
+        kind: Kind::Number {
+            range: betrayal::WINDOW_RANGE,
+            presets: betrayal::WINDOW_PRESETS,
+            per_row: 5,
+            show: plain,
+            read: betrayal::window,
+        },
+    },
+    Setting {
+        id: "wn_lim",
+        key: warns::LIMIT,
+        label: "تعداد اخطار",
+        section: "wn",
+        kind: Kind::Number {
+            range: warns::LIMIT_RANGE,
+            presets: warns::LIMIT_PRESETS,
+            per_row: 5,
+            show: plain,
+            read: warns::limit,
+        },
+    },
+    Setting {
+        id: "s_lim",
+        key: strict::LIMIT,
+        label: "تعداد تخلف",
+        section: "s",
+        kind: Kind::Number {
+            range: strict::LIMIT_RANGE,
+            presets: strict::LIMIT_PRESETS,
+            per_row: 5,
+            show: plain,
+            read: strict::limit,
+        },
+    },
+    Setting {
+        id: "s_time",
+        key: strict::TIME,
+        label: "مدت محدودیت",
+        section: "s",
+        kind: Kind::Number {
+            range: strict::TIME_RANGE,
+            presets: strict::TIME_PRESETS,
+            per_row: 2,
+            show: duration,
+            read: strict::minutes,
+        },
+    },
+    Setting {
+        id: "rd_lim",
+        key: raid::LIMIT,
+        label: "عضو تازه",
+        section: "rd",
+        kind: Kind::Number {
+            range: raid::LIMIT_RANGE,
+            presets: raid::LIMIT_PRESETS,
+            per_row: 5,
+            show: plain,
+            read: raid::limit,
+        },
+    },
+    Setting {
+        id: "rd_win",
+        key: raid::WINDOW,
+        label: "ثانیه",
+        section: "rd",
+        kind: Kind::Number {
+            range: raid::WINDOW_RANGE,
+            presets: raid::WINDOW_PRESETS,
+            per_row: 5,
+            show: plain,
+            read: raid::window,
+        },
+    },
+    Setting {
+        id: "rd_time",
+        key: raid::TIME,
+        label: "مدت سکوت",
+        section: "rd",
+        kind: Kind::Number {
+            range: raid::TIME_RANGE,
+            presets: raid::TIME_PRESETS,
+            per_row: 2,
+            show: duration,
+            read: raid::minutes,
+        },
+    },
+    Setting {
+        id: "cp_t",
+        key: captcha::TIMEOUT,
+        label: "مهلت (ثانیه)",
+        section: "cp",
+        kind: Kind::Number {
+            range: captcha::TIMEOUT_RANGE,
+            presets: captcha::TIMEOUT_PRESETS,
+            per_row: 4,
+            show: plain,
+            read: captcha::timeout,
+        },
+    },
+    Setting {
+        id: "cp_n",
+        key: captcha::CHOICES,
+        label: "تعداد گزینه ها",
+        section: "cp",
+        kind: Kind::Number {
+            range: captcha::CHOICES_RANGE,
+            presets: captcha::CHOICES_PRESETS,
+            per_row: 5,
+            show: plain,
+            read: captcha_choices,
+        },
+    },
+    Setting {
+        id: "nt_t",
+        key: notice::TTL,
+        label: "پاک شدن خودکار (ثانیه)",
+        section: "nt",
+        kind: Kind::Number {
+            range: notice::TTL_RANGE,
+            presets: notice::TTL_PRESETS,
+            per_row: 5,
+            show: never,
+            read: notice::ttl,
+        },
+    },
+    Setting {
+        id: "gpe",
+        key: join::PROMPT_EVERY,
+        label: "فاصله بین اعلان ها",
+        section: "gp",
+        kind: Kind::Number {
+            range: join::EVERY_RANGE,
+            presets: join::EVERY_PRESETS,
+            per_row: 3,
+            show: every,
+            read: join::prompt_every,
+        },
+    },
+    Setting {
+        id: "wct",
+        key: welcome::TTL,
+        label: "حذف خودکار خوشامد",
+        section: "wc",
+        kind: Kind::Number {
+            range: welcome::TTL_RANGE,
+            presets: welcome::TTL_PRESETS,
+
+            per_row: 3,
+            show: lifetime,
+            read: welcome::ttl,
+        },
+    },
+    Setting {
+        id: "gpt",
+        key: join::PROMPT_TTL,
+        label: "حذف خودکار اعلان",
+        section: "gp",
+        kind: Kind::Number {
+            range: join::TTL_RANGE,
+            presets: join::TTL_PRESETS,
+            per_row: 3,
+            show: lifetime,
+            read: join::prompt_ttl,
+        },
+    },
+    Setting {
+        id: "ad",
+        key: join::ADD_REQUIRED,
+        label: "تعداد اد اجباری",
+        section: "ad",
+        kind: Kind::Number {
+            range: join::ADD_RANGE,
+            presets: join::ADD_PRESETS,
+            per_row: 3,
+            show: off,
+            read: required_adds,
+        },
+    },
+    Setting {
+        id: "tmed_min",
+        key: tempmedia::MINUTES,
+        label: "زمان حذف رسانه",
+        section: "tmed",
+        kind: Kind::Number {
+            range: tempmedia::MINUTES_RANGE,
+            presets: tempmedia::MINUTES_PRESETS,
+            per_row: 3,
+            show: duration,
+            read: tempmedia::minutes,
+        },
+    },
+    Setting {
+        id: "cq_lim",
+        key: concepts::LIMIT,
+        label: "حساسیت موضوعی",
+        section: "cq",
+        kind: Kind::Number {
+            range: concepts::LIMIT_RANGE,
+            presets: concepts::LIMIT_PRESETS,
+            per_row: 3,
+            show: plain,
+            read: concepts::limit,
+        },
+    },
+    Setting {
+        id: "tr_lim",
+        key: trade::LIMIT,
+        label: "حساسیت خرید و فروش",
+        section: "cq",
+        kind: Kind::Number {
+            range: trade::LIMIT_RANGE,
+            presets: trade::LIMIT_PRESETS,
+            per_row: 3,
+            show: plain,
+            read: trade::limit,
+        },
+    },
+    Setting {
+        id: "apc",
+        key: purge::AUTO_COUNT,
+        label: "چند پیام هر بار",
+        section: "ap",
+        kind: Kind::Number {
+            range: purge::AUTO_COUNT_RANGE,
+            presets: purge::AUTO_COUNT_PRESETS,
+            per_row: 3,
+            show: all,
+            read: purge::auto_count,
+        },
+    },
+
+    Setting {
+        id: "apt",
+        key: purge::AUTO_AT,
+        label: "ساعت پاکسازی",
+        section: "ap",
+        kind: Kind::Number {
+            range: CLOCK,
+            presets: purge::AUTO_AT_PRESETS,
+            per_row: 3,
+            show: clock,
+            read: auto_at,
+        },
+    },
+    Setting {
+        id: "dr",
+        key: super::stats::REPORT_AT,
+        label: "ساعت گزارش، مثل 21:30",
+        section: "dr",
+        kind: Kind::Number {
+            range: CLOCK,
+            presets: super::stats::REPORT_PRESETS,
+            per_row: 3,
+            show: clock,
+            read: report_at,
+        },
+    },
+    Setting {
+        id: "ngf",
+        key: super::extras::NIGHT,
+        label: "ساعت شروع، مثل 23:37",
+        section: "ng",
+        kind: Kind::Number {
+            range: CLOCK,
+            presets: &[],
+            per_row: 3,
+            show: clock,
+            read: night_from,
+        },
+    },
+    Setting {
+        id: "ngt",
+        key: super::extras::NIGHT,
+        label: "ساعت پایان، مثل 7:05",
+        section: "ng",
+        kind: Kind::Number {
+            range: CLOCK,
+            presets: &[],
+            per_row: 3,
+            show: clock,
+            read: night_to,
+        },
+    },
+
+    Setting {
+        id: "fl_act",
+        key: flood::ACTION,
+        label: "با متخلف",
+        section: "fl",
+        kind: Kind::Pick {
+            options: MUTE_OR_BAN,
+            default: "mute",
+        },
+    },
+    Setting {
+        id: "bl_on",
+        key: biolink::LOCK,
+        label: "قفل لینک در بایو",
+        section: "bl",
+        kind: Kind::Flag,
+    },
+    Setting {
+        id: "bl_act",
+        key: biolink::ACTION,
+        label: "با متخلف",
+        section: "bl",
         kind: Kind::Pick {
             options: &[
-                Pick { id: "bl_del", value: "del", label: "فقط حذف", danger: false },
-                Pick { id: "bl_mute", value: "mute", label: "سکوت", danger: false },
-                Pick { id: "bl_kick", value: "kick", label: "اخراج", danger: true },
-                Pick { id: "bl_ban", value: "ban", label: "بن", danger: true },
+                Pick {
+                    id: "bl_del",
+                    value: "del",
+                    label: "فقط حذف",
+                    danger: false,
+                },
+                Pick {
+                    id: "bl_mute",
+                    value: "mute",
+                    label: "سکوت",
+                    danger: false,
+                },
+                Pick {
+                    id: "bl_kick",
+                    value: "kick",
+                    label: "اخراج",
+                    danger: true,
+                },
+                Pick {
+                    id: "bl_ban",
+                    value: "ban",
+                    label: "بن",
+                    danger: true,
+                },
             ],
             default: "del",
         },
     },
     Setting {
-        id: "bt_act", key: betrayal::ACTION, label: "با ادمین", section: "bt",
+        id: "bt_act",
+        key: betrayal::ACTION,
+        label: "با ادمین",
+        section: "bt",
         kind: Kind::Pick {
             options: &[
-                Pick { id: "bt_demote", value: "demote", label: "فقط عزل", danger: false },
-                Pick { id: "bt_ban", value: "ban", label: "عزل و بن", danger: true },
+                Pick {
+                    id: "bt_demote",
+                    value: "demote",
+                    label: "فقط عزل",
+                    danger: false,
+                },
+                Pick {
+                    id: "bt_ban",
+                    value: "ban",
+                    label: "عزل و بن",
+                    danger: true,
+                },
             ],
             default: "demote",
         },
     },
     Setting {
-        id: "cp_act", key: captcha::ACTION, label: "پس از مهلت", section: "cp",
+        id: "cp_act",
+        key: captcha::ACTION,
+        label: "پس از مهلت",
+        section: "cp",
         kind: Kind::Pick {
             options: &[
-                Pick { id: "cp_mute", value: "mute", label: "سکوت", danger: false },
-                Pick { id: "cp_kick", value: "kick", label: "اخراج", danger: true },
+                Pick {
+                    id: "cp_mute",
+                    value: "mute",
+                    label: "سکوت",
+                    danger: false,
+                },
+                Pick {
+                    id: "cp_kick",
+                    value: "kick",
+                    label: "اخراج",
+                    danger: true,
+                },
             ],
             default: "kick",
         },
     },
     Setting {
-        id: "wn_act", key: warns::ACTION, label: "با سقف اخطار", section: "wn",
+        id: "wn_act",
+        key: warns::ACTION,
+        label: "با سقف اخطار",
+        section: "wn",
         kind: Kind::Pick {
             options: &[
-                Pick { id: "wn_mute", value: "mute", label: "سکوت", danger: false },
-                Pick { id: "wn_ban", value: "ban", label: "اخراج", danger: true },
+                Pick {
+                    id: "wn_mute",
+                    value: "mute",
+                    label: "سکوت",
+                    danger: false,
+                },
+                Pick {
+                    id: "wn_ban",
+                    value: "ban",
+                    label: "اخراج",
+                    danger: true,
+                },
             ],
             default: "ban",
         },
     },
     Setting {
-        id: "s_act", key: strict::ACTION, label: "با متخلف", section: "s",
+        id: "s_act",
+        key: strict::ACTION,
+        label: "با متخلف",
+        section: "s",
         kind: Kind::Pick {
             options: &[
-                Pick { id: "strict_mute", value: "mute", label: "سکوت", danger: false },
-                Pick { id: "strict_ban", value: "ban", label: "بن", danger: true },
+                Pick {
+                    id: "strict_mute",
+                    value: "mute",
+                    label: "سکوت",
+                    danger: false,
+                },
+                Pick {
+                    id: "strict_ban",
+                    value: "ban",
+                    label: "بن",
+                    danger: true,
+                },
             ],
             default: "mute",
         },
     },
     Setting {
-        id: "tmed_who", key: tempmedia::AUDIENCE, label: "شامل چه کسانی", section: "tmed",
+        id: "tmed_who",
+        key: tempmedia::AUDIENCE,
+        label: "شامل چه کسانی",
+        section: "tmed",
         kind: Kind::Pick {
             options: &[
-                Pick { id: "tmed_plain", value: "plain", label: "بدون مقام", danger: false },
-                Pick { id: "tmed_all", value: "all", label: "همه", danger: false },
+                Pick {
+                    id: "tmed_plain",
+                    value: "plain",
+                    label: "بدون مقام",
+                    danger: false,
+                },
+                Pick {
+                    id: "tmed_all",
+                    value: "all",
+                    label: "همه",
+                    danger: false,
+                },
             ],
             default: "plain",
         },
     },
     Setting {
-        id: "an_act", key: super::answers::AUDIENCE, label: "مخاطب پاسخ ها", section: "an",
+        id: "an_act",
+        key: super::answers::AUDIENCE,
+        label: "مخاطب پاسخ ها",
+        section: "an",
         kind: Kind::Pick {
             options: &[
-                Pick { id: "an_all", value: "all", label: "همه", danger: false },
-                Pick { id: "an_admins", value: "admins", label: "ادمین ها", danger: false },
-                Pick { id: "an_vips", value: "vips", label: "ویژه ها", danger: false },
+                Pick {
+                    id: "an_all",
+                    value: "all",
+                    label: "همه",
+                    danger: false,
+                },
+                Pick {
+                    id: "an_admins",
+                    value: "admins",
+                    label: "ادمین ها",
+                    danger: false,
+                },
+                Pick {
+                    id: "an_vips",
+                    value: "vips",
+                    label: "ویژه ها",
+                    danger: false,
+                },
             ],
             default: "all",
         },
@@ -415,9 +798,10 @@ pub async fn store(ctx: &Ctx, chat: i64, setting: &Setting, value: u32) {
             super::extras::set_night(ctx, chat, Some((from, value))).await;
         }
         _ => {
-            ctx.settings
+            let _ = ctx
+                .settings
                 .set_value(chat, setting.key, &value.to_string())
-                .await
+                .await;
         }
     }
 }
@@ -442,11 +826,11 @@ pub async fn apply(ctx: &Ctx, chat: i64, action: &str) -> Option<&'static str> {
         match &setting.kind {
             Kind::Flag if setting.id == action => {
                 let now_on = !ctx.settings.is_locked(chat, setting.key);
-                ctx.settings.set(chat, setting.key, now_on).await;
 
                 if super::locks::LOCKS.iter().any(|lock| lock.key == setting.key) {
-                    super::strict::sync_pick(ctx, chat, setting.key, now_on).await;
-                    super::bots::on_lock_set(ctx, chat, setting.key, now_on).await;
+                    super::locks::set(ctx, chat, setting.key, now_on).await;
+                } else {
+                    ctx.settings.set(chat, setting.key, now_on).await;
                 }
                 return Some(setting.section);
             }
@@ -489,7 +873,13 @@ pub fn rows(
             )]]
         }
 
-        Kind::Number { presets, per_row, show, read, .. } => {
+        Kind::Number {
+            presets,
+            per_row,
+            show,
+            read,
+            ..
+        } => {
             let current = read(ctx, chat);
             let mut rows = vec![vec![Button::data(setting.label, payload(setting.section))]];
             rows.extend(presets.chunks(*per_row).map(|block| {
@@ -546,7 +936,11 @@ mod tests {
         let count = actions.len();
         actions.sort_unstable();
         actions.dedup();
-        assert_eq!(actions.len(), count, "two settings answer to the same action");
+        assert_eq!(
+            actions.len(),
+            count,
+            "two settings answer to the same action"
+        );
     }
 
     #[test]
@@ -583,7 +977,11 @@ mod tests {
     #[test]
     fn no_id_carries_a_colon() {
         for setting in SETTINGS {
-            assert!(!setting.id.contains(':'), "{} has a colon in its id", setting.id);
+            assert!(
+                !setting.id.contains(':'),
+                "{} has a colon in its id",
+                setting.id
+            );
             if let Kind::Pick { options, .. } = &setting.kind {
                 for pick in *options {
                     assert!(!pick.id.contains(':'), "{} has a colon in its id", pick.id);

@@ -21,14 +21,23 @@ const MAX_BOXES: usize = 16;
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
-fn detector() -> Option<&'static nsfw::Session> {
-    static CELL: std::sync::OnceLock<Option<nsfw::Session>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| nsfw::open(DET, "text detector")).as_ref()
+fn detector() -> Option<&'static nsfw::SessionPool> {
+    static CELL: std::sync::OnceLock<Option<nsfw::SessionPool>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| nsfw::open_pool(DET, "text detector", nsfw::infer_sessions()))
+        .as_ref()
 }
 
-fn reader() -> Option<&'static nsfw::Session> {
-    static CELL: std::sync::OnceLock<Option<nsfw::Session>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| nsfw::open(REC, "text reader")).as_ref()
+fn reader() -> Option<&'static nsfw::SessionPool> {
+    static CELL: std::sync::OnceLock<Option<nsfw::SessionPool>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| nsfw::open_pool(REC, "text reader", nsfw::infer_sessions()))
+        .as_ref()
+}
+
+pub fn capacity_probe() -> usize {
+    [detector(), reader()]
+        .into_iter()
+        .filter(Option::is_some)
+        .count()
 }
 
 fn dictionary() -> &'static Vec<&'static str> {
@@ -39,7 +48,7 @@ fn dictionary() -> &'static Vec<&'static str> {
 type Box = (u32, u32, u32, u32);
 
 fn detect(image: &image::RgbImage) -> Option<Vec<Box>> {
-    let session = detector()?;
+    let pool = detector()?;
     let (width, height) = image.dimensions();
     let scale = (DET_SIDE as f32 / width.max(height) as f32).min(1.0);
 
@@ -56,8 +65,9 @@ fn detect(image: &image::RgbImage) -> Option<Vec<Box>> {
         }
     }
 
-    let (shape, probability) =
-        nsfw::run_shaped(session, vec![1, 3, i64::from(tall), i64::from(wide)], input)?;
+    let (shape, probability) = pool.with(|session| {
+        nsfw::run_shaped(session, vec![1, 3, i64::from(tall), i64::from(wide)], input)
+    })?;
     if shape.len() < 4 {
         return None;
     }
@@ -119,11 +129,16 @@ fn detect(image: &image::RgbImage) -> Option<Vec<Box>> {
 }
 
 fn read_box(image: &image::RgbImage, at: Box) -> Option<String> {
-    let session = reader()?;
+    let pool = reader()?;
     let crop = image::imageops::crop_imm(image, at.0, at.1, at.2, at.3).to_image();
     let (width, height) = crop.dimensions();
     let wide = ((width as f32 * REC_HEIGHT as f32 / height.max(1) as f32) as u32).clamp(16, 1200);
-    let view = image::imageops::resize(&crop, wide, REC_HEIGHT, image::imageops::FilterType::Triangle);
+    let view = image::imageops::resize(
+        &crop,
+        wide,
+        REC_HEIGHT,
+        image::imageops::FilterType::Triangle,
+    );
 
     let raw = view.as_raw();
     let plane = (wide * REC_HEIGHT) as usize;
@@ -134,8 +149,13 @@ fn read_box(image: &image::RgbImage, at: Box) -> Option<String> {
         }
     }
 
-    let (shape, logits) =
-        nsfw::run_shaped(session, vec![1, 3, i64::from(REC_HEIGHT), i64::from(wide)], input)?;
+    let (shape, logits) = pool.with(|session| {
+        nsfw::run_shaped(
+            session,
+            vec![1, 3, i64::from(REC_HEIGHT), i64::from(wide)],
+            input,
+        )
+    })?;
     if shape.len() < 3 {
         return None;
     }
@@ -301,7 +321,10 @@ mod tests {
     #[test]
     fn a_link_broken_across_boxes_still_counts() {
         assert_eq!(advertises("join t. me/promo"), Some("لینک تلگرام در تصویر"));
-        assert_eq!(advertises("shop at mystore .com now"), Some("آدرس سایت در تصویر"));
+        assert_eq!(
+            advertises("shop at mystore .com now"),
+            Some("آدرس سایت در تصویر")
+        );
     }
 
     #[test]

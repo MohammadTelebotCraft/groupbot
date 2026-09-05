@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use grammers_client::message::{Button, InputMessage, Message, ReplyMarkup};
 use grammers_client::session::types::PeerRef;
+use grammers_client::tl;
 use grammers_client::update::CallbackQuery;
 
 use super::{Ctx, bot_admin_key, esc, is_owner, sender_is_creator};
@@ -11,7 +12,7 @@ pub const DEMOTE: &[&str] = &["حذف ادمین", "عزل ادمین", "برک�
 pub const TAG: &[&str] = &["تنظیم تگ", "تنظیم مقام"];
 pub const TAG_CLEAR: &[&str] = &["حذف تگ", "حذف مقام"];
 
-const TAG_MAX: usize = 16;
+pub const TAG_MAX: usize = 16;
 
 pub const PENDING_TTL: Duration = Duration::from_secs(600);
 
@@ -78,25 +79,8 @@ async fn tag(ctx: &Ctx, message: &Message, text: &str) -> bool {
         return false;
     };
 
-    let target = match target.id.bare_id() {
-        Some(id) => super::admin_ref(ctx, chat_ref, id)
-            .await
-            .map(|(peer, _)| peer)
-            .unwrap_or(target),
-        None => target,
-    };
+    let outcome = set_rank(ctx, chat_ref, target.id.bare_id(), target, title).await;
 
-    let existing = ctx.client.set_admin_rights(chat_ref, target).load_current().await;
-    let outcome = match existing {
-        Ok(builder) => builder.rank(title).await,
-        Err(e) => {
-            eprintln!("tag: {chat}: no current rights for {name}: {e}");
-            ctx.client
-                .set_admin_rights(chat_ref, target)
-                .rank(title)
-                .await
-        }
-    };
     let _ = match outcome {
         Ok(()) if clearing => message.reply(format!("✗ تگ {name} برداشته شد.")).await,
         Ok(()) => message.reply(format!("✓ تگ {name} · {title}")).await,
@@ -104,12 +88,47 @@ async fn tag(ctx: &Ctx, message: &Message, text: &str) -> bool {
             eprintln!("tag: {chat}: could not title {name}: {e}");
             message
                 .reply(format!(
-                    "انجام نشد · {e}\nربات باید ادمین باشد و اجازه «افزودن ادمین» داشته باشد."
+                    "انجام نشد · {e}\nربات باید ادمین باشد و اجازه «مدیریت مقام ها» داشته باشد."
                 ))
                 .await
         }
     };
     true
+}
+
+pub async fn set_rank(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    user: Option<i64>,
+    target: PeerRef,
+    rank: &str,
+) -> Result<(), grammers_client::InvocationError> {
+    let asked = ctx
+        .client
+        .invoke_outbound(&tl::functions::messages::EditChatParticipantRank {
+            peer: chat_ref.into(),
+            participant: target.into(),
+            rank: rank.to_owned(),
+        })
+        .await;
+    let failed = match asked {
+        Ok(_) => return Ok(()),
+        Err(e) => e,
+    };
+
+    let Some((peer, _)) = super::admin_ref(ctx, chat_ref, user.unwrap_or_default()).await else {
+        return Err(failed);
+    };
+    match ctx
+        .client
+        .set_admin_rights(chat_ref, peer)
+        .load_current()
+        .await
+    {
+        Ok(builder) => builder.rank(rank).await,
+
+        Err(_) => Err(failed),
+    }
 }
 
 const RIGHTS: &[(&str, u32)] = &[
@@ -188,6 +207,49 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
     true
 }
 
+pub enum DemoteError {
+    NotFound,
+    Rpc(grammers_client::InvocationError),
+}
+
+impl From<grammers_client::InvocationError> for DemoteError {
+    fn from(error: grammers_client::InvocationError) -> Self {
+        Self::Rpc(error)
+    }
+}
+
+pub async fn demote_by_id(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    chat: i64,
+    user_id: i64,
+    name: &str,
+    actor: Option<(i64, &str)>,
+) -> Result<(), DemoteError> {
+    let Some((peer, _)) = super::admin_ref(ctx, chat_ref, user_id).await else {
+        return Err(DemoteError::NotFound);
+    };
+    ctx.client.set_admin_rights(chat_ref, peer).await?;
+    ctx.settings.set(chat, &bot_admin_key(user_id), false).await;
+    ctx.settings
+        .set(chat, &super::stats::badge_key(user_id), false)
+        .await;
+    ctx.forget_admins(chat);
+    super::log::write(
+        ctx,
+        chat,
+        "log_admin",
+        super::log::Entry {
+            title: "عزل ادمین",
+            target: Some((user_id, name)),
+            actor,
+            ..Default::default()
+        },
+    )
+    .await;
+    Ok(())
+}
+
 async fn demote(ctx: &Ctx, message: &Message, target: PeerRef, name: &str) {
     let (Ok(Some(chat_ref)), Some(chat), Some(user_id)) = (
         message.peer_ref().await,
@@ -197,40 +259,40 @@ async fn demote(ctx: &Ctx, message: &Message, target: PeerRef, name: &str) {
         return;
     };
 
-    let peer = match super::admin_ref(ctx, chat_ref, user_id).await {
-        Some((peer, _)) => peer,
-        None => target,
-    };
-
-    if let Err(e) = ctx.client.set_admin_rights(chat_ref, peer).await {
-        eprintln!("promote: {chat}: could not demote {user_id}: {e}");
-        let _ = message
-            .reply("انجام نشد. ربات فقط می تواند ادمین هایی را عزل کند که خودش اضافه کرده است.")
-            .await;
-        return;
-    }
-    ctx.settings.set(chat, &bot_admin_key(user_id), false).await;
-    ctx.forget_admins(chat);
     let by = super::sender_of(message);
-    super::log::write(
+    let outcome = demote_by_id(
         ctx,
+        chat_ref,
         chat,
-        "log_admin",
-        super::log::Entry {
-            title: "عزل ادمین",
-            target: Some((user_id, name)),
-            actor: by.as_ref().map(|(id, name)| (*id, name.as_str())),
-            ..Default::default()
-        },
+        user_id,
+        name,
+        by.as_ref().map(|(id, name)| (*id, name.as_str())),
     )
     .await;
 
-    let _ = message
-        .reply(InputMessage::new().html(format!(
-            "✗ <b>{}</b> از ادمینی گروه و ربات عزل شد.",
-            esc(name)
-        )))
-        .await;
+    let _ = match outcome {
+        Ok(()) => {
+            message
+                .reply(InputMessage::new().html(format!(
+                    "✗ <b>{}</b> از ادمینی گروه و ربات عزل شد.",
+                    esc(name)
+                )))
+                .await
+        }
+        Err(e) => {
+            match e {
+                DemoteError::NotFound => {
+                    eprintln!("promote: {chat}: could not demote {user_id}: not a listed admin")
+                }
+                DemoteError::Rpc(e) => {
+                    eprintln!("promote: {chat}: could not demote {user_id}: {e}")
+                }
+            }
+            message
+                .reply("انجام نشد. ربات فقط می تواند ادمین هایی را عزل کند که خودش اضافه کرده است.")
+                .await
+        }
+    };
 }
 
 pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, chat: i64) {
@@ -310,15 +372,20 @@ async fn confirm(ctx: &Ctx, query: &CallbackQuery, chat: i64, pending: &Pending)
         eprintln!("promote: {chat}: could not promote {}: {e}", pending.name);
         let _ = query
             .answer()
-            .edit(InputMessage::new().html(
-                "انجام نشد. مطمئن شوید ربات ادمین است و اجازه «افزودن ادمین» دارد.",
-            ))
+            .edit(
+                InputMessage::new()
+                    .html("انجام نشد. مطمئن شوید ربات ادمین است و اجازه «افزودن ادمین» دارد."),
+            )
             .await;
         return;
     }
 
     if let Some(id) = pending.target.id.bare_id() {
         ctx.settings.set(chat, &bot_admin_key(id), true).await;
+
+        ctx.settings
+            .set(chat, &super::stats::badge_key(id), false)
+            .await;
     }
     ctx.forget_admins(chat);
 
@@ -385,7 +452,11 @@ fn markup(pending: &Pending, opener: i64, key: u64) -> ReplyMarkup {
                 .enumerate()
                 .map(|(column, (label, bit))| {
                     let index = row * 2 + column;
-                    let mark = if pending.rights & bit != 0 { "✓" } else { "✗" };
+                    let mark = if pending.rights & bit != 0 {
+                        "✓"
+                    } else {
+                        "✗"
+                    };
                     Button::data(
                         format!("{mark}  {label}"),
                         format!("a:{opener}:{key}:{index}").into_bytes(),

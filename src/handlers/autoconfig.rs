@@ -1,9 +1,11 @@
+use std::sync::Arc;
+
+use grammers_client::message::{InputMessage, Message};
 use grammers_client::session::types::{PeerId, PeerRef};
 use grammers_client::tl;
 use grammers_client::update::Raw;
-use grammers_client::message::{InputMessage, Message};
 
-use super::{Ctx, bots, config, locks, welcome};
+use super::{Ctx, bots, config, install, locks, welcome};
 
 const DEFAULTS: &[(&str, &str)] = &[
     ("links", "قفل لینک"),
@@ -15,7 +17,7 @@ const DEFAULTS: &[(&str, &str)] = &[
 
 const DEFAULT_WELCOME: &str = "{منشن} به {گروه} خوش آمدی.";
 
-pub async fn on_message(ctx: &Ctx, message: &Message) -> bool {
+pub async fn on_message(ctx: &Arc<Ctx>, message: &Message) -> bool {
     let Some(tl::enums::MessageAction::ChatAddUser(action)) = message.action() else {
         return false;
     };
@@ -24,67 +26,75 @@ pub async fn on_message(ctx: &Ctx, message: &Message) -> bool {
     if me_id == 0 || !action.users.contains(&me_id) {
         return false;
     }
-    let Ok(Some(chat)) = message.peer_ref().await else {
+    let (Ok(Some(chat)), Some(chat_id)) = (
+        message.peer_ref().await,
+        message.peer_id().bot_api_dialog_id(),
+    ) else {
         return false;
     };
 
-    let me_ref = match PeerId::user(me_id) {
-        Some(id) => id.to_ambient_ref(),
-        None => return false,
-    };
-    let is_admin = ctx
-        .client
-        .get_permissions(chat, me_ref)
-        .await
-        .is_ok_and(|p| p.is_admin());
-    if !is_admin {
+    let standing = install::standing(ctx, chat).await;
+    if !install::ready(&standing) {
+        install::announce(ctx, chat, chat_id, &standing).await;
+
         return false;
     }
-    configure(ctx, chat).await
+    let configured = configure(ctx, chat).await;
+    install::ensure_cleaner(ctx, chat, chat_id).await;
+    configured
 }
 
-pub async fn on_raw(ctx: &Ctx, raw: &Raw) -> bool {
+pub async fn on_raw(ctx: &Arc<Ctx>, raw: &Raw) -> bool {
     let my_id = ctx.me_id();
     if my_id == 0 {
         return false;
     }
 
-    let chat_id = match &raw.raw {
-        tl::enums::Update::ChannelParticipant(update) if update.user_id == my_id => {
-            let is_admin = matches!(
-                update.new_participant,
-                Some(
-                    tl::enums::ChannelParticipant::Admin(_)
-                        | tl::enums::ChannelParticipant::Creator(_)
-                )
-            );
-            if !is_admin {
-                return false;
-            }
-            PeerId::channel(update.channel_id)
-        }
-        tl::enums::Update::ChatParticipantAdmin(update)
-            if update.user_id == my_id && update.is_admin =>
-        {
-            PeerId::chat(update.chat_id)
-        }
+    let (chat_id, standing) = match &raw.raw {
+        tl::enums::Update::ChannelParticipant(update) if update.user_id == my_id => (
+            PeerId::channel(update.channel_id),
+            install::from_participant(update.new_participant.as_ref()),
+        ),
+        tl::enums::Update::ChatParticipantAdmin(update) if update.user_id == my_id => (
+            PeerId::chat(update.chat_id),
+            install::Standing::Basic {
+                admin: update.is_admin,
+            },
+        ),
         _ => return false,
     };
     let Some(chat_id) = chat_id else {
         return false;
     };
-    let chat_ref = chat_id
-        .bot_api_dialog_id()
-        .and_then(|id| ctx.chat_ref(id))
+    let Some(chat) = chat_id.bot_api_dialog_id() else {
+        return false;
+    };
+    let chat_ref = ctx
+        .chat_ref(chat)
         .unwrap_or_else(|| chat_id.to_ambient_ref());
-    configure(ctx, chat_ref).await
+
+    if !install::ready(&standing) {
+        install::announce(ctx, chat_ref, chat, &standing).await;
+        return false;
+    }
+
+    let configured = configure(ctx, chat_ref).await;
+    if !configured {
+        install::announce_complete(ctx, chat_ref, chat).await;
+    }
+    install::ensure_cleaner(ctx, chat_ref, chat).await;
+    configured
 }
 
-async fn configure(ctx: &Ctx, chat: PeerRef) -> bool {
+pub async fn configure(ctx: &Ctx, chat: PeerRef) -> bool {
     let Some(chat_id) = chat.id.bot_api_dialog_id() else {
         return false;
     };
     if super::owner(ctx, chat_id).is_some() {
+        return false;
+    }
+
+    if !ctx.claim_autoconfig(chat_id) {
         return false;
     }
     let (creator, admin_names) = super::admins(ctx, chat).await;
@@ -129,7 +139,13 @@ pub async fn apply_defaults(ctx: &Ctx, chat_id: i64) -> String {
         ctx.settings
             .set_value(chat_id, welcome::TEXT, DEFAULT_WELCOME)
             .await;
-        lines.push("✓ خوشامدگویی".to_owned());
+        ctx.settings
+            .set_value(chat_id, welcome::TTL, &welcome::INSTALL_TTL.to_string())
+            .await;
+        lines.push(format!(
+            "✓ خوشامدگویی · حذف خودکار بعد از {} ثانیه",
+            welcome::INSTALL_TTL
+        ));
     }
     lines.join("\n")
 }

@@ -1,4 +1,5 @@
 /target
+__pycache__/
 .env
 *.session
 *.session-journal
@@ -11,3 +12,18 @@ groupbot.locks
 *.md
 !README.md
 assets/clip.onnx
+
+# The general model and its text tower, built by tools/export_vision.py. Too big for GitHub,
+# which refuses anything over 100 MB, and read from beside the executable rather than from
+# assets/ for the reason written on `vision`.
+vision.onnx
+vision_text.onnx
+vision_text_vocab.txt
+vision_text_merges.txt
+
+# The buy/sell classifier and its export directory, built by tools/finetune_intent.py and
+# tools/export_intent.py — the same size argument as the vision files above.
+/out
+intent.onnx
+intent_big.onnx
+/groupbot-local.service

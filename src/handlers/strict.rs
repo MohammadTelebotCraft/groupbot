@@ -82,15 +82,56 @@ pub fn time_label(minutes: u32) -> String {
     }
 }
 
-pub async fn punish(ctx: &Ctx, message: &Message, chat: i64, cause: &str) -> Option<u32> {
+pub enum Outcome {
+    Nothing,
+
+    Chances(u32),
+
+    Announced,
+}
+
+pub async fn punish(ctx: &Ctx, message: &Message, chat: i64, cause: &str) -> Outcome {
     if !ctx.settings.is_locked(chat, MODE) || !counts(ctx, chat, cause) {
-        return None;
+        return Outcome::Nothing;
     }
-    let (Ok(Some(chat_ref)), Ok(Some(target))) = (message.peer_ref().await, message.sender_ref().await)
+    let (Ok(Some(chat_ref)), Ok(Some(target))) =
+        (message.peer_ref().await, message.sender_ref().await)
     else {
-        return None;
+        return Outcome::Nothing;
     };
-    let user = target.id.bare_id()?;
+    punish_refs(ctx, chat, chat_ref, target, &name_of(message)).await
+}
+
+pub async fn punish_detached(
+    ctx: &Ctx,
+    chat: i64,
+    chat_ref: grammers_client::session::types::PeerRef,
+    sender: Option<i64>,
+    name: &str,
+    cause: &str,
+) -> Outcome {
+    if !ctx.settings.is_locked(chat, MODE) || !counts(ctx, chat, cause) {
+        return Outcome::Nothing;
+    }
+    let Some(target) = sender
+        .and_then(grammers_client::session::types::PeerId::user)
+        .map(|id| id.to_ambient_ref())
+    else {
+        return Outcome::Nothing;
+    };
+    punish_refs(ctx, chat, chat_ref, target, name).await
+}
+
+async fn punish_refs(
+    ctx: &Ctx,
+    chat: i64,
+    chat_ref: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+    name: &str,
+) -> Outcome {
+    let Some(user) = target.id.bare_id() else {
+        return Outcome::Nothing;
+    };
 
     let limit = limit(ctx, chat);
     if limit > 1 {
@@ -99,15 +140,29 @@ pub async fn punish(ctx: &Ctx, message: &Message, chat: i64, cause: &str) -> Opt
             .add_strike(chat, user, super::stats::today(), TALLY_DAYS)
             .await;
         if count < limit {
-            return Some(limit - count);
+            return Outcome::Chances(limit - count);
         }
     }
 
     let action = action_of(ctx, chat);
     let duration = duration(ctx, chat);
-    if let Err(e) = restrict::apply(ctx, chat_ref, target, action, duration, super::restrict::By { reason: "حالت سختگیرانه", target_name: &super::name_of(message), ..Default::default() }).await {
+    if let Err(e) = restrict::apply(
+        ctx,
+        chat_ref,
+        target,
+        action,
+        duration,
+        super::restrict::By {
+            reason: "حالت سختگیرانه",
+            target_name: name,
+            ..Default::default()
+        },
+    )
+    .await
+    {
         eprintln!("strict mode: {chat}: could not restrict sender: {e}");
-        return None;
+
+        return Outcome::Nothing;
     }
     ctx.settings.clear_strikes(chat, user).await;
 
@@ -131,13 +186,34 @@ pub async fn punish(ctx: &Ctx, message: &Message, chat: i64, cause: &str) -> Opt
             chat_ref,
             grammers_client::message::InputMessage::new().html(format!(
                 "<b>{}</b> به دلیل ارسال مورد قفل شده{how_many} {what}{how_long}.",
-                esc(&name_of(message))
+                esc(name)
             )),
         )
         .await;
-    None
+    Outcome::Announced
 }
 
 pub fn chances_line(chances: u32) -> String {
     format!("<i>{chances} فرصت دیگر دارید.</i>")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_one_outcome_stays_quiet() {
+        let quiet = |outcome: &Outcome| matches!(outcome, Outcome::Announced);
+        assert!(!quiet(&Outcome::Nothing));
+        assert!(!quiet(&Outcome::Chances(2)));
+        assert!(quiet(&Outcome::Announced));
+
+        let chances = |outcome: &Outcome| match outcome {
+            Outcome::Chances(left) => Some(*left),
+            _ => None,
+        };
+        assert_eq!(chances(&Outcome::Chances(2)), Some(2));
+        assert_eq!(chances(&Outcome::Nothing), None);
+        assert_eq!(chances(&Outcome::Announced), None);
+    }
 }

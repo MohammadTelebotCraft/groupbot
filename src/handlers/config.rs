@@ -13,6 +13,49 @@ pub const HELP: &[&str] = &["راهنما", "دستورها", "دستورات"];
 
 const START: &[&str] = &["/start", "شروع"];
 
+const LINKS: &[(&str, &str)] = &[
+    ("CHANNEL", "📢  کانال"),
+    ("SUPPORT", "💬  پشتیبانی"),
+    ("SOURCE", "🧩  سورس"),
+];
+
+fn link(name: &str) -> Option<String> {
+    let value = std::env::var(name).ok()?;
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some(rest) = value
+        .strip_prefix("https://")
+        .or(value.strip_prefix("http://"))
+    {
+        return rest
+            .contains('.')
+            .then(|| value.split_whitespace().next().unwrap_or(value).to_owned());
+    }
+    let handle = value.trim_start_matches('@');
+    let usable = handle.len() >= 5
+        && handle
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_');
+    usable.then(|| format!("https://t.me/{handle}"))
+}
+
+async fn own_username(ctx: &Ctx) -> Option<&'static str> {
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    if let Some(known) = CACHE.get() {
+        return known.as_deref();
+    }
+    let fetched = ctx
+        .client
+        .get_me()
+        .await
+        .ok()
+        .and_then(|me| me.username().map(str::to_owned));
+
+    CACHE.get_or_init(|| fetched).as_deref()
+}
+
 pub async fn start(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
 
@@ -24,6 +67,16 @@ pub async fn start(ctx: &Ctx, message: &Message) -> bool {
     });
     if !started {
         return false;
+    }
+    if let Some(user) = message.sender_id().and_then(PeerId::bare_id) {
+        let access_hash = message
+            .sender_ref()
+            .await
+            .ok()
+            .flatten()
+            .map(|peer| peer.auth.hash())
+            .unwrap_or_default();
+        ctx.settings.remember_started_user(user, access_hash).await;
     }
     let mut card = InputMessage::new().html(format!(
         "<b>سلام {} عزیز</b>\n\n\
@@ -37,19 +90,38 @@ pub async fn start(ctx: &Ctx, message: &Message) -> bool {
          ✓ آمار روزانه و رتبه بندی اعضا\n\n\
          <b>راه اندازی</b>\n\
          ۱ · ربات را به گروه اضافه کنید\n\
-         ۲ · او را ادمین کنید تا فعال شود\n\
-         ۳ · در گروه «کانفیگ» را بفرستید\n\n\
-         <i>گروه باید سوپرگروه باشد · «راهنما» برای دستورها، «پنل» برای تنظیمات</i>",
+         ۲ · او را ادمین کنید و همه دسترسی ها را بدهید، «افزودن ادمین جدید» هم لازم است\n\
+         ۳ · همین که دسترسی ها کامل شد خودش فعال می شود و کلینر را هم می آورد\n\n\
+         <i>گروه باید سوپرگروه باشد · «وضعیت نصب» می گوید چه چیزی کم است \
+         · «راهنما» برای دستورها، «پنل» برای تنظیمات</i>",
         esc(&name_of(message)),
     ));
 
-    if let Ok(me) = ctx.client.get_me().await
-        && let Some(username) = me.username()
-    {
-        card = card.reply_markup(ReplyMarkup::from_buttons_row(&[Button::url(
-            "افزودن ربات به گروه",
+    let mut rows: Vec<Vec<Button>> = Vec::new();
+    if let Some(username) = own_username(ctx).await {
+        rows.push(vec![Button::url(
+            "➕  افزودن ربات به گروه",
             format!("https://t.me/{username}?startgroup=new"),
-        )]));
+        )]);
+    }
+
+    let links: Vec<(&str, String)> = LINKS
+        .iter()
+        .filter_map(|(name, label)| Some((*label, link(name)?)))
+        .collect();
+    for pair in links.chunks(2) {
+        rows.push(
+            pair.iter()
+                .map(|(label, url)| Button::url(*label, url.clone()))
+                .collect(),
+        );
+    }
+    if let Some(user) = message.sender_id().and_then(PeerId::bare_id) {
+        let chat = message.peer_id().bot_api_dialog_id().unwrap_or(0);
+        rows.push(vec![super::panel::help_button(user, chat)]);
+    }
+    if !rows.is_empty() {
+        card = card.reply_markup(ReplyMarkup::from_buttons(&rows));
     }
     let _ = message.reply(card).await;
     true
@@ -75,7 +147,7 @@ pub async fn help(ctx: &Ctx, message: &Message) -> bool {
     true
 }
 
-pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
+pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
     let text = message.text().trim();
     let (Some(chat), Some(sender)) = (
         message.peer_id().bot_api_dialog_id(),
@@ -125,13 +197,34 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
 
     if CONFIG.contains(&text) {
         if !sender_is_creator(ctx, message).await {
+            if super::can_manage(ctx, message).await {
+                let _ = message
+                    .reply("فقط سازنده گروه می تواند «کانفیگ» را بفرستد.")
+                    .await;
+            }
             return true;
         }
-        ctx.settings.set_value(chat, OWNER, &sender.to_string()).await;
-        let admin_names = match message.peer_ref().await {
-            Ok(Some(chat_ref)) => super::admins(ctx, chat_ref).await.1,
-            _ => Vec::new(),
+        let Ok(Some(chat_ref)) = message.peer_ref().await else {
+            return false;
         };
+
+        let standing = super::install::standing(ctx, chat_ref).await;
+        if !super::install::ready(&standing) {
+            let _ = message
+                .reply(match standing {
+                    super::install::Standing::Unknown => InputMessage::new()
+                        .text("نتوانستم دسترسی های خودم را بخوانم. چند لحظه بعد دوباره بفرستید."),
+                    standing => InputMessage::new()
+                        .html(super::install::card(&standing, owner(ctx, chat).is_some())),
+                })
+                .await;
+            return true;
+        }
+
+        ctx.settings
+            .set_value(chat, OWNER, &sender.to_string())
+            .await;
+        let admin_names = super::admins(ctx, chat_ref).await.1;
 
         let locked = super::autoconfig::apply_defaults(ctx, chat).await;
         let _ = message
@@ -143,6 +236,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
                 &locked,
             )))
             .await;
+        super::install::ensure_cleaner(ctx, chat_ref, chat).await;
         return true;
     }
 
@@ -199,4 +293,43 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         .reply(format!("{mark} {target_name} {what}.\nتوسط مالک: {by}"))
         .await;
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_link_is_taken_in_whatever_shape_it_was_written() {
+        unsafe {
+            std::env::set_var("GB_TEST_LINK", "@mychannel");
+            assert_eq!(
+                link("GB_TEST_LINK").as_deref(),
+                Some("https://t.me/mychannel")
+            );
+
+            std::env::set_var("GB_TEST_LINK", "mychannel");
+            assert_eq!(
+                link("GB_TEST_LINK").as_deref(),
+                Some("https://t.me/mychannel")
+            );
+
+            std::env::set_var("GB_TEST_LINK", "  https://t.me/joinchat/AAA  ");
+            assert_eq!(
+                link("GB_TEST_LINK").as_deref(),
+                Some("https://t.me/joinchat/AAA")
+            );
+
+            std::env::set_var("GB_TEST_LINK", "");
+            assert_eq!(link("GB_TEST_LINK"), None);
+            std::env::set_var("GB_TEST_LINK", "@ab");
+            assert_eq!(link("GB_TEST_LINK"), None);
+            std::env::set_var("GB_TEST_LINK", "my channel");
+            assert_eq!(link("GB_TEST_LINK"), None);
+            std::env::set_var("GB_TEST_LINK", "https://nodot");
+            assert_eq!(link("GB_TEST_LINK"), None);
+            std::env::remove_var("GB_TEST_LINK");
+            assert_eq!(link("GB_TEST_LINK"), None);
+        }
+    }
 }

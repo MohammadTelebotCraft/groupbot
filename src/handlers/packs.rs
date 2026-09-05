@@ -1,14 +1,14 @@
 use grammers_client::message::Message;
 use grammers_client::tl;
 
-use super::{Ctx};
+use super::Ctx;
 
 pub const PREFIX: &str = "pack:";
 
 pub const LOCK: &[&str] = &["قفل پک", "قفل پک ایموجی", "قفل استیکرپک"];
 pub const UNLOCK: &[&str] = &["بازکردن پک", "باز کردن پک", "حذف پک", "آنلاک پک"];
 
-fn key(set: i64) -> String {
+pub(crate) fn key(set: i64) -> String {
     format!("{PREFIX}{set}")
 }
 
@@ -56,7 +56,14 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         .map(str::trim)
         .unwrap_or("");
 
-    let found = match message.get_reply().await.ok().flatten().as_ref().and_then(set_of) {
+    let found = match message
+        .get_reply()
+        .await
+        .ok()
+        .flatten()
+        .as_ref()
+        .and_then(set_of)
+    {
         Some(set) => Some((set, String::new())),
         None => match short_name(arg) {
             Some(name) => resolve(ctx, &name).await,

@@ -32,7 +32,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
 
     let Ok(Some(chat_ref)) = message.peer_ref().await else {
-        return false;
+        return true;
     };
     ctx.bump(chat, super::stats::REPORTED);
     let admins = super::chat_admins(ctx, chat_ref, chat)

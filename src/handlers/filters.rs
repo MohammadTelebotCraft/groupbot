@@ -9,6 +9,11 @@ pub const PREFIX: &str = "filter:";
 pub const ADD: &[&str] = &["فیلتر کلمه", "افزودن فیلتر", "اضافه کردن فیلتر", "فیلتر"];
 pub const REMOVE: &[&str] = &["حذف فیلتر", "لغو فیلتر"];
 
+pub const EXACT_ON: &[&str] = &["فیلتر دقیق"];
+pub const EXACT_OFF: &[&str] = &["فیلتر عادی"];
+
+pub const EXACT: &str = "filter_exact";
+
 const MAX_LEN: usize = 64;
 
 const MAX_WORDS: usize = 200;
@@ -25,15 +30,60 @@ pub fn matches(ctx: &Ctx, chat: i64, view: &super::locks::View) -> bool {
     if ctx.settings.indexed_empty(chat, PREFIX) {
         return false;
     }
-    let lowercased = view.lower();
-    !lowercased.is_empty()
-        && ctx
-            .settings
-            .indexed_any(chat, PREFIX, |word| lowercased.contains(word))
+
+    let haystack = view.tight();
+    if haystack.is_empty() {
+        return false;
+    }
+    let exact = ctx.settings.is_locked(chat, EXACT);
+
+    ctx.settings
+        .indexed_any(chat, PREFIX, |word| {
+            found(haystack, &super::locks::tighten(word), exact)
+        })
+}
+
+fn found(text: &str, word: &str, exact: bool) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    if !exact {
+        return text.contains(word);
+    }
+    let joins = |c: char| c.is_alphanumeric() || c == '\u{200c}';
+    let mut from = 0;
+    while let Some(at) = text[from..].find(word) {
+        let start = from + at;
+        let end = start + word.len();
+        if !text[..start].chars().next_back().is_some_and(joins)
+            && !text[end..].chars().next().is_some_and(joins)
+        {
+            return true;
+        }
+
+        from = start + word.chars().next().map_or(1, char::len_utf8);
+    }
+    false
 }
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
+    if let Some(on) = mode_toggle(text) {
+        let Some(chat) = message.peer_id().bot_api_dialog_id() else {
+            return false;
+        };
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
+            return true;
+        }
+        ctx.settings.set(chat, EXACT, on).await;
+        let _ = message
+            .reply(match on {
+                true => "✓ فیلتر دقیق فعال شد · کلمه فقط وقتی می گیرد که جدا آمده باشد، نه داخل کلمه دیگر.",
+                false => "✓ فیلتر عادی فعال شد · کلمه هر جای متن باشد می گیرد.",
+            })
+            .await;
+        return true;
+    }
     let Some((add, command, word)) = parse(text) else {
         return false;
     };
@@ -64,13 +114,15 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
     let Some(word) = asked else {
         let _ = message
-            .reply("کلمه را بعد از دستور بنویسید، مثل «افزودن فیلتر ممد»، یا روی پیام آن ریپلای کنید.")
+            .reply(
+                "کلمه را بعد از دستور بنویسید، مثل «افزودن فیلتر ممد»، یا روی پیام آن ریپلای کنید.",
+            )
             .await;
         return true;
     };
 
-    let word = word.trim().to_lowercase();
-    if word.chars().count() > MAX_LEN || word.contains('=') {
+    let word = super::locks::tighten(&super::locks::folded(word.trim())).into_owned();
+    if word.is_empty() || word.chars().count() > MAX_LEN || word.contains('=') {
         let _ = message
             .reply("این کلمه پذیرفته نمی شود: خیلی بلند است یا نویسه غیرمجاز دارد.")
             .await;
@@ -83,7 +135,14 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    let changed = ctx.settings.set(chat, &key(&word), add).await;
+    let stored = match add {
+        true => word.clone(),
+        false => words(ctx, chat)
+            .into_iter()
+            .find(|held| super::locks::tighten(held) == word)
+            .unwrap_or_else(|| word.clone()),
+    };
+    let changed = ctx.settings.set(chat, &key(&stored), add).await;
     let mark = if add { "✓" } else { "✗" };
     let what = match (add, changed) {
         (true, true) => "به لیست فیلتر اضافه شد",
@@ -93,6 +152,13 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     };
     let _ = message.reply(format!("{mark} «{word}» {what}.")).await;
     true
+}
+
+fn mode_toggle(text: &str) -> Option<bool> {
+    if EXACT_ON.contains(&text) {
+        return Some(true);
+    }
+    EXACT_OFF.contains(&text).then_some(false)
 }
 
 fn parse(text: &str) -> Option<(bool, &'static str, &str)> {
@@ -174,17 +240,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_commands() {
-        assert_eq!(parse("فیلتر کلمه تبلیغ"), Some((true, "فیلتر کلمه", "تبلیغ")));
+    fn exact_matching_spares_the_word_inside_a_word() {
+        assert!(found("صحبت های دیروز", "بت", false));
 
-        assert_eq!(parse("افزودن فیلتر ممد"), Some((true, "افزودن فیلتر", "ممد")));
+        assert!(!found("صحبت های دیروز", "بت", true));
+
+        assert!(found("این بت پرستی است", "بت", true));
+        assert!(found("بت", "بت", true), "the whole message is the word");
+
+        assert!(found("گفت: بت!", "بت", true));
+        assert!(!found("صحبت\u{200c}ها", "بت", true), "the half-space joins");
+
+        assert!(found("صحبت درباره بت", "بت", true));
+
+        assert!(found("این تبلیغ رایگان است", "تبلیغ رایگان", true));
+
+        assert!(!found("فروشی", "فروش", true));
+        assert!(found("فروشی", "فروش", false));
+    }
+
+    #[test]
+    fn parses_commands() {
+        assert_eq!(
+            parse("فیلتر کلمه تبلیغ"),
+            Some((true, "فیلتر کلمه", "تبلیغ"))
+        );
+
+        assert_eq!(
+            parse("افزودن فیلتر ممد"),
+            Some((true, "افزودن فیلتر", "ممد"))
+        );
         assert_eq!(
             parse("اضافه کردن فیلتر ممد"),
             Some((true, "اضافه کردن فیلتر", "ممد"))
         );
         assert!(super::super::phrase_carries_text("افزودن فیلتر"));
-        assert_eq!(parse("فیلتر تبلیغ رایگان"), Some((true, "فیلتر", "تبلیغ رایگان")));
-        assert_eq!(parse("حذف فیلتر تبلیغ"), Some((false, "حذف فیلتر", "تبلیغ")));
+        assert_eq!(
+            parse("فیلتر تبلیغ رایگان"),
+            Some((true, "فیلتر", "تبلیغ رایگان"))
+        );
+        assert_eq!(
+            parse("حذف فیلتر تبلیغ"),
+            Some((false, "حذف فیلتر", "تبلیغ"))
+        );
         assert_eq!(parse("فیلتر"), Some((true, "فیلتر", "")));
 
         assert!(!super::super::phrase_carries_text("فیلتر"));

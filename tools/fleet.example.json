@@ -1,0 +1,44 @@
+{
+  "fleet": {
+    "groups": 500000,
+    "groups_per_shard": 50000,
+    "updates_per_second": 0,
+    "updates_per_shard_per_second": 500,
+    "actions_per_second": 250,
+    "telegram_actions_per_second": 25,
+    "counter_rows_per_second": 8000,
+    "counter_rows_per_shard_per_second": 1000,
+    "counter_rows_per_group": 100,
+    "max_counter_rows_per_shard": 5000000,
+    "note_rows_per_group": 100,
+    "max_note_rows_per_shard": 5000000,
+    "settings_rows_per_group": 100,
+    "max_settings_rows_per_shard": 5000000,
+    "settings_bytes_per_group": 10240,
+    "max_settings_bytes_per_shard": 536870912,
+    "db_pool": 8,
+    "db_max_connections": 100,
+    "db_reserve_ratio": 0.2,
+    "memory_per_shard_mb": 2600,
+    "host_memory_mb": 22000,
+    "host_cpu_cores": 8,
+    "cpu_cores_per_shard": 2,
+    "hosts_available": 3
+  },
+  "routing": {
+    "strategy": "rendezvous-blake2b-v1",
+    "seed": "groupbot-v1"
+  },
+  "shards": [
+    {"name": "alpha", "groups": 50000, "host": "host-a", "env_file": "/home/ubuntu/shards/alpha/.env", "token_ref": "TG_BOT_TOKEN_ALPHA", "database_ref": "groupbot_alpha"},
+    {"name": "bravo", "groups": 50000, "host": "host-a", "env_file": "/home/ubuntu/shards/bravo/.env", "token_ref": "TG_BOT_TOKEN_BRAVO", "database_ref": "groupbot_bravo"},
+    {"name": "charlie", "groups": 50000, "host": "host-a", "env_file": "/home/ubuntu/shards/charlie/.env", "token_ref": "TG_BOT_TOKEN_CHARLIE", "database_ref": "groupbot_charlie"},
+    {"name": "delta", "groups": 50000, "host": "host-a", "env_file": "/home/ubuntu/shards/delta/.env", "token_ref": "TG_BOT_TOKEN_DELTA", "database_ref": "groupbot_delta"},
+    {"name": "echo", "groups": 50000, "host": "host-b", "env_file": "/home/ubuntu/shards/echo/.env", "token_ref": "TG_BOT_TOKEN_ECHO", "database_ref": "groupbot_echo"},
+    {"name": "foxtrot", "groups": 50000, "host": "host-b", "env_file": "/home/ubuntu/shards/foxtrot/.env", "token_ref": "TG_BOT_TOKEN_FOXTROT", "database_ref": "groupbot_foxtrot"},
+    {"name": "golf", "groups": 50000, "host": "host-b", "env_file": "/home/ubuntu/shards/golf/.env", "token_ref": "TG_BOT_TOKEN_GOLF", "database_ref": "groupbot_golf"},
+    {"name": "hotel", "groups": 50000, "host": "host-c", "env_file": "/home/ubuntu/shards/hotel/.env", "token_ref": "TG_BOT_TOKEN_HOTEL", "database_ref": "groupbot_hotel"},
+    {"name": "india", "groups": 50000, "host": "host-c", "env_file": "/home/ubuntu/shards/india/.env", "token_ref": "TG_BOT_TOKEN_INDIA", "database_ref": "groupbot_india"},
+    {"name": "juliet", "groups": 50000, "host": "host-c", "env_file": "/home/ubuntu/shards/juliet/.env", "token_ref": "TG_BOT_TOKEN_JULIET", "database_ref": "groupbot_juliet"}
+  ]
+}

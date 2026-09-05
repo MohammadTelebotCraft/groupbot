@@ -3,7 +3,7 @@ use grammers_client::session::types::PeerRef;
 use grammers_client::tl;
 
 use super::restrict::{self, Action};
-use super::{Ctx, esc, filters, join, vip};
+use super::{Ctx, esc, filters, imgfilter, join, packs, vip};
 
 pub const SHOW: &[(&str, Kind)] = &[
     ("لیست بن", Kind::Ban),
@@ -12,8 +12,12 @@ pub const SHOW: &[(&str, Kind)] = &[
     ("لیست خفه", Kind::Mute),
     ("لیست ویژه", Kind::Vip),
     ("لیست فیلتر", Kind::Filter),
+    ("لیست فیلتر تصویری", Kind::Image),
     ("لیست پاسخ", Kind::Answer),
     ("لیست معاف", Kind::Exempt),
+    ("لیست دستور", Kind::Command),
+    ("لیست پک", Kind::Pack),
+    ("لیست استیکرپک", Kind::Pack),
 ];
 
 pub const CLEAR: &[(&str, Kind)] = &[
@@ -23,8 +27,12 @@ pub const CLEAR: &[(&str, Kind)] = &[
     ("پاکسازی لیست خفه", Kind::Mute),
     ("پاکسازی لیست ویژه", Kind::Vip),
     ("پاکسازی لیست فیلتر", Kind::Filter),
+    ("پاکسازی لیست فیلتر تصویری", Kind::Image),
     ("پاکسازی لیست پاسخ", Kind::Answer),
     ("پاکسازی لیست معاف", Kind::Exempt),
+    ("پاکسازی لیست دستور", Kind::Command),
+    ("پاکسازی لیست پک", Kind::Pack),
+    ("پاکسازی لیست استیکرپک", Kind::Pack),
 ];
 
 pub async fn command(ctx: &Ctx, message: &Message) -> bool {
@@ -66,21 +74,52 @@ pub async fn command(ctx: &Ctx, message: &Message) -> bool {
 }
 
 pub async fn clear_all(ctx: &Ctx, chat_ref: PeerRef, chat: i64, kind: Kind) -> usize {
-    let entries = entries(ctx, chat_ref, chat, kind).await;
     let mut removed = 0;
-    for entry in entries {
-        if matches!(kind, Kind::Filter | Kind::Vip | Kind::Answer | Kind::Exempt) {
-            remove(ctx, chat_ref, chat, kind, &entry.key).await;
-            removed += 1;
-            continue;
+    loop {
+        let entries = entries(ctx, chat_ref, chat, kind, MEMBER_LIST_PAGE).await;
+        if entries.is_empty() {
+            break;
         }
-        let Some(peer) = entry.peer else {
-            eprintln!("lists: {chat}: no ref for user {}", entry.key);
-            continue;
-        };
-        match restrict::apply(ctx, chat_ref, peer, Action::Unban, None, restrict::By { reason: "پنل لیست ها", ..Default::default() }).await {
-            Ok(()) => removed += 1,
-            Err(e) => eprintln!("lists: {chat}: could not clear {}: {e}", entry.key),
+        let mut page_removed = 0;
+        for entry in entries {
+            if matches!(
+                kind,
+                Kind::Filter
+                    | Kind::Image
+                    | Kind::Vip
+                    | Kind::Answer
+                    | Kind::Exempt
+                    | Kind::Command
+                    | Kind::Pack
+            ) {
+                remove(ctx, chat_ref, chat, kind, &entry.key).await;
+                page_removed += 1;
+                continue;
+            }
+            let Some(peer) = entry.peer else {
+                eprintln!("lists: {chat}: no ref for user {}", entry.key);
+                continue;
+            };
+            match restrict::apply(
+                ctx,
+                chat_ref,
+                peer,
+                Action::Unban,
+                None,
+                restrict::By {
+                    reason: "پنل لیست ها",
+                    ..Default::default()
+                },
+            )
+            .await
+            {
+                Ok(_) => page_removed += 1,
+                Err(e) => eprintln!("lists: {chat}: could not clear {}: {e}", entry.key),
+            }
+        }
+        removed += page_removed;
+        if page_removed == 0 || !matches!(kind, Kind::Ban | Kind::Mute) {
+            break;
         }
     }
     removed
@@ -92,11 +131,16 @@ pub enum Kind {
     Mute,
     Vip,
     Filter,
+    Image,
     Answer,
     Exempt,
+    Command,
+    Pack,
 }
 
 const LIMIT: usize = 20;
+
+const MEMBER_LIST_PAGE: usize = 20_000;
 
 impl Kind {
     pub fn from_action(action: &str) -> Option<Self> {
@@ -105,8 +149,11 @@ impl Kind {
             "mute" => Some(Self::Mute),
             "vip" => Some(Self::Vip),
             "filter" => Some(Self::Filter),
+            "imgf" => Some(Self::Image),
             "answer" => Some(Self::Answer),
             "free" => Some(Self::Exempt),
+            "cmd" => Some(Self::Command),
+            "pack" => Some(Self::Pack),
             _ => None,
         }
     }
@@ -117,7 +164,11 @@ impl Kind {
             Self::Mute => super::limits::MUTE,
             Self::Vip => super::limits::VIP,
             Self::Exempt => super::limits::EXEMPT,
-            Self::Filter | Self::Answer => super::limits::SET,
+            Self::Filter
+            | Self::Image
+            | Self::Answer
+            | Self::Command
+            | Self::Pack => super::limits::SET,
         }
     }
 
@@ -127,8 +178,11 @@ impl Kind {
             Self::Mute => "mute",
             Self::Vip => "vip",
             Self::Filter => "filter",
+            Self::Image => "imgf",
             Self::Answer => "answer",
             Self::Exempt => "free",
+            Self::Command => "cmd",
+            Self::Pack => "pack",
         }
     }
 
@@ -138,8 +192,11 @@ impl Kind {
             Self::Mute => "سکوت شده ها",
             Self::Vip => "کاربران ویژه",
             Self::Filter => "لیست فیلتر",
+            Self::Image => "فیلتر تصویری",
             Self::Answer => "پاسخ خودکار",
             Self::Exempt => "معاف ها",
+            Self::Command => "دستور های سفارشی",
+            Self::Pack => "پک های استیکر",
         }
     }
 
@@ -149,8 +206,13 @@ impl Kind {
             Self::Mute => "برای رفع سکوت روی هر نام بزنید.",
             Self::Vip => "برای حذف از لیست ویژه روی هر مورد بزنید.",
             Self::Filter => "برای حذف کلمه روی آن بزنید.",
+            Self::Image => {
+                "علامت ~ یعنی فقط بررسی می کند و پاک نمی کند. برای حذف روی هر مورد بزنید."
+            }
             Self::Answer => "برای حذف یک پاسخ روی آن بزنید.",
             Self::Exempt => "معاف از عضویت اجباری و اد اجباری. برای حذف روی هر مورد بزنید.",
+            Self::Command => "برای حذف یک دستور سفارشی روی آن بزنید.",
+            Self::Pack => "برای بازکردن قفل روی هر پک بزنید.",
         }
     }
 
@@ -167,13 +229,13 @@ impl Kind {
     }
 }
 
-struct Entry {
-    key: String,
-    name: String,
-    peer: Option<PeerRef>,
+pub(crate) struct Entry {
+    pub(crate) key: String,
+    pub(crate) name: String,
+    pub(crate) peer: Option<PeerRef>,
 }
 
-fn word_id(word: &str) -> String {
+pub fn word_id(word: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in word.as_bytes() {
         hash ^= u64::from(*byte);
@@ -200,25 +262,28 @@ pub async fn confirm_clear(
     kind: Kind,
     opener: i64,
 ) -> (String, ReplyMarkup) {
-    let count = entries(ctx, chat_ref, chat, kind).await.len();
+    let count = entries(ctx, chat_ref, chat, kind, MEMBER_LIST_PAGE).await.len();
+    let count_label = if count >= MEMBER_LIST_PAGE {
+        format!("{count}+")
+    } else {
+        count.to_string()
+    };
     let title = format!(
         "<b>پنل مدیریت</b> › <b>{}</b>\n\n\
-         همه <b>{count}</b> مورد از این لیست حذف می شود. این کار برگشت ندارد.",
+         همه <b>{count_label}</b> مورد از این لیست حذف می شود. این کار برگشت ندارد.",
         kind.title()
     );
-    let markup = ReplyMarkup::from_buttons(&[
-        vec![
-            super::style::data(
-                "✅  تایید",
-                format!("p:{opener}:{chat}:l:{}:{CLEAR_CONFIRMED}", kind.action()).into_bytes(),
-                super::style::Colour::Success,
-            ),
-            Button::data(
-                "❌  لغو",
-                format!("p:{opener}:{chat}:l:{}", kind.action()).into_bytes(),
-            ),
-        ],
-    ]);
+    let markup = ReplyMarkup::from_buttons(&[vec![
+        super::style::data(
+            "✅  تایید",
+            format!("p:{opener}:{chat}:l:{}:{CLEAR_CONFIRMED}", kind.action()).into_bytes(),
+            super::style::Colour::Success,
+        ),
+        Button::data(
+            "❌  لغو",
+            format!("p:{opener}:{chat}:l:{}", kind.action()).into_bytes(),
+        ),
+    ]]);
     (title, markup)
 }
 
@@ -229,7 +294,7 @@ pub async fn view(
     kind: Kind,
     opener: i64,
 ) -> (String, ReplyMarkup) {
-    let entries = entries(ctx, chat_ref, chat, kind).await;
+    let entries = entries(ctx, chat_ref, chat, kind, MEMBER_LIST_PAGE).await;
 
     let mut rows: Vec<Vec<Button>> = entries
         .iter()
@@ -254,10 +319,15 @@ pub async fn view(
     )]);
 
     let shown = entries.len().min(LIMIT);
+    let entry_count = if entries.len() >= MEMBER_LIST_PAGE {
+        format!("{}+", entries.len())
+    } else {
+        entries.len().to_string()
+    };
     let mut title = format!(
         "<b>پنل مدیریت</b> › <b>{}</b> ({})\n\n{}",
         kind.title(),
-        entries.len(),
+        entry_count,
         kind.hint()
     );
     if entries.len() > shown {
@@ -273,6 +343,17 @@ pub async fn view(
 }
 
 pub async fn remove(ctx: &Ctx, chat_ref: PeerRef, chat: i64, kind: Kind, entry_key: &str) {
+    if kind == Kind::Command {
+        if let Some((word, _)) = restrict::custom_triggers(ctx, chat)
+            .into_iter()
+            .find(|(word, _)| word_id(word) == entry_key)
+        {
+            ctx.settings
+                .set(chat, &restrict::custom_key(&word), false)
+                .await;
+        }
+        return;
+    }
     if kind == Kind::Answer {
         if let Some(trigger) = super::answers::triggers(ctx, chat)
             .into_iter()
@@ -293,6 +374,22 @@ pub async fn remove(ctx: &Ctx, chat_ref: PeerRef, chat: i64, kind: Kind, entry_k
         }
         return;
     }
+    if kind == Kind::Image {
+        if let Some((name, _)) = imgfilter::listing(ctx, chat)
+            .await
+            .into_iter()
+            .find(|(name, _)| word_id(name) == entry_key)
+        {
+            imgfilter::forget(ctx, chat, &name).await;
+        }
+        return;
+    }
+    if kind == Kind::Pack {
+        if let Ok(set) = entry_key.parse::<i64>() {
+            ctx.settings.set(chat, &packs::key(set), false).await;
+        }
+        return;
+    }
     let Ok(user_id) = entry_key.parse::<i64>() else {
         return;
     };
@@ -305,7 +402,7 @@ pub async fn remove(ctx: &Ctx, chat_ref: PeerRef, chat: i64, kind: Kind, entry_k
         return;
     }
 
-    let Some(peer) = entries(ctx, chat_ref, chat, kind)
+    let Some(peer) = entries(ctx, chat_ref, chat, kind, MEMBER_LIST_PAGE)
         .await
         .into_iter()
         .find(|entry| entry.key == entry_key)
@@ -314,12 +411,40 @@ pub async fn remove(ctx: &Ctx, chat_ref: PeerRef, chat: i64, kind: Kind, entry_k
         eprintln!("lists: {chat}: no ref for user {user_id}");
         return;
     };
-    if let Err(e) = restrict::apply(ctx, chat_ref, peer, Action::Unban, None, restrict::By { reason: "پنل لیست ها", ..Default::default() }).await {
+    if let Err(e) = restrict::apply(
+        ctx,
+        chat_ref,
+        peer,
+        Action::Unban,
+        None,
+        restrict::By {
+            reason: "پنل لیست ها",
+            ..Default::default()
+        },
+    )
+    .await
+    {
         eprintln!("lists: {chat}: could not lift restriction on {user_id}: {e}");
     }
 }
 
-async fn entries(ctx: &Ctx, chat_ref: PeerRef, chat: i64, kind: Kind) -> Vec<Entry> {
+pub(crate) async fn entries(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    chat: i64,
+    kind: Kind,
+    limit: usize,
+) -> Vec<Entry> {
+    if kind == Kind::Command {
+        return restrict::custom_triggers(ctx, chat)
+            .into_iter()
+            .map(|(word, action)| Entry {
+                key: word_id(&word),
+                name: esc(&format!("{word} ({})", restrict::action_label(action))),
+                peer: None,
+            })
+            .collect();
+    }
     if kind == Kind::Answer {
         return super::answers::triggers(ctx, chat)
             .into_iter()
@@ -339,6 +464,32 @@ async fn entries(ctx: &Ctx, chat_ref: PeerRef, chat: i64, kind: Kind) -> Vec<Ent
                 peer: None,
             })
             .collect();
+    }
+    if kind == Kind::Image {
+        return imgfilter::listing(ctx, chat)
+            .await
+            .into_iter()
+            .map(|(name, label)| Entry {
+                key: word_id(&name),
+                name: esc(&label),
+                peer: None,
+            })
+            .collect();
+    }
+    if kind == Kind::Pack {
+        let mut found: Vec<Entry> = ctx
+            .settings
+            .values_with_prefix(chat, packs::PREFIX)
+            .into_iter()
+            .map(|(set, title)| Entry {
+                key: set,
+                name: esc(&title),
+                peer: None,
+            })
+            .collect();
+        found.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        found.truncate(limit);
+        return found;
     }
     if kind == Kind::Exempt {
         return ctx
@@ -366,10 +517,13 @@ async fn entries(ctx: &Ctx, chat_ref: PeerRef, chat: i64, kind: Kind) -> Vec<Ent
     }
 
     let mut participants = ctx.client.iter_participants(chat_ref).filter(kind.filter());
-    let mut found = Vec::new();
+    let mut found = Vec::with_capacity(limit.min(LIMIT * 16));
     loop {
         match participants.next().await {
             Ok(Some(participant)) => {
+                if found.len() >= limit {
+                    break;
+                }
                 let user = participant.user;
                 found.push(Entry {
                     key: user.id().bare_id_unchecked().to_string(),
@@ -392,10 +546,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pack_kind_round_trips_through_panel_actions() {
+        assert!(matches!(Kind::from_action("pack"), Some(Kind::Pack)));
+        assert_eq!(Kind::Pack.action(), "pack");
+        assert_eq!(Kind::Pack.cap().key, super::super::limits::SET.key);
+    }
+
+    #[test]
     fn payloads_match_what_the_panel_parses() {
         let (opener, chat) = (1234567890_i64, -1001234567890_i64);
         for payload in [
-            format!("p:{opener}:{chat}:l:{}:{}", Kind::Filter.action(), "deadbeef"),
+            format!(
+                "p:{opener}:{chat}:l:{}:{}",
+                Kind::Filter.action(),
+                "deadbeef"
+            ),
             format!("p:{opener}:{chat}:l:{}:{}", Kind::Ban.action(), 42),
             format!("p:{opener}:{chat}:adv"),
         ] {
@@ -426,14 +591,19 @@ mod tests {
 
     #[test]
     fn clear_payloads_fit_telegram() {
-        for kind in [Kind::Ban, Kind::Mute, Kind::Vip, Kind::Filter, Kind::Answer, Kind::Exempt] {
+        for kind in [
+            Kind::Ban,
+            Kind::Mute,
+            Kind::Vip,
+            Kind::Filter,
+            Kind::Image,
+            Kind::Answer,
+            Kind::Exempt,
+            Kind::Command,
+            Kind::Pack,
+        ] {
             for key in [CLEAR_KEY, "clearyes"] {
-                let payload = format!(
-                    "p:{}:{}:l:{}:{key}",
-                    i64::MAX,
-                    i64::MIN,
-                    kind.action()
-                );
+                let payload = format!("p:{}:{}:l:{}:{key}", i64::MAX, i64::MIN, kind.action());
                 assert!(payload.len() <= 64, "payload too long: {payload}");
             }
         }

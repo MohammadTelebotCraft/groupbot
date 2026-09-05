@@ -4,11 +4,12 @@ use grammers_client::update::CallbackQuery;
 use super::locks::{LOCKS, plain};
 use super::style::{Colour, choice, data as coloured, toggle};
 use super::{
-    Ctx, answers, betrayal, biolink, captcha, flood, help, join, limits, lists, log, notice, raid,
-    setting, strict, tempmedia, warns, welcome,
+    Ctx, answers, betrayal, biolink, captcha, flood, help, imgfilter, join, limits, lists, log,
+    notice, raid, setting, strict, tempmedia, voicemonitor, warns, welcome,
 };
 
 pub const OPEN: &[&str] = &["پنل", "تنظیمات", "پنل ربات"];
+pub const OPEN_LISTS: &[&str] = &["لیست", "لیست ها", "لیست لیست ها"];
 
 pub const TO_PRIVATE: &[&str] = &["پنل پیوی", "پنل پی وی", "پنل خصوصی"];
 
@@ -25,7 +26,11 @@ fn strict_title(ctx: &Ctx, chat: i64) -> String {
          فرستنده مورد قفل شده، علاوه بر حذف پیام، سکوت یا بن می شود.\n\n\
          با <b>{}</b> تخلف · {} · <b>{}</b>",
         strict::limit(ctx, chat),
-        if strict::is_ban(ctx, chat) { "بن" } else { "سکوت" },
+        if strict::is_ban(ctx, chat) {
+            "بن"
+        } else {
+            "سکوت"
+        },
         strict::time_label(strict::minutes(ctx, chat)),
     )
 }
@@ -143,6 +148,9 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     if TO_PRIVATE.contains(&text) {
         return to_private(ctx, message).await;
     }
+    if OPEN_LISTS.contains(&text) {
+        return open_lists(ctx, message).await;
+    }
     if !OPEN.contains(&text) {
         return false;
     }
@@ -152,7 +160,9 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
-    let Some(opener) = message.sender_id().and_then(grammers_client::session::types::PeerId::bare_id)
+    let Some(opener) = message
+        .sender_id()
+        .and_then(grammers_client::session::types::PeerId::bare_id)
     else {
         return false;
     };
@@ -161,6 +171,29 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             InputMessage::new()
                 .html(ROOT_TITLE)
                 .reply_markup(root_markup(ctx, chat, opener)),
+        )
+        .await;
+    true
+}
+
+async fn open_lists(ctx: &Ctx, message: &Message) -> bool {
+    if !super::limits::allows(ctx, message, super::limits::SET).await {
+        return true;
+    }
+    let Some(chat) = message.peer_id().bot_api_dialog_id() else {
+        return false;
+    };
+    let Some(opener) = message
+        .sender_id()
+        .and_then(grammers_client::session::types::PeerId::bare_id)
+    else {
+        return false;
+    };
+    let _ = message
+        .reply(
+            InputMessage::new()
+                .html(LISTS_TITLE)
+                .reply_markup(lists_markup(chat, opener)),
         )
         .await;
     true
@@ -189,15 +222,11 @@ fn built(ctx: &Ctx, chat: i64, opener: i64, ids: &[&str], back: &str, here: &str
     ReplyMarkup::from_buttons(&rows)
 }
 
-pub async fn typed_number(
-    ctx: &Ctx,
-    message: &Message,
-    view: &super::locks::View<'_>,
-) -> bool {
+pub async fn typed_number(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
     if !ctx.maybe_expecting_number() {
         return false;
     }
-    let Some(chat) = message.peer_id().bot_api_dialog_id() else {
+    let Some(input_chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
     let Some(user) = message
@@ -207,28 +236,32 @@ pub async fn typed_number(
         return false;
     };
 
-    let Some(value) = parse_number(view.digits()) else {
-        return false;
-    };
-    let Some(id) = ctx.take_expected_number(chat, user) else {
+    let Some((target_chat, id)) = ctx.expected_number(input_chat, user) else {
         return false;
     };
     let Some((found, (min, max))) = setting::number(id) else {
         return false;
     };
-    setting::store(ctx, chat, found, value.clamp(min, max)).await;
+    let Some(value) = parse_number(view.digits(), (min, max) == setting::CLOCK) else {
+        return false;
+    };
+    if !ctx.take_expected_number(input_chat, user, target_chat, id) {
+        return false;
+    }
+    setting::store(ctx, target_chat, found, value.clamp(min, max)).await;
     let _ = message
         .reply(format!(
             "✓ {} · {}",
             found.label,
-            setting::shown(ctx, chat, found)
+            setting::shown(ctx, target_chat, found)
         ))
         .await;
     true
 }
 
-fn parse_number(text: &str) -> Option<u32> {
-    if let Some((hour, minute)) = text.split_once([':', '.'])
+fn parse_number(text: &str, clock: bool) -> Option<u32> {
+    if clock
+        && let Some((hour, minute)) = text.split_once([':', '.'])
         && let (Ok(hour), Ok(minute)) = (hour.trim().parse::<u32>(), minute.trim().parse::<u32>())
         && hour < 24
         && minute < 60
@@ -238,15 +271,55 @@ fn parse_number(text: &str) -> Option<u32> {
     text.parse().ok()
 }
 
-const PAGES: &[&str] = &[
-    "root", "locks", "adv", "sec", "msg", "tm", "ls", "s", "rd", "sp", "bt", "fl",
-    "wn", "cp", "nt", "an", "wc", "ng", "sl", "jn", "ad", "gp", "gr", "lg", "dr",
-    "ap", "tmed", "lim", "bl", "close", "page", "in", "on", "off", "ng_toggle", "ap_toggle",
-    "dr_toggle", "dr_now", "lg_off", "jn_off", "wc_off",
+pub const PAGES: &[&str] = &[
+    "root",
+    "locks",
+    "adv",
+    "sec",
+    "msg",
+    "tm",
+    "ls",
+    "s",
+    "rd",
+    "sp",
+    "bt",
+    "fl",
+    "wn",
+    "cp",
+    "nt",
+    "an",
+    "wc",
+    "ng",
+    "sl",
+    "jn",
+    "ad",
+    "gp",
+    "gr",
+    "lg",
+    "dr",
+    "ap",
+    "tmed",
+    "lim",
+    "bl",
+    "close",
+    "page",
+    "in",
+    "on",
+    "off",
+    "ng_toggle",
+    "ap_toggle",
+    "dr_toggle",
+    "dr_now",
+    "lg_off",
+    "jn_off",
+    "wc_off",
 
     "nsw",
     "cq",
     "ai",
+
+    "imf",
+    "vw",
 ];
 
 pub fn is_page(action: &str) -> bool {
@@ -276,7 +349,7 @@ fn help_origin(action: &str) -> (bool, &str) {
     }
 }
 
-fn back_row(opener: i64, chat: i64, back: &str, here: &str) -> Vec<Button> {
+pub fn back_row(opener: i64, chat: i64, back: &str, here: &str) -> Vec<Button> {
     let mut row = vec![Button::data("‹ بازگشت", payload(opener, chat, back))];
     if help::find(here).is_some() {
         row.push(Button::data(
@@ -306,6 +379,17 @@ pub async fn on_help(ctx: &Ctx, query: &CallbackQuery, payload_text: &str) {
     }
     let _ = ctx;
 
+    if action == help::CLOSE_ID {
+        let _ = query
+            .answer()
+            .edit(
+                InputMessage::new()
+                    .html("راهنما بسته شد.\n\n<i>هر وقت لازم شد «راهنما» را بفرستید.</i>"),
+            )
+            .await;
+        return;
+    }
+
     if action == help::INDEX_ID {
         let _ = query
             .answer()
@@ -334,6 +418,14 @@ pub async fn on_help(ctx: &Ctx, query: &CallbackQuery, payload_text: &str) {
             "📖  فهرست",
             help_payload(opener, chat, help::INDEX_ID),
         ));
+    } else if chat < 0
+        && is_page(topic)
+        && let Some(section) = help::find(topic)
+    {
+        row.push(Button::data(
+            format!("{}  {}  ›", section.icon, section.title),
+            payload(opener, chat, topic),
+        ));
     }
     let _ = query
         .answer()
@@ -343,6 +435,10 @@ pub async fn on_help(ctx: &Ctx, query: &CallbackQuery, payload_text: &str) {
                 .reply_markup(ReplyMarkup::from_buttons(&[row])),
         )
         .await;
+}
+
+pub fn help_button(opener: i64, chat: i64) -> Button {
+    Button::data("📖  راهنما", help_payload(opener, chat, help::INDEX_ID))
 }
 
 pub fn index_markup(opener: i64, chat: i64) -> ReplyMarkup {
@@ -360,7 +456,10 @@ pub fn index_markup(opener: i64, chat: i64) -> ReplyMarkup {
                 .collect()
         })
         .collect();
-    rows.push(vec![Button::data("بستن", payload(opener, chat, "close"))]);
+    rows.push(vec![Button::data(
+        "بستن",
+        help_payload(opener, chat, help::CLOSE_ID),
+    )]);
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -387,7 +486,8 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
             return;
         };
         if let Some(user) = query.sender_id().bare_id() {
-            ctx.expect_number(chat, user, found.id);
+            let input_chat = query.peer_id().bot_api_dialog_id().unwrap_or(chat);
+            ctx.expect_number(input_chat, user, chat, found.id);
         }
         let _ = query
             .answer()
@@ -421,16 +521,45 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
         "locks" => (locks_title(0), locks_markup(ctx, chat, opener, 0)),
         "ai" => (ai_title(ctx, chat), ai_markup(ctx, chat, opener)),
         "nsw" => (nsfw_title(ctx, chat), nsfw_markup(ctx, chat, opener)),
-        "cq" => (concepts_title(ctx, chat), concepts_markup(ctx, chat, opener)),
-        "adv" => (ADVANCED_TITLE.to_owned(), advanced_markup(ctx, chat, opener)),
+        "cq" => (
+            concepts_title(ctx, chat),
+            concepts_markup(ctx, chat, opener),
+        ),
+        "imf" => image_filters_page(ctx, chat, opener).await,
+        "vw" => (
+            voicemonitor::words_title(ctx, chat),
+            voicemonitor::words_markup(ctx, chat, opener),
+        ),
+        part if part.starts_with("vw:") => {
+            voicemonitor::remove_word(ctx, chat, &part[3..]).await;
+            (
+                voicemonitor::words_title(ctx, chat),
+                voicemonitor::words_markup(ctx, chat, opener),
+            )
+        }
+        part if part.starts_with("vwr:") => {
+            voicemonitor::restore_word(ctx, chat, &part[4..]).await;
+            (
+                voicemonitor::words_title(ctx, chat),
+                voicemonitor::words_markup(ctx, chat, opener),
+            )
+        }
+
+        picked if picked.starts_with("imf:") => {
+            let _ = imgfilter::toggle_live(ctx, chat, &picked["imf:".len()..]).await;
+            image_filters_page(ctx, chat, opener).await
+        }
+        "adv" => (
+            ADVANCED_TITLE.to_owned(),
+            advanced_markup(ctx, chat, opener),
+        ),
         "sec" => (
             "<b>پنل مدیریت</b> › <b>امنیت و ورود</b>\n\nچه کسی بنویسد، و با متخلف چه شود."
                 .to_owned(),
             security_markup(ctx, chat, opener),
         ),
         "msg" => (
-            "<b>پنل مدیریت</b> › <b>پیام و پاسخ</b>\n\nربات چه بگوید و به که."
-                .to_owned(),
+            "<b>پنل مدیریت</b> › <b>پیام و پاسخ</b>\n\nربات چه بگوید و به که.".to_owned(),
             messages_markup(ctx, chat, opener),
         ),
         "tm" => (
@@ -468,7 +597,10 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
             strict_picks_title(ctx, chat),
             strict_picks_markup(ctx, chat, opener),
         ),
-        "bt" => (betrayal_title(ctx, chat), betrayal_markup(ctx, chat, opener)),
+        "bt" => (
+            betrayal_title(ctx, chat),
+            betrayal_markup(ctx, chat, opener),
+        ),
         "fl" => (flood_title(ctx, chat), flood_markup(ctx, chat, opener)),
         "bl" => (biolink_title(ctx, chat), biolink_markup(ctx, chat, opener)),
         "wn" => (warns_title(ctx, chat), warns_markup(ctx, chat, opener)),
@@ -477,8 +609,14 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
         "an" => (answers_title(ctx, chat), answers_markup(ctx, chat, opener)),
         "wc" => (welcome_title(ctx, chat), welcome_markup(ctx, chat, opener)),
         "ng" => (night_title(ctx, chat), night_markup(ctx, chat, opener)),
-        "ngf" => (night_title(ctx, chat), clock_markup(ctx, chat, opener, true)),
-        "ngt" => (night_title(ctx, chat), clock_markup(ctx, chat, opener, false)),
+        "ngf" => (
+            night_title(ctx, chat),
+            clock_markup(ctx, chat, opener, true),
+        ),
+        "ngt" => (
+            night_title(ctx, chat),
+            clock_markup(ctx, chat, opener, false),
+        ),
         "ng_toggle" => {
             let window = super::extras::night(ctx, chat);
 
@@ -516,7 +654,9 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
         "sl" => (slow_title(ctx, chat), slow_markup(ctx, chat, opener)),
         step if step.starts_with("sl:") => {
             if let Ok(seconds) = step[3..].parse::<u32>()
-                && super::extras::apply_slow(ctx, chat, seconds).await.is_none()
+                && super::extras::apply_slow(ctx, chat, seconds)
+                    .await
+                    .is_none()
             {
                 let _ = query
                     .answer()
@@ -554,23 +694,15 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
         "ap" => (auto_title(ctx, chat), auto_markup(ctx, chat, opener)),
         "ap_toggle" => {
             let now_on = super::purge::auto_at(ctx, chat).is_none();
-            super::purge::set_auto_at(
-                ctx,
-                chat,
-                now_on.then_some(super::purge::AUTO_DEFAULT_AT),
-            )
-            .await;
+            super::purge::set_auto_at(ctx, chat, now_on.then_some(super::purge::AUTO_DEFAULT_AT))
+                .await;
             (auto_title(ctx, chat), auto_markup(ctx, chat, opener))
         }
 
         "dr_toggle" => {
             let now_on = super::stats::report_at(ctx, chat).is_none();
-            super::stats::set_report_at(
-                ctx,
-                chat,
-                now_on.then_some(super::stats::REPORT_DEFAULT),
-            )
-            .await;
+            super::stats::set_report_at(ctx, chat, now_on.then_some(super::stats::REPORT_DEFAULT))
+                .await;
             (report_title(ctx, chat), report_markup(ctx, chat, opener))
         }
 
@@ -603,8 +735,7 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
             (join_title(ctx, chat), join_markup(ctx, chat, opener))
         }
         "wc_off" => {
-            ctx.settings.set(chat, welcome::TEXT, false).await;
-            ctx.settings.set(chat, welcome::MEDIA, false).await;
+            welcome::clear_stored(ctx, chat).await;
             (welcome_title(ctx, chat), welcome_markup(ctx, chat, opener))
         }
         pick if pick.starts_with("sp:") => {
@@ -617,9 +748,7 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
         "on" | "off" => {
             let on = action == "on";
             for lock in plain() {
-                ctx.settings.set(chat, lock.key, on).await;
-                strict::sync_pick(ctx, chat, lock.key, on).await;
-                super::bots::on_lock_set(ctx, chat, lock.key, on).await;
+                super::locks::set(ctx, chat, lock.key, on).await;
             }
             (locks_title(0), locks_markup(ctx, chat, opener, 0))
         }
@@ -644,9 +773,7 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
                 return;
             };
             let now_on = !ctx.settings.is_locked(chat, lock.key);
-            ctx.settings.set(chat, lock.key, now_on).await;
-            strict::sync_pick(ctx, chat, lock.key, now_on).await;
-            super::bots::on_lock_set(ctx, chat, lock.key, now_on).await;
+            super::locks::set(ctx, chat, lock.key, now_on).await;
 
             if super::locks::is_ai(lock.key) {
                 (ai_title(ctx, chat), ai_markup(ctx, chat, opener))
@@ -699,6 +826,12 @@ async fn list_callback(ctx: &Ctx, query: &CallbackQuery, rest: &str, chat: i64, 
         .await;
 }
 
+fn miniapp_button(chat: i64) -> Option<Button> {
+    let link = std::env::var("MINIAPP_LINK").ok()?;
+    let link = link.trim().trim_end_matches('/');
+    (!link.is_empty()).then(|| Button::url("🌐  مدیریت گروه در وب", format!("{link}?startapp={chat}")))
+}
+
 fn root_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
     let active = plain()
         .filter(|lock| ctx.settings.is_locked(chat, lock.key))
@@ -706,16 +839,16 @@ fn root_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
     let watching = ai_keys()
         .filter(|key| ctx.settings.is_locked(chat, key))
         .count();
-    ReplyMarkup::from_buttons(&[
+    let mut rows = vec![
         vec![Button::data(
             format!("🔒  قفل ها  ({active} از {})  ›", plain().count()),
             payload(opener, chat, "locks"),
         )],
         vec![Button::data(
             if watching == 0 {
-                "🤖  نگهبان تصویر  ›".to_owned()
+                "🤖  نگهبان هوشمند  ›".to_owned()
             } else {
-                format!("🤖  نگهبان تصویر  ({watching} روشن)  ›")
+                format!("🤖  نگهبان هوشمند  ({watching} روشن)  ›")
             },
             payload(opener, chat, "ai"),
         )],
@@ -724,13 +857,20 @@ fn root_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             payload(opener, chat, "s"),
             ctx.settings.is_locked(chat, strict::MODE),
         )],
-        vec![Button::data("⚙️  تنظیمات پیشرفته  ›", payload(opener, chat, "adv"))],
+        vec![Button::data(
+            "⚙️  تنظیمات پیشرفته  ›",
+            payload(opener, chat, "adv"),
+        )],
         vec![Button::data("📋  لیست ها  ›", payload(opener, chat, "ls"))],
-        vec![
-            Button::data("📖  راهنما", help_payload(opener, chat, help::INDEX_ID)),
-            Button::data("بستن", payload(opener, chat, "close")),
-        ],
-    ])
+    ];
+    if let Some(button) = miniapp_button(chat) {
+        rows.push(vec![button]);
+    }
+    rows.push(vec![
+        Button::data("📖  راهنما", help_payload(opener, chat, help::INDEX_ID)),
+        Button::data("بستن", payload(opener, chat, "close")),
+    ]);
+    ReplyMarkup::from_buttons(&rows)
 }
 
 fn lists_markup(chat: i64, opener: i64) -> ReplyMarkup {
@@ -747,6 +887,14 @@ fn lists_markup(chat: i64, opener: i64) -> ReplyMarkup {
             Button::data("🎫  لیست معاف", payload(opener, chat, "l:free")),
             Button::data("💬  لیست پاسخ", payload(opener, chat, "l:answer")),
         ],
+        vec![
+            Button::data("🎯  فیلتر تصویری", payload(opener, chat, "l:imgf")),
+            Button::data("🗝  دستور سفارشی", payload(opener, chat, "l:cmd")),
+        ],
+        vec![Button::data(
+            "🎨  پک های استیکر",
+            payload(opener, chat, "l:pack"),
+        )],
         back_row(opener, chat, "root", "ls"),
     ])
 }
@@ -763,7 +911,14 @@ fn raid_title(ctx: &Ctx, chat: i64) -> String {
 }
 
 fn raid_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
-    built(ctx, chat, opener, &["rd_on", "rd_lim", "rd_win", "rd_time"], "sec", "rd")
+    built(
+        ctx,
+        chat,
+        opener,
+        &["rd_on", "rd_lim", "rd_win", "rd_time"],
+        "sec",
+        "rd",
+    )
 }
 
 fn strict_causes(ctx: &Ctx, chat: i64) -> Vec<(&'static str, &'static str)> {
@@ -778,6 +933,13 @@ fn strict_causes(ctx: &Ctx, chat: i64) -> Vec<(&'static str, &'static str)> {
     }
     if !ctx.settings.indexed_empty(chat, "pack:") {
         causes.push((strict::PACK, "پک استیکر"));
+    }
+
+    if imgfilter::any(ctx, chat) {
+        causes.push((imgfilter::CAUSE, "فیلتر تصویری"));
+    }
+    if ctx.settings.is_locked(chat, voicemonitor::MODE) {
+        causes.push((voicemonitor::MODE, "واژه در ویس"));
     }
     causes
 }
@@ -872,7 +1034,14 @@ fn betrayal_title(ctx: &Ctx, chat: i64) -> String {
 }
 
 fn betrayal_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
-    built(ctx, chat, opener, &["bt_on", "bt_lim", "bt_win", "bt_act"], "sec", "bt")
+    built(
+        ctx,
+        chat,
+        opener,
+        &["bt_on", "bt_lim", "bt_win", "bt_act"],
+        "sec",
+        "bt",
+    )
 }
 
 fn biolink_title(ctx: &Ctx, chat: i64) -> String {
@@ -900,12 +1069,23 @@ fn flood_title(ctx: &Ctx, chat: i64) -> String {
          <i>برای عدد دلخواه: «ضد رگبار 10 5»</i>",
         flood::limit(ctx, chat),
         flood::window(ctx, chat),
-        if flood::bans(ctx, chat) { "بن" } else { "سکوت" },
+        if flood::bans(ctx, chat) {
+            "بن"
+        } else {
+            "سکوت"
+        },
     )
 }
 
 fn flood_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
-    built(ctx, chat, opener, &["fl_on", "fl_lim", "fl_win", "fl_act"], "sec", "fl")
+    built(
+        ctx,
+        chat,
+        opener,
+        &["fl_on", "fl_lim", "fl_win", "fl_act"],
+        "sec",
+        "fl",
+    )
 }
 
 fn night_title(ctx: &Ctx, chat: i64) -> String {
@@ -990,10 +1170,7 @@ fn clock_markup(ctx: &Ctx, chat: i64, opener: i64, editing_start: bool) -> Reply
             .collect(),
     );
     rows.push(custom_row(opener, chat, key, super::extras::clock(current)));
-    rows.push(vec![Button::data(
-        "‹ بازگشت",
-        payload(opener, chat, "ng"),
-    )]);
+    rows.push(vec![Button::data("‹ بازگشت", payload(opener, chat, "ng"))]);
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -1054,9 +1231,16 @@ fn welcome_title(ctx: &Ctx, chat: i64) -> String {
             if text.is_empty() {
                 "‹ بدون متن".to_owned()
             } else {
-                format!("‹ {}", super::esc(text.chars().take(120).collect::<String>().as_str()))
+                format!(
+                    "‹ {}",
+                    super::esc(text.chars().take(120).collect::<String>().as_str())
+                )
             },
-            if has_media { "\n‹ همراه با رسانه" } else { "" }
+            if has_media {
+                "\n‹ همراه با رسانه"
+            } else {
+                ""
+            }
         )
     };
     format!(
@@ -1077,19 +1261,19 @@ fn welcome_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             .settings
             .value(chat, welcome::MEDIA)
             .is_some_and(|media| !media.is_empty());
-    ReplyMarkup::from_buttons(&[
-        vec![toggle(
-            format!("{}  خوشامد", if on { "✓ روشن" } else { "✗ خاموش" }),
-            payload(opener, chat, "wc"),
-            on,
-        )],
-        vec![coloured(
-            "حذف خوشامد",
-            payload(opener, chat, "wc_off"),
-            Colour::Danger,
-        )],
-        back_row(opener, chat, "msg", "wc"),
-    ])
+    let mut rows = vec![vec![toggle(
+        format!("{}  خوشامد", if on { "✓ روشن" } else { "✗ خاموش" }),
+        payload(opener, chat, "wc"),
+        on,
+    )]];
+    rows.extend(rows_for(ctx, chat, opener, "wct"));
+    rows.push(vec![coloured(
+        "حذف خوشامد",
+        payload(opener, chat, "wc_off"),
+        Colour::Danger,
+    )]);
+    rows.push(back_row(opener, chat, "msg", "wc"));
+    ReplyMarkup::from_buttons(&rows)
 }
 
 fn auto_title(ctx: &Ctx, chat: i64) -> String {
@@ -1124,7 +1308,10 @@ fn auto_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
         payload(opener, chat, "ap_toggle"),
         at.is_some(),
     )]];
-    rows.push(vec![Button::data("ساعت پاکسازی", payload(opener, chat, "ap"))]);
+    rows.push(vec![Button::data(
+        "ساعت پاکسازی",
+        payload(opener, chat, "ap"),
+    )]);
     rows.extend(super::purge::AUTO_AT_PRESETS.chunks(3).map(|chunk| {
         chunk
             .iter()
@@ -1211,11 +1398,7 @@ pub fn rights_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
         .map(|right| {
             let open = !super::rights::closed(ctx, chat, right.key);
             vec![toggle(
-                format!(
-                    "{}  ·  {}",
-                    right.label,
-                    if open { "باز" } else { "بسته" }
-                ),
+                format!("{}  ·  {}", right.label, if open { "باز" } else { "بسته" }),
                 payload(opener, chat, &format!("gr:{}", right.key)),
                 open,
             )]
@@ -1330,7 +1513,10 @@ fn answers_title(ctx: &Ctx, chat: i64) -> String {
 
 fn answers_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
     let mut rows = rows_for(ctx, chat, opener, "an_act");
-    rows.push(vec![Button::data("لیست پاسخ ها", payload(opener, chat, "l:answer"))]);
+    rows.push(vec![Button::data(
+        "لیست پاسخ ها",
+        payload(opener, chat, "l:answer"),
+    )]);
     rows.push(back_row(opener, chat, "msg", "an"));
     ReplyMarkup::from_buttons(&rows)
 }
@@ -1370,7 +1556,14 @@ fn captcha_title(ctx: &Ctx, chat: i64) -> String {
 }
 
 fn captcha_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
-    built(ctx, chat, opener, &["cp_on", "cp_t", "cp_n", "cp_act"], "sec", "cp")
+    built(
+        ctx,
+        chat,
+        opener,
+        &["cp_on", "cp_t", "cp_n", "cp_act"],
+        "sec",
+        "cp",
+    )
 }
 
 fn warns_title(ctx: &Ctx, chat: i64) -> String {
@@ -1379,7 +1572,11 @@ fn warns_title(ctx: &Ctx, chat: i64) -> String {
          با <b>{}</b> اخطار · {}\n\n\
          <i>دستورها: «اخطار» ، «حذف اخطار» ، «اخطارها»</i>",
         warns::limit(ctx, chat),
-        if warns::bans(ctx, chat) { "اخراج" } else { "سکوت" },
+        if warns::bans(ctx, chat) {
+            "اخراج"
+        } else {
+            "سکوت"
+        },
     )
 }
 
@@ -1397,10 +1594,22 @@ fn section(label: &str, target: Vec<u8>, on: bool) -> Button {
 
 fn advanced_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
     let mut rows = vec![
-        vec![Button::data("🛡  امنیت و ورود  ›", payload(opener, chat, "sec"))],
-        vec![Button::data("💬  پیام و پاسخ  ›", payload(opener, chat, "msg"))],
-        vec![Button::data("🧹  پاکسازی و زمان  ›", payload(opener, chat, "tm"))],
-        vec![Button::data("🛂  اختیارات گروه  ›", payload(opener, chat, "gr"))],
+        vec![Button::data(
+            "🛡  امنیت و ورود  ›",
+            payload(opener, chat, "sec"),
+        )],
+        vec![Button::data(
+            "💬  پیام و پاسخ  ›",
+            payload(opener, chat, "msg"),
+        )],
+        vec![Button::data(
+            "🧹  پاکسازی و زمان  ›",
+            payload(opener, chat, "tm"),
+        )],
+        vec![Button::data(
+            "🛂  اختیارات گروه  ›",
+            payload(opener, chat, "gr"),
+        )],
         vec![section(
             "🧾  کانال لاگ",
             payload(opener, chat, "lg"),
@@ -1488,6 +1697,10 @@ fn security_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             payload(opener, chat, "cp"),
             ctx.settings.is_locked(chat, captcha::MODE),
         )],
+        rows_for(ctx, chat, opener, "lb_on")
+            .into_iter()
+            .next()
+            .unwrap_or_default(),
         vec![section(
             "⚡  ضد رگبار",
             payload(opener, chat, "fl"),
@@ -1508,7 +1721,26 @@ fn security_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             payload(opener, chat, "bl"),
             biolink::is_locked(ctx, chat),
         )],
+        rows_for(ctx, chat, opener, "vm_on")
+            .into_iter()
+            .next()
+            .unwrap_or_default(),
+        vec![Button::data(
+            format!(
+                "📝  کلمات فیلتر ویس  ({})  ›",
+                voicemonitor::words(ctx, chat).len()
+            ),
+            payload(opener, chat, "vw"),
+        )],
         vec![Button::data("⚠️  اخطار  ›", payload(opener, chat, "wn"))],
+        rows_for(ctx, chat, opener, "wp_ban")
+            .into_iter()
+            .next()
+            .unwrap_or_default(),
+        rows_for(ctx, chat, opener, "wp_mute")
+            .into_iter()
+            .next()
+            .unwrap_or_default(),
         back_row(opener, chat, "adv", "sec"),
     ])
 }
@@ -1525,7 +1757,10 @@ fn messages_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             payload(opener, chat, "nt"),
             ctx.settings.is_locked(chat, notice::MODE),
         )],
-        vec![Button::data("💬  پاسخ خودکار  ›", payload(opener, chat, "an"))],
+        vec![Button::data(
+            "💬  پاسخ خودکار  ›",
+            payload(opener, chat, "an"),
+        )],
         vec![toggle(
             format!(
                 "🏅  مقام خودکار  ·  {}",
@@ -1622,6 +1857,7 @@ fn temp_media_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
 fn ai_keys() -> impl Iterator<Item = &'static str> {
     std::iter::once(super::nsfw::LOCK)
         .chain(std::iter::once(super::ocr::LOCK))
+        .chain(std::iter::once(super::trade::LOCK))
         .chain(super::concepts::CONCEPTS.iter().map(|c| c.key))
 }
 
@@ -1633,15 +1869,19 @@ fn ai_title(ctx: &Ctx, chat: i64) -> String {
         .collect();
     let watching = !on.is_empty();
     format!(
-        "<b>پنل مدیریت</b> › <b>نگهبان تصویر</b>\n\n\
+        "<b>پنل مدیریت</b> › <b>نگهبان هوشمند</b>\n\n\
          روشن · <b>{}</b>\n\n\
          <i>{}</i>",
-        if watching { on.join("، ") } else { "هیچ کدام".to_owned() },
         if watching {
-            "هر تصویر یک بار گرفته و بررسی می شود، هر چند مورد که روشن باشد. نتیجه برای همان \
-             فایل نگه داشته می شود، پس فوروارد همان تصویر دیگر هزینه ای ندارد."
+            on.join("، ")
         } else {
-            "هیچ کدام روشن نیست و تا وقتی روشن نشوند هیچ تصویری دانلود یا بررسی نمی شود."
+            "هیچ کدام".to_owned()
+        },
+        if watching {
+            "هر تصویر یک بار گرفته و بررسی می شود، هر چند مورد که روشن باشد، و نتیجه برای همان \
+             فایل نگه داشته می شود. قفل خرید و فروش هم متن پیام را می فهمد، نه فقط کلمه ها را."
+        } else {
+            "هیچ کدام روشن نیست و تا وقتی روشن نشوند هیچ پیام یا تصویری بررسی نمی شود."
         }
     )
 }
@@ -1659,6 +1899,7 @@ fn ai_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
     let mut rows = vec![
         vec![row("🔞", "غیراخلاقی", super::nsfw::LOCK)],
         vec![row("📢", "تبلیغ در تصویر", super::ocr::LOCK)],
+        vec![row("💰", "خرید و فروش", super::trade::LOCK)],
     ];
     rows.extend(
         super::concepts::CONCEPTS
@@ -1682,33 +1923,30 @@ fn ai_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
         Button::data("⚙️  تنظیم غیراخلاقی  ›", payload(opener, chat, "nsw")),
         Button::data("⚙️  تنظیم موضوعی  ›", payload(opener, chat, "cq")),
     ]);
+
+    rows.push(vec![section(
+        "🎯  فیلتر تصویری",
+        payload(opener, chat, "imf"),
+        imgfilter::any(ctx, chat),
+    )]);
+
+    rows.push(vec![section(
+        "🔥  برخورد با تکرار تخلف",
+        payload(opener, chat, "s"),
+        ctx.settings.is_locked(chat, strict::MODE),
+    )]);
     rows.push(back_row(opener, chat, "root", "ai"));
     ReplyMarkup::from_buttons(&rows)
 }
 
 fn nsfw_title(ctx: &Ctx, chat: i64) -> String {
     let armed = ctx.settings.is_locked(chat, super::nsfw::LOCK);
-    let live = ctx.settings.is_locked(chat, super::nsfw::LIVE);
     format!(
         "<b>پنل مدیریت</b> › <b>محتوای غیراخلاقی</b>\n\n\
-         قفل · <b>{}</b>\n\
-         حالت · <b>{}</b>\n\
-         حساسیت · <b>٪{}</b>\n\
-         محتوای محرک · <b>{}</b>\n\n\
+         قفل · <b>{}</b>\n\n\
          <i>{}</i>",
         if armed { "روشن" } else { "خاموش" },
-        if live { "روشن" } else { "خاموش · فقط بررسی" },
-        super::nsfw::limit(ctx, chat),
-        if ctx.settings.is_locked(chat, super::nsfw::SOFT) {
-            "می ماند"
-        } else {
-            "حذف می شود"
-        },
-        if live {
-            "تصویرهایی که از حساسیت بالاتر بروند پاک می شوند."
-        } else {
-            "تصویرها بررسی می شوند ولی چیزی پاک نمی شود. تا از نتیجه مطمئن نشده اید همین طور بگذارید."
-        }
+        "با روشن کردن این قفل، محتوای مستهجن به صورت خودکار حذف می شود. تنظیم امتیاز یا برچسب لازم نیست."
     )
 }
 
@@ -1719,9 +1957,6 @@ fn nsfw_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
         payload(opener, chat, super::nsfw::LOCK),
         armed,
     )]];
-    rows.extend(rows_for(ctx, chat, opener, "nsfw_live"));
-    rows.extend(rows_for(ctx, chat, opener, "nsfw_soft"));
-    rows.extend(rows_for(ctx, chat, opener, "nsfw_lim"));
     rows.push(back_row(opener, chat, "ai", "nsw"));
     ReplyMarkup::from_buttons(&rows)
 }
@@ -1734,8 +1969,16 @@ fn concepts_title(ctx: &Ctx, chat: i64) -> String {
         .collect();
     format!(
         "<b>پنل مدیریت</b> › <b>قفل موضوعی</b>\n\n         روشن · <b>{}</b>\n         حذف واقعی · <b>{}</b>\n         حساسیت · <b>{}</b>\n\n         <i>تشخیص موضوعی از قفل غیراخلاقی کم دقت تر است. اگر می خواهید اول نتیجه را ببینید بدون اینکه چیزی پاک شود، «فقط بررسی» را روشن کنید.</i>",
-        if armed.is_empty() { "هیچ کدام".to_owned() } else { armed.join("، ") },
-        if ctx.settings.is_locked(chat, super::concepts::SHADOW) { "فقط بررسی" } else { "حذف" },
+        if armed.is_empty() {
+            "هیچ کدام".to_owned()
+        } else {
+            armed.join("، ")
+        },
+        if ctx.settings.is_locked(chat, super::concepts::SHADOW) {
+            "فقط بررسی"
+        } else {
+            "حذف"
+        },
         super::concepts::limit(ctx, chat),
     )
 }
@@ -1756,19 +1999,68 @@ fn concepts_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
                 .collect()
         })
         .collect();
-        rows.push(vec![toggle(
+    rows.push(vec![toggle(
         format!(
             "🚫  تبلیغ در تصویر  ·  {}",
-            if ctx.settings.is_locked(chat, super::ocr::LOCK) { "✓" } else { "✗" }
+            if ctx.settings.is_locked(chat, super::ocr::LOCK) {
+                "✓"
+            } else {
+                "✗"
+            }
         ),
         payload(opener, chat, super::ocr::LOCK),
         ctx.settings.is_locked(chat, super::ocr::LOCK),
     )]);
     rows.extend(rows_for(ctx, chat, opener, "cq_shadow"));
     rows.extend(rows_for(ctx, chat, opener, "ad_shadow"));
+    rows.extend(rows_for(ctx, chat, opener, "tr_shadow"));
     rows.extend(rows_for(ctx, chat, opener, "cq_lim"));
+    rows.extend(rows_for(ctx, chat, opener, "tr_lim"));
     rows.push(back_row(opener, chat, "ai", "cq"));
     ReplyMarkup::from_buttons(&rows)
+}
+
+async fn image_filters_page(ctx: &Ctx, chat: i64, opener: i64) -> (String, ReplyMarkup) {
+    let rows = imgfilter::panel_rows(ctx, chat).await;
+    let live = rows.iter().filter(|(_, live, _)| *live).count();
+
+    let title = match rows.is_empty() {
+        true => "<b>پنل مدیریت</b> › <b>فیلتر تصویری</b>\n\n\
+             هنوز فیلتری ساخته نشده.\n\n\
+             <i>«قفل تصویر ‹چیزی›» یا «فیلتر متنی ‹چیزی›» را بفرستید تا همان لحظه فعال شود. \
+             برای چیزی که نمی شود اسمش را گفت، روی یک عکس ریپلای کنید و «فیلتر این ‹نام›» \
+             بفرستید.</i>"
+            .to_owned(),
+        false => format!(
+            "<b>پنل مدیریت</b> › <b>فیلتر تصویری</b>\n\n\
+             ساخته شده · <b>{} از {}</b>\n\
+             فعال · <b>{live}</b>\n\n\
+             <i>هر کدام را بزنید تا روشن یا خاموش شود. برای حذف، از لیست ها › فیلتر تصویری.</i>",
+            rows.len(),
+            imgfilter::MAX_FILTERS,
+        ),
+    };
+
+    let mut buttons: Vec<Vec<Button>> = rows
+        .iter()
+        .map(|(name, live, _)| {
+            let mark = if *live { "✓" } else { "✗" };
+            vec![toggle(
+                format!("{mark}  {name}"),
+                payload(opener, chat, &format!("imf:{}", lists::word_id(name))),
+                *live,
+            )]
+        })
+        .collect();
+
+    if !rows.is_empty() {
+        buttons.push(vec![Button::data(
+            "🗑  حذف فیلتر  ›",
+            payload(opener, chat, "l:imgf"),
+        )]);
+    }
+    buttons.push(back_row(opener, chat, "ai", "imf"));
+    (title, ReplyMarkup::from_buttons(&buttons))
 }
 
 fn last_page() -> usize {
@@ -1828,7 +2120,11 @@ fn locks_markup(ctx: &Ctx, chat: i64, opener: i64, page: usize) -> ReplyMarkup {
     )]);
     rows.push(vec![
         coloured("🔒  قفل همه", payload(opener, chat, "on"), Colour::Danger),
-        coloured("🔓  باز کردن همه", payload(opener, chat, "off"), Colour::Success),
+        coloured(
+            "🔓  باز کردن همه",
+            payload(opener, chat, "off"),
+            Colour::Success,
+        ),
     ]);
     rows.push(back_row(opener, chat, "root", "locks"));
     ReplyMarkup::from_buttons(&rows)
@@ -1860,7 +2156,10 @@ fn summary(ctx: &Ctx, chat: i64) -> String {
         .map(|lock| lock.names[0])
         .collect();
     if active.is_empty() {
-        format!("<b>قفل ها</b>\n\nهیچ قفلی فعال نیست ({} در دسترس).", plain().count())
+        format!(
+            "<b>قفل ها</b>\n\nهیچ قفلی فعال نیست ({} در دسترس).",
+            plain().count()
+        )
     } else {
         format!(
             "<b>قفل ها</b> ({} از {})\n{}",
@@ -1877,16 +2176,62 @@ fn summary(ctx: &Ctx, chat: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_help_never_draws_a_gated_button() {
+        let payloads = help_index_payloads(7, 7);
+        assert!(!payloads.is_empty(), "the index must draw some buttons");
+        for data in &payloads {
+            assert!(
+                data.starts_with("h:"),
+                "«{data}» is a help button carrying a panel payload, so the admin gate \
+                 will refuse it for anyone who cannot manage the chat"
+            );
+        }
+
+        assert!(
+            payloads
+                .iter()
+                .any(|d| d == &format!("h:7:7:{}", help::CLOSE_ID)),
+            "the index must offer a close, and it must be a help action"
+        );
+    }
+
+    fn help_index_payloads(opener: i64, chat: i64) -> Vec<String> {
+        let mut out = Vec::new();
+        collect_data(&index_markup(opener, chat), &mut out);
+        out
+    }
+
+    fn collect_data(markup: &ReplyMarkup, out: &mut Vec<String>) {
+        use grammers_client::tl::enums::{KeyboardButton, KeyboardButtonRow, ReplyMarkup as Raw};
+        let Raw::ReplyInlineMarkup(inline) = &markup.raw else {
+            panic!("the help index must be an inline keyboard");
+        };
+        for KeyboardButtonRow::Row(row) in &inline.rows {
+            for button in &row.buttons {
+                if let KeyboardButton::Callback(callback) = button {
+                    out.push(String::from_utf8_lossy(&callback.data).into_owned());
+                }
+            }
+        }
+    }
     use super::*;
 
     #[test]
     fn reads_numbers_and_clock_times() {
-        assert_eq!(parse_number("30"), Some(30));
-        assert_eq!(parse_number("23:37"), Some(23 * 60 + 37));
-        assert_eq!(parse_number("7.5"), Some(7 * 60 + 5));
-        assert_eq!(parse_number("24:00"), None);
-        assert_eq!(parse_number("12:99"), None);
-        assert_eq!(parse_number("سلام"), None);
+        assert_eq!(parse_number("30", true), Some(30));
+        assert_eq!(parse_number("23:37", true), Some(23 * 60 + 37));
+        assert_eq!(parse_number("7.5", true), Some(7 * 60 + 5));
+        assert_eq!(parse_number("24:00", true), None);
+        assert_eq!(parse_number("12:99", true), None);
+        assert_eq!(parse_number("سلام", true), None);
+    }
+
+    #[test]
+    fn only_a_clock_setting_reads_a_clock() {
+        assert_eq!(parse_number("12:30", false), None);
+        assert_eq!(parse_number("12:30", true), Some(12 * 60 + 30));
+        assert_eq!(parse_number("12", false), Some(12));
     }
 
     #[test]
@@ -1895,7 +2240,11 @@ mod tests {
         for declared in setting::SETTINGS {
             let named = source.contains(&format!("\"{}\"", declared.id))
                 || source.contains(&format!("\"{}:", declared.id));
-            assert!(named, "{} is declared but no panel page renders it", declared.id);
+            assert!(
+                named,
+                "{} is declared but no panel page renders it",
+                declared.id
+            );
         }
     }
 
@@ -1934,6 +2283,32 @@ mod tests {
     }
 
     #[test]
+    fn a_filter_row_payload_fits_a_callback() {
+        let hash = lists::word_id(&"ی".repeat(32));
+        assert!(hash.len() <= 16, "the hash grew past a u64 in hex: {hash}");
+
+        let worst = format!("p:{}:{}:imf:{}", i64::MAX, i64::MIN, "f".repeat(16));
+        assert!(
+            worst.len() <= 64,
+            "a filter row payload is {} bytes, over the limit: {worst}",
+            worst.len()
+        );
+
+        assert!(PAGES.contains(&"imf"));
+    }
+
+    #[test]
+    fn the_filter_page_does_not_shadow_the_filter_settings_prefix() {
+        assert_ne!(imgfilter::PREFIX.trim_end_matches(':'), "imf");
+        for declared in setting::SETTINGS {
+            assert_ne!(
+                declared.id, "imf",
+                "a declared setting would swallow the page"
+            );
+        }
+    }
+
+    #[test]
     fn back_goes_where_the_reader_came_from() {
         assert_eq!(help_origin("p:locks"), (true, "locks"));
         assert!(is_page("locks"));
@@ -1942,8 +2317,24 @@ mod tests {
 
         assert_eq!(help_origin("i:usr"), (false, "usr"));
         assert_eq!(help_origin("p:usr"), (true, "usr"));
-        assert!(!is_page("usr"), "usr has no panel page, so back must be the index");
+        assert!(
+            !is_page("usr"),
+            "usr has no panel page, so back must be the index"
+        );
 
         assert_eq!(help_origin("locks"), (false, "locks"));
+    }
+
+    #[test]
+    fn the_section_and_the_split_agree_about_what_a_model_is() {
+        let mut shown: Vec<&str> = ai_keys().collect();
+        let mut split: Vec<&str> = LOCKS
+            .iter()
+            .map(|lock| lock.key)
+            .filter(|key| super::super::locks::is_ai(key))
+            .collect();
+        shown.sort_unstable();
+        split.sort_unstable();
+        assert_eq!(shown, split, "ai_keys and locks::is_ai have drifted apart");
     }
 }

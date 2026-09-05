@@ -38,7 +38,11 @@ fn number(ctx: &Ctx, chat: i64, key: &str, default: u32, range: (u32, u32)) -> u
 }
 
 pub async fn set(ctx: &Ctx, chat: i64, key: &str, value: u32) {
-    let range = if key == LIMIT { LIMIT_RANGE } else { WINDOW_RANGE };
+    let range = if key == LIMIT {
+        LIMIT_RANGE
+    } else {
+        WINDOW_RANGE
+    };
     let value = value.clamp(range.0, range.1);
     ctx.settings.set_value(chat, key, &value.to_string()).await;
 }
@@ -124,12 +128,25 @@ pub async fn check(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
     let action = if bans { Action::Ban } else { Action::Mute };
-    if let Err(e) = restrict::apply(ctx, chat_ref, target, action, None, restrict::By { reason: "ضد رگبار", target_name: &name_of(message), ..Default::default() }).await {
+    if let Err(e) = restrict::apply(
+        ctx,
+        chat_ref,
+        target,
+        action,
+        None,
+        restrict::By {
+            reason: "ضد رگبار",
+            target_name: &name_of(message),
+            ..Default::default()
+        },
+    )
+    .await
+    {
         eprintln!("flood: {chat}: could not restrict {user}: {e}");
         return false;
     }
 
-    if ctx.may_notify(chat, user) {
+    if ctx.may_notify_flood(chat, user) {
         let what = if action == Action::Ban {
             "از گروه اخراج شد"
         } else {

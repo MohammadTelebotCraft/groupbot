@@ -10,6 +10,13 @@ pub async fn handle(ctx: &Ctx, query: &CallbackQuery) {
         return;
     };
 
+    if here < 0
+        && let Ok(Some(peer)) = query.peer_ref().await
+        && !ctx.admit_chat(here, peer).await
+    {
+        return;
+    }
+
     let chat = data
         .strip_prefix("p:")
         .or_else(|| data.strip_prefix("h:"))
@@ -30,6 +37,21 @@ pub async fn handle(ctx: &Ctx, query: &CallbackQuery) {
     if let Some(payload) = data.strip_prefix("f:") {
         let is_admin = presser_can_manage(ctx, query, chat).await;
         super::filters::on_callback(ctx, query, payload, is_admin).await;
+        return;
+    }
+
+    if let Some(payload) = data.strip_prefix("v:") {
+        super::voicemonitor::on_callback(ctx, query, payload, chat).await;
+        return;
+    }
+
+    if let Some(payload) = data.strip_prefix("fx:") {
+        super::currency::on_callback(ctx, query, payload).await;
+        return;
+    }
+
+    if let Some(payload) = data.strip_prefix("sd:") {
+        super::sudo::on_callback(ctx, query, payload).await;
         return;
     }
 

@@ -151,8 +151,21 @@ async fn surge(ctx: &Ctx, chat: i64, chat_ref: PeerRef, arrivals: Vec<Newcomer>)
     let held = Duration::from_secs(u64::from(minutes(ctx, chat)) * 60);
     let mut muted = 0;
     for member in &fresh {
-        match restrict::apply(ctx, chat_ref, member.peer, Action::Mute, Some(held), restrict::By { reason: "ضد هجوم", target_name: &member.name, ..Default::default() }).await {
-            Ok(()) => muted += 1,
+        match restrict::apply(
+            ctx,
+            chat_ref,
+            member.peer,
+            Action::Mute,
+            Some(held),
+            restrict::By {
+                reason: "ضد هجوم",
+                target_name: &member.name,
+                ..Default::default()
+            },
+        )
+        .await
+        {
+            Ok(_) => muted += 1,
             Err(e) => eprintln!("raid: {chat}: could not mute {}: {e}", member.id),
         }
     }

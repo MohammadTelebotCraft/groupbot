@@ -17,12 +17,74 @@ pub const REPORT_PRESETS: &[u32] = &[8 * 60, 12 * 60, 18 * 60, 21 * 60, 23 * 60,
 pub const REPORT_DEFAULT: u32 = 21 * 60;
 
 pub const MILESTONES: &[(u64, &str)] = &[
-    (100, "فعال"),
-    (500, "پرچت"),
-    (1_000, "افسانه"),
-    (5_000, "استاد گروه"),
-    (10_000, "اسطوره"),
+    (50, "سلام گو"),
+    (100, "نوچه چت"),
+    (250, "وراج"),
+    (500, "چت باز"),
+    (1_000, "حراف حرفه ای"),
+    (2_000, "کیبورد سوز"),
+    (3_500, "انگشت اتمی"),
+    (5_000, "ماشین چت"),
+    (7_500, "آنلاین ابدی"),
+    (10_000, "پیشکسوت گروه"),
+    (15_000, "اسطوره چت"),
+    (20_000, "سلطان چت"),
+    (30_000, "امپراتور چت"),
+    (50_000, "تایتان گروه"),
+    (75_000, "افسانه ابدی"),
+    (100_000, "جاودانه"),
 ];
+
+pub const NO_RANK: &str = "بی مقام";
+
+const MEDALS: &[&str] = &[
+    "🌱", "🥈", "🥉", "🏅", "🥇", "🎖", "⭐", "🌟", "💫", "🔥", "⚡", "👑", "🐉", "🌌", "💎", "🏆",
+];
+
+pub fn rank_at(total: u64) -> Option<(usize, u64, &'static str)> {
+    MILESTONES
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, (needed, _))| total >= *needed)
+        .map(|(index, (needed, title))| (index + 1, *needed, *title))
+}
+
+pub fn next_rank(total: u64) -> Option<(u64, &'static str)> {
+    MILESTONES
+        .iter()
+        .find(|(needed, _)| total < *needed)
+        .map(|(needed, title)| (*needed, *title))
+}
+
+pub fn rank_title(total: u64) -> &'static str {
+    rank_at(total).map_or(NO_RANK, |(_, _, title)| title)
+}
+
+fn medal(level: usize) -> &'static str {
+    MEDALS[level.min(MEDALS.len()).saturating_sub(1)]
+}
+
+fn progress(total: u64) -> (String, u64) {
+    const CELLS: usize = 10;
+    let floor = rank_at(total).map_or(0, |(_, needed, _)| needed);
+    let percent = match next_rank(total) {
+        Some((needed, _)) => {
+            let span = needed.saturating_sub(floor).max(1);
+            (total.saturating_sub(floor) * 100 / span).min(100)
+        }
+        None => 100,
+    };
+    let filled = (percent as usize) * CELLS / 100;
+    (
+        format!("{}{}", "▰".repeat(filled), "▱".repeat(CELLS - filled)),
+        percent,
+    )
+}
+
+pub fn badge_key(user: i64) -> String {
+    format!("badge:{user}")
+}
 
 pub fn week_of(day: u64) -> u64 {
     day / 7
@@ -55,14 +117,16 @@ pub const KINDS: &[(&str, &str)] = &[
 ];
 
 const HOURS: [&str; 24] = [
-    "h0", "h1", "h2", "h3", "h4", "h5", "h6", "h7", "h8", "h9", "h10", "h11", "h12", "h13",
-    "h14", "h15", "h16", "h17", "h18", "h19", "h20", "h21", "h22", "h23",
+    "h0", "h1", "h2", "h3", "h4", "h5", "h6", "h7", "h8", "h9", "h10", "h11", "h12", "h13", "h14",
+    "h15", "h16", "h17", "h18", "h19", "h20", "h21", "h22", "h23",
 ];
 
 pub const STATS: &[&str] = &["امار", "آمار", "امار گروه", "آمار گروه"];
 pub const REPORT_SET: &[&str] = &["تنظیم گزارش روزانه", "گزارش روزانه"];
 pub const REPORT_CLEAR: &[&str] = &["حذف گزارش روزانه", "خاموش گزارش روزانه"];
 pub const INFO: &[&str] = &["اطلاعات", "پروفایل", "کاربر", "ایدی", "آیدی"];
+
+pub const RANK: &[&str] = &["مقام", "رتبه", "سطح", "لول", "مدال"];
 
 pub const TEHRAN_OFFSET: u64 = 3 * 3600 + 1800;
 
@@ -116,22 +180,33 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         let _ = message.reply("✗ گزارش روزانه خاموش شد.").await;
         return true;
     }
-    if let Some(rest) = REPORT_SET.iter().find_map(|command| {
+    if let Some((command, rest)) = REPORT_SET.iter().find_map(|command| {
         let rest = text.strip_prefix(command)?;
-        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
+        (rest.is_empty() || rest.starts_with(char::is_whitespace))
+            .then(|| (*command, rest.trim()))
     }) {
+        let typed = super::digits(rest);
+        let at = match typed.split_once([':', '.']) {
+            Some((hour, minute)) => {
+                match (hour.trim().parse::<u32>(), minute.trim().parse::<u32>()) {
+                    (Ok(hour), Ok(minute)) if hour < 24 && minute < 60 => Some(hour * 60 + minute),
+                    _ => None,
+                }
+            }
+            None => typed
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|h| *h < 24)
+                .map(|h| h * 60),
+        };
+
+        if at.is_none() && !rest.is_empty() && !super::phrase_carries_text(command) {
+            return false;
+        }
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-        let typed = super::digits(rest);
-        let at = match typed.split_once([':', '.']) {
-            Some((hour, minute)) => match (hour.trim().parse::<u32>(), minute.trim().parse::<u32>())
-            {
-                (Ok(hour), Ok(minute)) if hour < 24 && minute < 60 => Some(hour * 60 + minute),
-                _ => None,
-            },
-            None => typed.trim().parse::<u32>().ok().filter(|h| *h < 24).map(|h| h * 60),
-        };
         let _ = match at {
             Some(at) => {
                 set_report_at(ctx, chat, Some(at)).await;
@@ -142,23 +217,42 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
                     ))
                     .await
             }
-            None => message.reply(InputMessage::new().html(report_status(ctx, chat))).await,
+            None => {
+                message
+                    .reply(InputMessage::new().html(report_status(ctx, chat)))
+                    .await
+            }
         };
         return true;
     }
-    if INFO.iter().any(|command| {
-        text == *command || text.strip_prefix(command).is_some_and(|r| r.starts_with(' '))
-    }) {
+    if names_a_user(RANK, text) {
+        return rank_card(ctx, message, chat, text).await;
+    }
+    if names_a_user(INFO, text) {
         return user_card(ctx, message, chat, text).await;
     }
     false
 }
 
-pub async fn on_callback(
-    ctx: &Ctx,
-    query: &grammers_client::update::CallbackQuery,
-    payload: &str,
-) {
+fn names_a_user(commands: &[&str], text: &str) -> bool {
+    commands.iter().any(|command| {
+        text == *command
+            || text
+                .strip_prefix(command)
+                .is_some_and(|r| r.starts_with(' '))
+    })
+}
+
+fn tail_of(commands: &[&str], text: &str) -> Option<String> {
+    commands
+        .iter()
+        .find_map(|command| text.strip_prefix(command))
+        .map(str::trim)
+        .filter(|rest| !rest.is_empty())
+        .map(str::to_owned)
+}
+
+pub async fn on_callback(ctx: &Ctx, query: &grammers_client::update::CallbackQuery, payload: &str) {
     let mut parts = payload.splitn(3, ':');
     let (Some(opener), Some(chat), Some(section)) = (parts.next(), parts.next(), parts.next())
     else {
@@ -225,7 +319,10 @@ async fn markup(
 
     let mut rows: Vec<Vec<Button>> = Vec::new();
     if current == "idle" {
-        let (idle, _) = ctx.settings.idle(chat, today(), IDLE_DAYS, IDLE_SHOWN).await;
+        let (idle, _) = ctx
+            .settings
+            .idle(chat, today(), IDLE_DAYS, IDLE_SHOWN)
+            .await;
         for (user, name, quiet) in idle {
             rows.push(vec![super::style::data(
                 format!("✗  {name} · {quiet} روز"),
@@ -340,7 +437,10 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
                 .enumerate()
                 .filter(|(_, count)| **count > 0)
                 .map(|(hour, count)| {
-                    let width = count.checked_mul(12).and_then(|n| n.checked_div(peak)).unwrap_or(0) as usize;
+                    let width = count
+                        .checked_mul(12)
+                        .and_then(|n| n.checked_div(peak))
+                        .unwrap_or(0) as usize;
                     format!(
                         "<code>{hour:02}</code> {}{} <b>{count}</b>",
                         "█".repeat(width.max(1)),
@@ -459,7 +559,11 @@ fn leaderboard(rows: &[Counter]) -> String {
                 "{}. <a href=\"tg://user?id={}\">{}</a> · <b>{}</b>",
                 place + 1,
                 row.user,
-                esc(if row.name.is_empty() { "کاربر" } else { &row.name }),
+                esc(if row.name.is_empty() {
+                    "کاربر"
+                } else {
+                    &row.name
+                }),
                 row.count
             )
         })
@@ -468,12 +572,7 @@ fn leaderboard(rows: &[Counter]) -> String {
 }
 
 async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool {
-    let arg = INFO
-        .iter()
-        .find_map(|command| text.strip_prefix(command))
-        .map(str::trim)
-        .filter(|rest| !rest.is_empty())
-        .map(str::to_owned);
+    let arg = tail_of(INFO, text);
 
     let Some(named) = super::named(message, arg.as_deref()) else {
         return false;
@@ -494,15 +593,7 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool 
         .map(|place| place.to_string())
         .unwrap_or_else(|| "بدون رتبه".to_owned());
 
-    let role = if super::owner(ctx, chat) == Some(user) {
-        "مالک ربات"
-    } else if super::is_bot_admin(ctx, chat, user) {
-        "ادمین ربات"
-    } else if super::vip::is_vip(ctx, chat, user) {
-        "کاربر ویژه"
-    } else {
-        "فرد عادی"
-    };
+    let role = role_of(ctx, chat, user);
 
     let username = ctx
         .client
@@ -512,6 +603,8 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool 
         .and_then(|peer| peer.username().map(|u| format!("@{u}")))
         .unwrap_or_else(|| "بدون یوزرنیم".to_owned());
 
+    let note = super::extras::note(ctx, chat, user).await;
+
     let mut photos = ctx.client.iter_profile_photos(target);
     let photo_count = photos.total().await.unwrap_or(0);
     let mut card = InputMessage::new().html(format!(
@@ -520,7 +613,8 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool 
          آیدی عددی · <code>{user}</code>\n\
          یوزرنیم · {}\n\
          تصاویر پروفایل · <b>{photo_count}</b>\n\
-         مقام · <b>{role}</b>\n\n\
+         سمت · <b>{role}</b>\n\
+         مقام · <b>{}</b> {}\n\n\
          <b>آمار کاربر</b>\n\
          پیام های امروز · <b>{}</b>\n\
          پیام های کل · <b>{}</b>\n\
@@ -528,22 +622,105 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool 
          اعضای اضافه کرده · <b>{}</b>{}",
         esc(&name),
         esc(&username),
+        rank_title(counts.total),
+        match rank_at(counts.total) {
+            Some((level, _, _)) => format!("· سطح {level}"),
+            None => String::new(),
+        },
         counts.today,
         counts.total,
         counts.adds,
-        match super::extras::note(ctx, chat, user) {
+        match note {
             Some(note) => format!("\n\n<b>یادداشت</b>\n{}", esc(&note)),
             None => String::new(),
         },
     ));
 
     if let Ok(Some(photo)) = photos.next().await
-        && let Some(media) = super::welcome::encode_media(&grammers_client::media::Media::Photo(photo))
+        && let Some(media) =
+            super::welcome::encode_media(&grammers_client::media::Media::Photo(photo))
         && let Some(media) = super::welcome::decode_media(&media)
     {
         card = card.media(media);
     }
     let _ = message.reply(card).await;
+    true
+}
+
+fn role_of(ctx: &Ctx, chat: i64, user: i64) -> &'static str {
+    if super::owner(ctx, chat) == Some(user) {
+        "مالک ربات"
+    } else if super::is_bot_admin(ctx, chat, user) {
+        "ادمین ربات"
+    } else if super::vip::is_vip(ctx, chat, user) {
+        "کاربر ویژه"
+    } else {
+        "فرد عادی"
+    }
+}
+
+async fn rank_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool {
+    let arg = tail_of(RANK, text);
+    let Some(named) = super::named(message, arg.as_deref()) else {
+        return false;
+    };
+    let Some((target, name)) = super::resolve(ctx, message, named).await else {
+        let _ = message
+            .reply("کاربر پیدا نشد. ریپلای کنید یا @username / آیدی عددی بفرستید.")
+            .await;
+        return true;
+    };
+    let Some(user) = target.id.bare_id() else {
+        return true;
+    };
+
+    let counts = ctx.settings.card(chat, user, today()).await;
+    let total = counts.total;
+    let (level, title) = match rank_at(total) {
+        Some((level, _, title)) => (level, title),
+        None => (0, NO_RANK),
+    };
+    let (bar, percent) = progress(total);
+    let levels = MILESTONES.len();
+
+    let ahead = match next_rank(total) {
+        Some((needed, next)) => format!(
+            "🎯  <b>{}</b> پیام تا «{next}»",
+            needed.saturating_sub(total)
+        ),
+        None => "👑  بالاترین مقام گروه، دیگر پله ای نمانده.".to_owned(),
+    };
+    let badge = if !ctx.settings.is_locked(chat, RANKS) {
+        "\n\n<i>مقام خودکار در این گروه خاموش است؛ این کارنامه فقط شمارش است.</i>"
+    } else if ctx.settings.is_locked(chat, &badge_key(user)) {
+        "\n\n<i>این مقام کنار نامش در گروه هم نوشته شده.</i>"
+    } else {
+        ""
+    };
+
+    let _ = message
+        .reply(InputMessage::new().html(format!(
+            "{}  <b>کارنامه مقام</b>\n\n\
+             👤  <a href=\"tg://user?id={user}\">{}</a>\n\
+             {}  مقام · <b>{title}</b>\n\
+             🎚  سطح · <b>{level}</b> از <b>{levels}</b>\n\
+             🛡  سمت · <b>{}</b>\n\n\
+             <code>{bar}</code>  ٪{percent}\n\
+             {ahead}\n\n\
+             💬  پیام های کل · <b>{total}</b>\n\
+             📅  امروز · <b>{}</b>\n\
+             🏆  رتبه امروز · <b>{}</b>{badge}",
+            medal(level),
+            esc(&name),
+            medal(level),
+            role_of(ctx, chat, user),
+            counts.today,
+            counts
+                .place
+                .map(|place| place.to_string())
+                .unwrap_or_else(|| "بدون رتبه".to_owned()),
+        )))
+        .await;
     true
 }
 
@@ -645,14 +822,10 @@ async fn award_rank(ctx: &Ctx, bumped: &Bumped) {
     if !ctx.settings.is_locked(chat, RANKS) {
         return;
     }
-    let Some((milestone, title)) = MILESTONES
-        .iter()
-        .rev()
-        .find(|(needed, _)| total >= *needed)
-    else {
+    let Some((level, milestone, title)) = rank_at(total) else {
         return;
     };
-    if bumped.awarded >= *milestone {
+    if bumped.awarded >= milestone {
         return;
     }
     let name = bumped.name.as_str();
@@ -663,33 +836,106 @@ async fn award_rank(ctx: &Ctx, bumped: &Bumped) {
     ) else {
         return;
     };
-    let target = super::admin_ref(ctx, chat_ref, user)
-        .await
-        .map(|(peer, _)| peer)
-        .unwrap_or(target);
 
-    let builder = match ctx.client.set_admin_rights(chat_ref, target).load_current().await {
-        Ok(builder) => builder,
+    ctx.settings.set_awarded(chat, user, milestone).await;
+    let titled = match super::promote::set_rank(ctx, chat_ref, Some(user), target, title).await {
+        Ok(()) => true,
         Err(e) => {
-            eprintln!("ranks: {chat}: could not read rights of {user}: {e}");
-            return;
+            eprintln!("ranks: {chat}: could not title {user}: {e}");
+            false
         }
     };
-    match builder.rank(*title).await {
-        Ok(()) => {
-            ctx.settings.set_awarded(chat, user, *milestone).await;
-            let _ = ctx
-                .client
-                .send_message(
-                    chat_ref,
-                    InputMessage::new().html(format!(
-                        "<b>مقام جدید</b>\n\n<a href=\"tg://user?id={user}\">{}</a> با <b>{milestone}</b> پیام مقام «{title}» گرفت.",
-                        esc(name)
-                    )),
-                )
-                .await;
+
+    let (bar, percent) = progress(total);
+    let ahead = match next_rank(total) {
+        Some((needed, next)) => format!(
+            "🎯  <b>{}</b> پیام تا «{next}»",
+            needed.saturating_sub(total)
+        ),
+        None => "👑  بالاترین مقام گروه را گرفت.".to_owned(),
+    };
+    let _ = ctx
+        .client
+        .send_message(
+            chat_ref,
+            InputMessage::new().html(format!(
+                "{}  <b>مقام جدید</b>\n\n\
+                 <a href=\"tg://user?id={user}\">{}</a> با <b>{milestone}</b> پیام به مقام \
+                 «<b>{title}</b>» رسید.\n\n\
+                 🎚  سطح · <b>{level}</b> از <b>{}</b>\n\
+                 💬  پیام های کل · <b>{total}</b>\n\
+                 <code>{bar}</code>  ٪{percent}\n\
+                 {ahead}{}",
+                medal(level),
+                esc(name),
+                MILESTONES.len(),
+                if titled {
+                    "\n\n<i>این مقام کنار نامش در گروه هم نوشته شد.</i>"
+                } else {
+                    "\n\n<i>نوشتن مقام کنار نامش انجام نشد؛ ربات باید ادمین باشد و اجازه «مدیریت مقام ها» داشته باشد.</i>"
+                },
+            )),
+        )
+        .await;
+}
+
+pub async fn sweep_badges(ctx: &std::sync::Arc<Ctx>) {
+    const BATCH: i64 = 256;
+    let mut inspected = 0usize;
+
+    loop {
+        let rows = ctx.settings.badge_rows(BATCH).await;
+        if rows.is_empty() {
+            break;
         }
-        Err(e) => eprintln!("ranks: {chat}: could not title {user}: {e}"),
+        inspected += rows.len();
+        let fixed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fixed_page = std::sync::Arc::clone(&fixed);
+        let owner = std::sync::Arc::clone(ctx);
+        super::bounded(rows, super::FLEET_CAMPAIGNS, move |(chat, user)| {
+            let ctx = std::sync::Arc::clone(&owner);
+            let fixed = std::sync::Arc::clone(&fixed_page);
+            async move {
+                let (Some(chat_ref), Some(target)) = (
+                    ctx.chat_ref(chat),
+                    PeerId::user(user).map(PeerId::to_ambient_ref),
+                ) else {
+                    return;
+                };
+                let peer = super::admin_ref(&ctx, chat_ref, user)
+                    .await
+                    .map(|(peer, _)| peer)
+                    .unwrap_or(target);
+
+                if let Err(e) = ctx.client.set_admin_rights(chat_ref, peer).await {
+                    eprintln!("ranks: {chat}: could not undo the badge of {user}: {e}");
+                    return;
+                }
+                ctx.settings.set(chat, &badge_key(user), false).await;
+                ctx.forget_admins(chat);
+                fixed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                let total = ctx.settings.card(chat, user, today()).await.total;
+                if let Some((_, _, title)) = rank_at(total)
+                    && let Err(e) =
+                        super::promote::set_rank(&ctx, chat_ref, Some(user), target, title).await
+                {
+                    eprintln!("ranks: {chat}: could not re-title {user}: {e}");
+                }
+            }
+        })
+        .await;
+
+        if fixed.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            eprintln!(
+                "ranks: badge cleanup made no progress after inspecting {inspected} row(s); stopping"
+            );
+            break;
+        }
+    }
+
+    if inspected > 0 {
+        println!("ranks: inspected {inspected} legacy badge row(s)");
     }
 }
 
@@ -721,9 +967,10 @@ pub fn report_at(ctx: &Ctx, chat: i64) -> Option<u32> {
 pub async fn set_report_at(ctx: &Ctx, chat: i64, at: Option<u32>) {
     match at {
         Some(at) => {
-            ctx.settings
+            let _ = ctx
+                .settings
                 .set_value(chat, REPORT_AT, &(at % 1440).to_string())
-                .await
+                .await;
         }
         None => {
             ctx.settings.set(chat, REPORT_AT, false).await;
@@ -734,9 +981,10 @@ pub async fn set_report_at(ctx: &Ctx, chat: i64, at: Option<u32>) {
 pub async fn run_daily(ctx: &std::sync::Arc<Ctx>) {
     let now = ((local_seconds() % 86_400) / 60) as u32;
     let day = today();
+    let minutes = super::recent_minutes(now);
 
     let mut due = Vec::new();
-    for chat in ctx.settings.chats_with(REPORT_AT).await {
+    for chat in ctx.settings.chats_with_values(REPORT_AT, &minutes).await {
         let Some(at) = report_at(ctx, chat).filter(|at| (0..=2).contains(&now.wrapping_sub(*at)))
         else {
             continue;
@@ -831,6 +1079,90 @@ pub async fn count_add(ctx: &Ctx, message: &Message, added: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn titles_fit_telegram() {
+        for (needed, title) in MILESTONES {
+            assert!(!title.is_empty(), "{needed} has no title");
+            assert!(
+                title.chars().count() <= super::super::promote::TAG_MAX,
+                "«{title}» is {} characters",
+                title.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn ladder_ascends_and_names_are_distinct() {
+        let mut previous = 0;
+        for (needed, title) in MILESTONES {
+            assert!(*needed > previous, "{needed} does not follow {previous}");
+            previous = *needed;
+            assert_eq!(
+                MILESTONES
+                    .iter()
+                    .filter(|(_, other)| other == title)
+                    .count(),
+                1,
+                "«{title}» is used twice"
+            );
+        }
+    }
+
+    #[test]
+    fn rank_at_lands_on_the_level_it_reached() {
+        assert!(rank_at(MILESTONES[0].0 - 1).is_none());
+        assert_eq!(rank_title(0), NO_RANK);
+        for (level, (needed, title)) in MILESTONES.iter().enumerate() {
+            assert_eq!(rank_at(*needed), Some((level + 1, *needed, *title)));
+
+            match MILESTONES.get(level + 1) {
+                Some((above, _)) => {
+                    assert_eq!(rank_at(above - 1), Some((level + 1, *needed, *title)));
+                    assert_eq!(next_rank(*needed), Some((*above, MILESTONES[level + 1].1)));
+                }
+                None => assert_eq!(next_rank(*needed), None),
+            }
+        }
+    }
+
+    #[test]
+    fn progress_stays_within_the_bar() {
+        let top = MILESTONES.last().unwrap().0;
+        for total in [0, 1, 49, 50, 99, 5_000, top - 1, top, top * 3] {
+            let (bar, percent) = progress(total);
+            assert!(percent <= 100, "{total} gave ٪{percent}");
+            assert_eq!(bar.chars().count(), 10, "{total} drew «{bar}»");
+        }
+        assert_eq!(progress(top).1, 100);
+    }
+
+    #[test]
+    fn every_level_wears_a_medal() {
+        assert_eq!(medal(0), MEDALS[0]);
+        for level in 1..=MILESTONES.len() {
+            assert!(!medal(level).is_empty());
+        }
+        assert_eq!(medal(MILESTONES.len() + 5), *MEDALS.last().unwrap());
+    }
+
+    #[test]
+    fn rank_words_do_not_collide_with_the_tag_commands() {
+        for command in super::super::promote::TAG
+            .iter()
+            .chain(super::super::promote::TAG_CLEAR)
+        {
+            assert!(
+                !names_a_user(RANK, command),
+                "«{command}» is read as a rank card"
+            );
+        }
+        assert!(names_a_user(RANK, "مقام"));
+        assert!(names_a_user(RANK, "مقام @ali"));
+        assert!(!names_a_user(RANK, "مقامش چیه"));
+        assert_eq!(tail_of(RANK, "مقام @ali").as_deref(), Some("@ali"));
+        assert_eq!(tail_of(RANK, "مقام"), None);
+    }
 
     #[test]
     fn period_stamps_turn_over_with_their_period() {
