@@ -1,8 +1,9 @@
 use std::time::{Duration, Instant};
 
-use grammers_client::message::{InputMessage, Message};
+use grammers_client::message::Message;
 
 use super::Ctx;
+use crate::response::ResponseKind;
 
 pub const COMMANDS: &[&str] = &["پینگ", "ping", "وضعیت ربات", "سرعت"];
 
@@ -12,14 +13,20 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
 
     let started = Instant::now();
-    let Ok(sent) = message.reply("در حال اندازه گیری…").await else {
-        return true;
-    };
     let telegram = started.elapsed();
-    let database = ctx.settings.ping().await;
+    let database = match ctx.settings.ping().await {
+        Ok(duration) => Some(duration),
+        Err(error) => {
+            log::warn!("ping: database probe failed: {error}");
+            None
+        }
+    };
 
-    let _ = sent
-        .edit(InputMessage::new().html(format!(
+    super::respond(
+        ctx,
+        message,
+        ResponseKind::UtilityResult,
+        super::premium::html(format!(
             "<b>وضعیت</b>\n\n\
              تلگرام · <b>{}</b>\n\
              دیتابیس · <b>{}</b>\n\
@@ -27,8 +34,9 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             millis(telegram),
             database.map_or("در دسترس نیست".to_owned(), millis),
             uptime(ctx.started.elapsed()),
-        )))
-        .await;
+        )),
+    )
+    .await;
     true
 }
 

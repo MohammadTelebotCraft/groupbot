@@ -1,3 +1,4 @@
+
 use std::sync::Arc;
 
 use axum::Json;
@@ -50,6 +51,9 @@ pub async fn add(
             Json(json!({ "error": "لیست کلمات سفارشی ویس پر است (۲۰۰ کلمه)." })),
         )
             .into_response(),
+        Err(voicemonitor::AddWordError::Settings(error)) => {
+            settings_error(gate.chat, "voice word add", &error)
+        }
     }
 }
 
@@ -57,12 +61,36 @@ pub async fn remove(
     State(ctx): State<Arc<Ctx>>,
     gate: AdminGate,
     Path(key): Path<String>,
-) -> impl IntoResponse {
-    voicemonitor::remove_word(&ctx, gate.chat, &key).await;
+) -> Response {
+    if let Err(error) = voicemonitor::remove_word(&ctx, gate.chat, &key).await {
+        return settings_error(gate.chat, "voice word remove", &error);
+    }
     list(State(ctx), gate).await.into_response()
 }
 
-pub async fn restore_all(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> impl IntoResponse {
-    voicemonitor::restore_all_defaults(&ctx, gate.chat).await;
-    list(State(ctx), gate).await
+pub async fn restore_all(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> Response {
+    if let Err(error) = voicemonitor::restore_all_defaults(&ctx, gate.chat).await {
+        return settings_error(gate.chat, "voice defaults restore", &error);
+    }
+    list(State(ctx), gate).await.into_response()
+}
+
+fn settings_error(
+    chat: i64,
+    operation: &str,
+    error: &crate::state::SettingsWriteError,
+) -> Response {
+    ::log::warn!("miniapp: {operation} for {chat} failed: {error}");
+    let (status, message) = if error.commit_outcome_unknown() {
+        (
+            StatusCode::ACCEPTED,
+            "نتیجه ذخیره سازی نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید.",
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "تغییر ذخیره نشد؛ دوباره تلاش کنید.",
+        )
+    };
+    (status, Json(json!({ "error": message }))).into_response()
 }

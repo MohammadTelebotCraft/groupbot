@@ -1,6 +1,8 @@
 use grammers_client::message::Message;
 
 use super::{Ctx, betrayal, captcha, flood, numbers_in, warns};
+use crate::response::ResponseKind;
+use crate::state::{SettingMutation, SettingsWriteError};
 
 pub const SETTINGS: &[(&str, &str)] = &[
     ("اخطار", "warns"),
@@ -47,56 +49,165 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
         return true;
     }
     if numbers.is_empty() {
-        let _ = message.reply(usage(what)).await;
+        super::respond(ctx, message, ResponseKind::CommandError, usage(what)).await;
         return true;
     }
 
+    let mut kind = ResponseKind::SettingsChanged;
     let reply = match *what {
-        "warns" => {
-            warns::set_limit(ctx, chat, numbers[0]).await;
-            format!("✓ سقف اخطار روی {} تنظیم شد.", warns::limit(ctx, chat))
-        }
+        "warns" => match warns::set_limit(ctx, chat, numbers[0]).await {
+            Ok(()) => format!("✓ سقف اخطار روی {} تنظیم شد.", warns::limit(ctx, chat)),
+            Err(error) => {
+                kind = ResponseKind::CommandError;
+                log::warn!("warn limit for {chat} was not stored: {error}");
+                failure_text(&error, "تنظیم سقف اخطار ذخیره نشد؛ دوباره تلاش کنید.")
+            }
+        },
         "notice" => {
-            super::notice::set_ttl(ctx, chat, numbers[0]).await;
-            let ttl = super::notice::ttl(ctx, chat);
-            if ttl == 0 {
-                "✓ اعلان حذف پاک نمی شود.".to_owned()
-            } else {
-                format!("✓ اعلان حذف پس از {ttl} ثانیه پاک می شود.")
+            let value = numbers[0].clamp(super::notice::TTL_RANGE.0, super::notice::TTL_RANGE.1);
+            match ctx
+                .settings
+                .try_set_value(chat, super::notice::TTL, &value.to_string())
+                .await
+            {
+                Ok(_) if value == 0 => "✓ اعلان حذف پاک نمی شود.".to_owned(),
+                Ok(_) => format!("✓ اعلان حذف پس از {value} ثانیه پاک می شود."),
+                Err(error) => {
+                    kind = ResponseKind::CommandError;
+                    log::warn!("notice ttl for {chat} was not stored: {error}");
+                    failure_text(&error, "تنظیم اعلان ذخیره نشد؛ دوباره تلاش کنید.")
+                }
             }
         }
         "captcha" => {
-            captcha::set_timeout(ctx, chat, numbers[0]).await;
-            format!(
-                "✓ مهلت احراز هویت روی {} ثانیه تنظیم شد.",
-                captcha::timeout(ctx, chat)
-            )
+            let value = numbers[0].clamp(captcha::TIMEOUT_RANGE.0, captcha::TIMEOUT_RANGE.1);
+            match ctx
+                .settings
+                .try_set_value(chat, captcha::TIMEOUT, &value.to_string())
+                .await
+            {
+                Ok(_) => format!("✓ مهلت احراز هویت روی {value} ثانیه تنظیم شد."),
+                Err(error) => {
+                    kind = ResponseKind::CommandError;
+                    log::warn!("captcha timeout for {chat} was not stored: {error}");
+                    failure_text(&error, "مهلت احراز هویت ذخیره نشد؛ دوباره تلاش کنید.")
+                }
+            }
         }
         "betrayal" => {
-            betrayal::set(ctx, chat, betrayal::LIMIT, numbers[0]).await;
-            if let Some(&minutes) = numbers.get(1) {
-                betrayal::set(ctx, chat, betrayal::WINDOW, minutes).await;
+            let limit = numbers[0].clamp(betrayal::LIMIT_RANGE.0, betrayal::LIMIT_RANGE.1);
+            let minutes = numbers
+                .get(1)
+                .copied()
+                .map(|value| value.clamp(betrayal::WINDOW_RANGE.0, betrayal::WINDOW_RANGE.1));
+            let limit_value = limit.to_string();
+            let minutes_value = minutes.map(|value| value.to_string());
+            let result = match minutes_value.as_deref() {
+                Some(value) => {
+                    ctx.settings
+                        .try_apply_batch(
+                            chat,
+                            &[
+                                SettingMutation::Put {
+                                    key: betrayal::LIMIT,
+                                    value: &limit_value,
+                                },
+                                SettingMutation::Put {
+                                    key: betrayal::WINDOW,
+                                    value,
+                                },
+                            ],
+                        )
+                        .await
+                }
+                None => ctx
+                    .settings
+                    .try_set_value(chat, betrayal::LIMIT, &limit_value)
+                    .await
+                    .map(usize::from),
+            };
+            match result {
+                Ok(_) => format!(
+                    "✓ ضد خیانت: بیش از {} حذف در {} دقیقه.",
+                    betrayal::limit(ctx, chat),
+                    betrayal::window(ctx, chat)
+                ),
+                Err(error) => {
+                    kind = ResponseKind::CommandError;
+                    log::warn!("betrayal limits for {chat} were not stored: {error}");
+                    failure_text(&error, "تنظیم ضد خیانت ذخیره نشد؛ دوباره تلاش کنید.")
+                }
             }
-            format!(
-                "✓ ضد خیانت: بیش از {} حذف در {} دقیقه.",
-                betrayal::limit(ctx, chat),
-                betrayal::window(ctx, chat)
-            )
         }
         _ => {
-            flood::set(ctx, chat, flood::LIMIT, numbers[0]).await;
-            if let Some(&seconds) = numbers.get(1) {
-                flood::set(ctx, chat, flood::WINDOW, seconds).await;
+            let limit = numbers[0].clamp(flood::LIMIT_RANGE.0, flood::LIMIT_RANGE.1);
+            let seconds = numbers
+                .get(1)
+                .copied()
+                .map(|value| value.clamp(flood::WINDOW_RANGE.0, flood::WINDOW_RANGE.1));
+            let limit_value = limit.to_string();
+            let seconds_value = seconds.map(|value| value.to_string());
+            let result = match seconds_value.as_deref() {
+                Some(value) => {
+                    ctx.settings
+                        .try_apply_batch(
+                            chat,
+                            &[
+                                SettingMutation::Put {
+                                    key: flood::LIMIT,
+                                    value: &limit_value,
+                                },
+                                SettingMutation::Put {
+                                    key: flood::WINDOW,
+                                    value,
+                                },
+                            ],
+                        )
+                        .await
+                }
+                None => ctx
+                    .settings
+                    .try_set_value(chat, flood::LIMIT, &limit_value)
+                    .await
+                    .map(usize::from),
+            };
+            match result {
+                Ok(_) => format!(
+                    "✓ ضد رگبار: بیش از {} پیام در {} ثانیه.",
+                    flood::limit(ctx, chat),
+                    flood::window(ctx, chat)
+                ),
+                Err(error) => {
+                    kind = ResponseKind::CommandError;
+                    log::warn!("flood limits for {chat} were not stored: {error}");
+                    failure_text(&error, "تنظیم ضد رگبار ذخیره نشد؛ دوباره تلاش کنید.")
+                }
             }
-            format!(
-                "✓ ضد رگبار: بیش از {} پیام در {} ثانیه.",
-                flood::limit(ctx, chat),
-                flood::window(ctx, chat)
-            )
         }
     };
-    let _ = message.reply(reply).await;
+    super::respond(
+        ctx,
+        message,
+        kind,
+        super::premium::icon_text(
+            Some(match *what {
+                "warns" => super::premium::Icon::Warning,
+                "captcha" | "flood" | "notice" => super::premium::Icon::Timer,
+                _ => super::premium::Icon::Locked,
+            }),
+            reply,
+        ),
+    )
+    .await;
     true
+}
+
+fn failure_text(error: &SettingsWriteError, rejected: &str) -> String {
+    if error.commit_outcome_unknown() {
+        "نتیجه ذخیره سازی نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید.".to_owned()
+    } else {
+        rejected.to_owned()
+    }
 }
 
 fn usage(what: &str) -> &'static str {

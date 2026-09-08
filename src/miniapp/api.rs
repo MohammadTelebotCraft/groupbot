@@ -1,19 +1,21 @@
-use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
 
-use crate::handlers::Ctx;
+use super::{
+    MiniAppState, cases, dashboard, filters, lists, locks, misc, overview, response_policy,
+    settings, voice,
+};
 
-use super::{dashboard, filters, lists, locks, misc, overview, settings, voice};
-
-pub fn router() -> Router<Arc<Ctx>> {
+pub fn router() -> Router<MiniAppState> {
     Router::new()
         .route("/dashboard", get(dashboard::dashboard))
         .route("/groups", get(overview::groups))
         .route("/health", get(overview::health))
         .route("/activity", get(overview::activity))
         .route("/settings/apply", post(settings::apply))
+        .route("/response-policy", get(response_policy::get))
+        .route("/response-policy/apply", post(response_policy::apply))
         .route("/locks", get(locks::list))
         .route("/locks/{key}/toggle", post(locks::toggle))
         .route("/locks/all", post(locks::all))
@@ -25,6 +27,11 @@ pub fn router() -> Router<Arc<Ctx>> {
         .route("/voice/words", post(voice::add))
         .route("/voice/words/{key}", delete(voice::remove))
         .route("/voice/restore", post(voice::restore_all))
+        .route("/cases", get(cases::list))
+        .route("/cases/{id}", get(cases::get))
+        .route("/cases/{id}/resolve", post(cases::resolve))
+        .route("/cases/{id}/reverse", post(cases::reverse))
+        .route("/cases/{id}/notes", post(cases::note))
         .route("/admins", get(misc::admins_list))
         .route("/admins/{user_id}", delete(misc::remove_admin))
         .route("/rights", get(misc::rights_list))

@@ -1,11 +1,13 @@
+
 use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use axum::response::IntoResponse;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
-use crate::handlers::{self, Ctx, extras, install, log, stats};
+use crate::handlers::{self, Ctx, install, log, stats};
 
 use super::auth::{AdminGate, UserGate};
 
@@ -19,8 +21,18 @@ fn title_of(ctx: &Ctx, chat: i64) -> String {
     )
 }
 
-pub async fn groups(State(ctx): State<Arc<Ctx>>, gate: UserGate) -> impl IntoResponse {
-    let chats = ctx.settings.panels_for(gate.user, GROUP_CAP).await;
+pub async fn groups(State(ctx): State<Arc<Ctx>>, gate: UserGate) -> Response {
+    let chats = match ctx.settings.panels_for(gate.user, GROUP_CAP).await {
+        Ok(chats) => chats,
+        Err(error) => {
+            ::log::warn!("miniapp: group lookup for {} failed: {error}", gate.user);
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "فهرست گروه‌ها خوانده نشد؛ دوباره تلاش کنید." })),
+            )
+                .into_response();
+        }
+    };
     let groups: Vec<Value> = chats
         .into_iter()
         .map(|chat| {
@@ -28,12 +40,11 @@ pub async fn groups(State(ctx): State<Arc<Ctx>>, gate: UserGate) -> impl IntoRes
                 "id": chat,
                 "title": title_of(&ctx, chat),
                 "is_owner": handlers::owner(&ctx, chat) == Some(gate.user),
-
                 "known": ctx.chat_ref(chat).is_some(),
             })
         })
         .collect();
-    Json(json!({ "groups": groups }))
+    Json(json!({ "groups": groups })).into_response()
 }
 
 fn issue(severity: &str, title: &str, detail: &str, fix: &str) -> Value {
@@ -80,15 +91,6 @@ pub async fn health(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> impl IntoRe
         }
     }
 
-    if ctx.settings.value(chat, extras::NIGHT).is_some() && extras::night(&ctx, chat).is_none() {
-        issues.push(issue(
-            "warn",
-            "قفل شب نیمه تنظیم است",
-            "ساعت شروع و پایان یکی است، پس هیچ وقت اجرا نمی شود",
-            "feature:ng",
-        ));
-    }
-
     let any_kind = log::KINDS
         .iter()
         .any(|(key, _)| ctx.settings.is_locked(chat, key));
@@ -123,12 +125,26 @@ const COUNTERS: &[(&str, &str)] = &[
 
 const DAYS: u64 = 7;
 
-pub async fn activity(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> impl IntoResponse {
+pub async fn activity(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> Response {
     let today = stats::today();
     let mut days: Vec<Value> = Vec::with_capacity(DAYS as usize);
     for back in 0..DAYS {
         let day = today - back;
-        let tallies = ctx.settings.tallies(gate.chat, day).await;
+        let tallies = match ctx.settings.tallies(gate.chat, day).await {
+            Ok(tallies) => tallies,
+            Err(error) => {
+                ::log::warn!(
+                    "miniapp: activity read for {}/{} failed: {error}",
+                    gate.chat,
+                    day
+                );
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": "آمار گروه خوانده نشد؛ دوباره تلاش کنید." })),
+                )
+                    .into_response();
+            }
+        };
         let counters: Vec<Value> = COUNTERS
             .iter()
             .map(|(key, label)| {
@@ -137,5 +153,5 @@ pub async fn activity(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> impl Into
             .collect();
         days.push(json!({ "day": day, "ago": back, "counters": counters }));
     }
-    Json(json!({ "days": days }))
+    Json(json!({ "days": days })).into_response()
 }

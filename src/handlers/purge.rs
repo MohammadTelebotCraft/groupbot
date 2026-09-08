@@ -1,4 +1,4 @@
-use grammers_client::message::{Button, InputMessage, Message, ReplyMarkup};
+use grammers_client::message::{Button, Message};
 use grammers_client::update::CallbackQuery;
 
 use super::Ctx;
@@ -22,30 +22,31 @@ const MAX: i32 = 1000;
 const CHUNK: usize = 100;
 
 pub fn auto_at(ctx: &Ctx, chat: i64) -> Option<u32> {
-    ctx.settings
-        .value_parsed::<u32>(chat, AUTO_AT)
-        .filter(|at| *at < 1440)
+    ctx.settings.value_parsed::<u32>(chat, AUTO_AT)
 }
 
 pub fn auto_count(ctx: &Ctx, chat: i64) -> u32 {
     ctx.settings
         .value_parsed(chat, AUTO_COUNT)
         .unwrap_or(AUTO_DEFAULT_COUNT)
-        .clamp(AUTO_COUNT_RANGE.0, AUTO_COUNT_RANGE.1)
 }
 
-pub async fn set_auto_at(ctx: &Ctx, chat: i64, at: Option<u32>) {
+pub async fn set_auto_at(
+    ctx: &Ctx,
+    chat: i64,
+    at: Option<u32>,
+) -> Result<(), crate::state::SettingsWriteError> {
     match at {
         Some(at) => {
-            let _ = ctx
-                .settings
-                .set_value(chat, AUTO_AT, &(at % 1440).to_string())
-                .await;
+            ctx.settings
+                .try_set_value(chat, AUTO_AT, &(at % 1440).to_string())
+                .await?;
         }
         None => {
-            ctx.settings.set(chat, AUTO_AT, false).await;
+            ctx.settings.try_set(chat, AUTO_AT, false).await?;
         }
     }
+    Ok(())
 }
 
 pub async fn run_auto(ctx: &std::sync::Arc<Ctx>) {
@@ -53,8 +54,15 @@ pub async fn run_auto(ctx: &std::sync::Arc<Ctx>) {
     let day = super::stats::today();
     let minutes = super::recent_minutes(now);
 
+    let chats = match ctx.settings.chats_with_values(AUTO_AT, &minutes).await {
+        Ok(chats) => chats,
+        Err(error) => {
+            log::warn!("auto purge: due-chat query failed; retrying next tick: {error}");
+            return;
+        }
+    };
     let mut due = Vec::new();
-    for chat in ctx.settings.chats_with_values(AUTO_AT, &minutes).await {
+    for chat in chats {
         if !auto_at(ctx, chat).is_some_and(|at| (0..=2).contains(&now.wrapping_sub(at))) {
             continue;
         }
@@ -77,15 +85,34 @@ pub async fn run_auto(ctx: &std::sync::Arc<Ctx>) {
                 .client
                 .send_message(
                     chat_ref,
-                    InputMessage::new().html("<b>پاکسازی خودکار</b>\n\nدر حال پاک کردن..."),
+                    super::premium::icon_html(
+                        Some(super::premium::Icon::Hourglass),
+                        "<b>پاکسازی خودکار</b>\n\nدر حال پاک کردن...",
+                    ),
                 )
                 .await
             else {
                 return;
             };
-            ctx.settings
-                .set_value(chat, "auto_purge_day", &day.to_string())
-                .await;
+            if let Err(error) = ctx
+                .settings
+                .try_set_value(chat, "auto_purge_day", &day.to_string())
+                .await
+            {
+                log::warn!("auto purge: could not claim day {day} for {chat}: {error}");
+                let text = if error.commit_outcome_unknown() {
+                    "نتیجه ثبت نوبت پاکسازی نامشخص است؛ برای جلوگیری از پاکسازی تکراری کاری انجام نشد."
+                } else {
+                    "نوبت پاکسازی ذخیره نشد؛ برای جلوگیری از پاکسازی تکراری کاری انجام نشد."
+                };
+                let _ = marker
+                    .edit(super::premium::icon_html(
+                        Some(super::premium::Icon::ErrorRed),
+                        format!("<b>پاکسازی خودکار</b>\n\n{text}"),
+                    ))
+                    .await;
+                return;
+            }
             let last = marker.id() - 1;
             let count = auto_count(ctx, chat);
             let done = match count {
@@ -102,7 +129,10 @@ pub async fn run_auto(ctx: &std::sync::Arc<Ctx>) {
                 }
             };
             let _ = marker
-                .edit(InputMessage::new().html(format!("<b>پاکسازی خودکار</b>\n\n{done}")))
+                .edit(super::premium::icon_html(
+                    Some(super::premium::Icon::Delete),
+                    format!("<b>پاکسازی خودکار</b>\n\n{done}"),
+                ))
                 .await;
         }
     })
@@ -127,7 +157,6 @@ pub async fn handle_all(ctx: &Ctx, message: &Message) -> bool {
     let last = message.id();
     let warning = match ctx.user_client().is_some() {
         true => "همه پیام های گروه برای همه پاک می شود. این کار برگشت ندارد.",
-
         false => {
             "کلینر وارد نشده است؛ بدون آن هر بار تا ۱۰ هزار پیام آخر پاک می شود.\n\
                   برای پاک شدن کامل «افزودن کلینر» را بفرستید."
@@ -135,16 +164,24 @@ pub async fn handle_all(ctx: &Ctx, message: &Message) -> bool {
     };
     let _ = message
         .reply(
-            InputMessage::new()
-                .html(format!("<b>حذف همه پیام ها</b>\n\n{warning}"))
-                .reply_markup(ReplyMarkup::from_buttons(&[vec![
+            super::premium::icon_html(
+                Some(super::premium::Icon::Delete),
+                format!("<b>حذف همه پیام ها</b>\n\n{warning}"),
+            )
+            .reply_markup(super::premium::buttons(&[vec![
+                super::premium::decorate(
                     super::style::data(
-                        "✅  تایید",
+                        "تایید",
                         format!("pg:{opener}:{last}").into_bytes(),
                         super::style::Colour::Success,
                     ),
-                    Button::data("❌  لغو", format!("pg:{opener}:0").into_bytes()),
-                ]])),
+                    Some(super::premium::Icon::Success),
+                ),
+                super::premium::decorate(
+                    Button::data("لغو", format!("pg:{opener}:0").into_bytes()),
+                    Some(super::premium::Icon::Close),
+                ),
+            ]])),
         )
         .await;
     true
@@ -160,7 +197,10 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
     if query.sender_id().bare_id() != Some(opener) {
         let _ = query
             .answer()
-            .alert("این دکمه برای شخص دیگری است.")
+            .alert(super::premium::plain_label(
+                Some(super::premium::Icon::Locked),
+                "این دکمه برای شخص دیگری است.",
+            ))
             .send()
             .await;
         return;
@@ -168,7 +208,10 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
     if last == 0 {
         let _ = query
             .answer()
-            .edit(InputMessage::new().html("✗ لغو شد."))
+            .edit(super::premium::icon_html(
+                Some(super::premium::Icon::Close),
+                "لغو شد.",
+            ))
             .await;
         return;
     }
@@ -190,7 +233,7 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
     if let Some(chat_ref) = ctx.chat_ref(chat) {
         let _ = ctx
             .client
-            .send_message(chat_ref, InputMessage::new().html(text))
+            .send_message(chat_ref, super::premium::html(text))
             .await;
     }
 }
@@ -214,7 +257,12 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
     let first = (last - count).max(1);
     let deleted = wipe_range(ctx, chat, chat_ref, first, last).await;
 
-    let _ = message.respond(format!("✓ {deleted} پیام حذف شد.")).await;
+    let _ = message
+        .respond(super::premium::icon_text(
+            Some(super::premium::Icon::Delete),
+            format!("{deleted} پیام حذف شد."),
+        ))
+        .await;
     true
 }
 

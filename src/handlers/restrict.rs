@@ -1,8 +1,9 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use grammers_client::message::Message;
 
 use super::{Ctx, esc, name_of};
+use crate::response::ResponseKind;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
@@ -10,11 +11,20 @@ pub enum Action {
     Unmute,
     Ban,
     Unban,
-
     Kick,
 }
 
 use Action::*;
+
+impl Action {
+    pub fn icon(self) -> Option<super::premium::Icon> {
+        super::premium::icon_for(super::premium::Context {
+            action: super::cases::action_key(self),
+            object: "user",
+            ..Default::default()
+        })
+    }
+}
 
 pub const WIPE_BAN: &str = "wipe_ban_on";
 
@@ -67,7 +77,7 @@ pub async fn wipe_history(
 
     let mine = ctx.take_said(chat_id, user);
     for chunk in mine.chunks(WIPE_CHUNK) {
-        match ctx.client.delete_messages(chat, chunk).await {
+        match ctx.client.delete_messages_critical(chat, chunk).await {
             Ok(gone) => deleted += gone,
             Err(e) => {
                 eprintln!("wipe: {chat_id}: could not delete {} ids: {e}", chunk.len());
@@ -88,7 +98,6 @@ async fn cleaner_wipe(
     let Some(user) = ctx.user_client() else {
         return 0;
     };
-
     let Some(chat_ref) = super::cleaner::chat_ref(ctx, &user, chat_id).await else {
         eprintln!("wipe: {chat_id}: cleaner could not resolve the chat");
         return 0;
@@ -96,7 +105,6 @@ async fn cleaner_wipe(
     let Some(user_id) = target.id.bare_id() else {
         return 0;
     };
-
     let Some(target) = super::cleaner::member_ref(&user, chat_ref, user_id, None).await else {
         eprintln!("wipe: {chat_id}: cleaner could not find participant {user_id}");
         return 0;
@@ -104,7 +112,7 @@ async fn cleaner_wipe(
     let mut deleted = 0;
     for _ in 0..WIPE_ROUNDS {
         let asked = user
-            .invoke_outbound(&tl::functions::channels::DeleteParticipantHistory {
+            .invoke_outbound_critical(&tl::functions::channels::DeleteParticipantHistory {
                 channel: chat_ref.into(),
                 participant: target.into(),
             })
@@ -169,8 +177,10 @@ pub async fn handle_custom(ctx: &Ctx, message: &Message, view: &super::locks::Vi
         return false;
     }
     let text = view.digits();
-
-    let words: Vec<&str> = text.split_whitespace().take(MAX_TRIGGER_WORDS + 1).collect();
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .take(MAX_TRIGGER_WORDS + 1)
+        .collect();
     let candidates = trigger_candidates(&words);
 
     let raw = view.text();
@@ -198,12 +208,16 @@ pub async fn handle_custom(ctx: &Ctx, message: &Message, view: &super::locks::Vi
     let Some((was_legacy, (consumed, action))) = found else {
         return false;
     };
-
     let (text, words) = match (was_legacy, &legacy) {
         (true, Some((words, _))) => (raw, words),
         _ => (text, &words),
     };
-    run(ctx, message, parse_rest(action, tail_after(text, words, consumed))).await
+    run(
+        ctx,
+        message,
+        parse_rest(action, tail_after(text, words, consumed)),
+    )
+    .await
 }
 
 fn tail_after<'a>(text: &'a str, words: &[&str], consumed: usize) -> &'a str {
@@ -227,7 +241,6 @@ async fn run(ctx: &Ctx, message: &Message, parsed: Parsed<'_>) -> bool {
     let Some(named) = super::named(message, arg) else {
         return false;
     };
-
     let needed = match action {
         Ban | Unban | Kick => super::limits::BAN,
         Mute | Unmute => super::limits::MUTE,
@@ -240,15 +253,32 @@ async fn run(ctx: &Ctx, message: &Message, parsed: Parsed<'_>) -> bool {
         super::resolve(ctx, message, named).await,
         message.peer_ref().await,
     ) else {
-        let _ = message
-            .reply("کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.",
+            ),
+        )
+        .await;
         return true;
     };
 
-    let duration = if action == Kick { None } else { parsed.duration };
+    let duration = if action == Kick {
+        None
+    } else {
+        parsed.duration
+    };
 
     let by = super::sender_of(message);
+    let evidence = message
+        .get_reply()
+        .await
+        .ok()
+        .flatten()
+        .map(|target_message| super::cases::evidence(&target_message));
     let result = apply(
         ctx,
         chat_ref,
@@ -259,6 +289,12 @@ async fn run(ctx: &Ctx, message: &Message, parsed: Parsed<'_>) -> bool {
             actor: by.as_ref().map(|(id, name)| (*id, name.as_str())),
             reason: "دستور ادمین",
             target_name: &target_name,
+            case: Some(super::cases::CaseContext {
+                source: "moderator",
+                rule: "moderator_command",
+                reason: "دستور ادمین",
+                evidence,
+            }),
             ..Default::default()
         },
     )
@@ -274,7 +310,7 @@ async fn run(ctx: &Ctx, message: &Message, parsed: Parsed<'_>) -> bool {
     }
 
     let by = name_of(message);
-    let _ = match result {
+    match result {
         Ok(wiped) => {
             let kick_only = action == Ban
                 && chat_ref.id.kind() != grammers_client::session::types::PeerKind::Channel;
@@ -297,7 +333,6 @@ async fn run(ctx: &Ctx, message: &Message, parsed: Parsed<'_>) -> bool {
                 (Some(_), None) => " به صورت دائمی".to_owned(),
                 _ => String::new(),
             };
-
             let asked_to_wipe = wipe_key(action).is_some_and(|key| {
                 message
                     .peer_id()
@@ -309,15 +344,36 @@ async fn run(ctx: &Ctx, message: &Message, parsed: Parsed<'_>) -> bool {
                 (0, true) => "\n🧹 پیامی از او برای پاک کردن پیدا نشد.".to_owned(),
                 (n, _) => format!("\n🧹 {n} پیام او هم پاک شد."),
             };
-            message
-                .reply(format!(
-                    "{target_name} {what}{how_long}.\nتوسط: {by}{note}{swept}"
-                ))
-                .await
+            super::announce(
+                ctx,
+                message,
+                ResponseKind::ModerationAnnouncement,
+                super::premium::icon_text(
+                    action.icon(),
+                    format!("{target_name} {what}{how_long}.\nتوسط: {by}{note}"),
+                ),
+            )
+            .await;
+            super::respond_if_private(
+                ctx,
+                message,
+                ResponseKind::ModerationConfirmation,
+                super::premium::icon_text(
+                    action.icon(),
+                    format!("عملیات برای {target_name} با موفقیت انجام شد.{swept}"),
+                ),
+            )
+            .await
         }
         Err(e) => {
             eprintln!("restrict failed: {e}");
-            message.reply(e.told()).await
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                super::premium::icon_text(Some(super::premium::Icon::ErrorRed), e.told()),
+            )
+            .await
         }
     };
     true
@@ -337,8 +393,8 @@ pub fn honoured(duration: Option<Duration>) -> Option<Duration> {
 #[derive(Debug)]
 pub enum Failed {
     Protected,
-
     BasicGroup,
+    State(sqlx::Error),
     Telegram(grammers_client::InvocationError),
 }
 
@@ -347,6 +403,7 @@ impl std::fmt::Display for Failed {
         match self {
             Failed::Protected => f.write_str("target is an admin"),
             Failed::BasicGroup => f.write_str("basic group, no per-user restrictions"),
+            Failed::State(e) => write!(f, "member-state ownership update failed: {e}"),
             Failed::Telegram(e) => e.fmt(f),
         }
     }
@@ -357,6 +414,9 @@ impl Failed {
         match self {
             Failed::Protected => PROTECTED.to_owned(),
             Failed::BasicGroup => BASIC_GROUP.to_owned(),
+            Failed::State(_) => {
+                "✗ وضعیت محدودیت ذخیره نشد؛ برای جلوگیری از تداخل تغییری اعمال نشد.".to_owned()
+            }
             Failed::Telegram(grammers_client::InvocationError::Rpc(rpc)) => {
                 told_rpc(&rpc.name, rpc.value)
             }
@@ -389,7 +449,6 @@ fn told_rpc(name: &str, value: Option<u32>) -> String {
         "CHANNEL_MONOFORUM_UNSUPPORTED" => {
             "✗ این چت از محدود کردن کاربران پشتیبانی نمی کند.".to_owned()
         }
-
         "BANNED_RIGHTS_INVALID" => "✗ انجام نشد · تنظیم دسترسی نامعتبر بود.".to_owned(),
         "FLOOD_WAIT" | "FLOOD_PREMIUM_WAIT" | "SLOWMODE_WAIT" => match value {
             Some(secs) => format!(
@@ -398,7 +457,6 @@ fn told_rpc(name: &str, value: Option<u32>) -> String {
             ),
             None => "✗ تلگرام موقتا ربات را محدود کرده. کمی بعد دوباره بفرستید.".to_owned(),
         },
-
         other => format!(
             "✗ انجام نشد · {other}\nمطمئن شوید ربات ادمین است و اجازه محدود کردن کاربران دارد."
         ),
@@ -413,23 +471,484 @@ pub async fn apply(
     duration: Option<Duration>,
     by: By<'_>,
 ) -> Result<usize, Failed> {
+    apply_with_priority(ctx, chat, target, action, duration, by, true).await
+}
+
+pub(super) async fn apply_maintenance(
+    ctx: &Ctx,
+    chat: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+    action: Action,
+    duration: Option<Duration>,
+    by: By<'_>,
+) -> Result<usize, Failed> {
+    apply_with_priority(ctx, chat, target, action, duration, by, false).await
+}
+
+async fn apply_with_priority(
+    ctx: &Ctx,
+    chat: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+    action: Action,
+    duration: Option<Duration>,
+    by: By<'_>,
+    critical_outbound: bool,
+) -> Result<usize, Failed> {
+    let Some(chat_id) = chat.id.bot_api_dialog_id() else {
+        return apply_inner(
+            ctx,
+            chat,
+            target,
+            ApplySpec::ordinary(action, duration, critical_outbound),
+            by,
+        )
+        .await;
+    };
+    let Some(user_id) = target.id.bare_id() else {
+        return apply_inner(
+            ctx,
+            chat,
+            target,
+            ApplySpec::ordinary(action, duration, critical_outbound),
+            by,
+        )
+        .await;
+    };
+    let guard = lock_member(ctx, chat_id, user_id).await;
+    cancel_captcha_for_override(ctx, &guard)
+        .await
+        .map_err(Failed::State)?;
+    apply_inner(
+        ctx,
+        chat,
+        target,
+        ApplySpec::ordinary(action, duration, critical_outbound),
+        by,
+    )
+    .await
+}
+
+pub(super) struct MemberGuard<'a> {
+    chat: i64,
+    user: i64,
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+}
+
+#[derive(Clone, Copy)]
+struct ApplySpec {
+    action: Action,
+    duration: Option<Duration>,
+    exact_until: Option<i32>,
+    wipe_override: Option<bool>,
+    critical_outbound: bool,
+}
+
+impl ApplySpec {
+    fn ordinary(action: Action, duration: Option<Duration>, critical_outbound: bool) -> Self {
+        Self {
+            action,
+            duration,
+            exact_until: None,
+            wipe_override: None,
+            critical_outbound,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct StrictApply {
+    pub action: Action,
+    pub duration: Option<Duration>,
+    pub until_date: i32,
+    pub wipe_history: bool,
+}
+
+pub(super) async fn lock_member(ctx: &Ctx, chat: i64, user: i64) -> MemberGuard<'_> {
+    MemberGuard {
+        chat,
+        user,
+        _guard: ctx.restriction_write(chat, user).await,
+    }
+}
+
+pub(super) async fn apply_locked(
+    ctx: &Ctx,
+    chat: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+    action: Action,
+    duration: Option<Duration>,
+    by: By<'_>,
+    guard: &MemberGuard<'_>,
+) -> Result<usize, Failed> {
+    debug_assert_eq!(chat.id.bot_api_dialog_id(), Some(guard.chat));
+    debug_assert_eq!(target.id.bare_id(), Some(guard.user));
+    cancel_captcha_for_override(ctx, guard)
+        .await
+        .map_err(Failed::State)?;
+    apply_inner(
+        ctx,
+        chat,
+        target,
+        ApplySpec::ordinary(action, duration, true),
+        by,
+    )
+    .await
+}
+
+pub(super) async fn apply_strict_locked(
+    ctx: &Ctx,
+    chat: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+    spec: StrictApply,
+    by: By<'_>,
+    guard: &MemberGuard<'_>,
+) -> Result<usize, Failed> {
+    debug_assert_eq!(chat.id.bot_api_dialog_id(), Some(guard.chat));
+    debug_assert_eq!(target.id.bare_id(), Some(guard.user));
+    cancel_captcha_for_override(ctx, guard)
+        .await
+        .map_err(Failed::State)?;
+    apply_inner(
+        ctx,
+        chat,
+        target,
+        ApplySpec {
+            action: spec.action,
+            duration: spec.duration,
+            exact_until: Some(spec.until_date),
+            wipe_override: Some(spec.wipe_history),
+            critical_outbound: true,
+        },
+        by,
+    )
+    .await
+}
+
+pub(super) async fn apply_captcha_failure_locked(
+    ctx: &Ctx,
+    chat: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+    action: Action,
+    duration: Option<Duration>,
+    by: By<'_>,
+    guard: &MemberGuard<'_>,
+) -> Result<usize, Failed> {
+    debug_assert_eq!(chat.id.bot_api_dialog_id(), Some(guard.chat));
+    debug_assert_eq!(target.id.bare_id(), Some(guard.user));
+    apply_inner(
+        ctx,
+        chat,
+        target,
+        ApplySpec::ordinary(action, duration, true),
+        by,
+    )
+    .await
+}
+
+pub(super) async fn apply_locked_until(
+    ctx: &Ctx,
+    chat: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+    duration: Duration,
+    until: i32,
+    by: By<'_>,
+    guard: &MemberGuard<'_>,
+) -> Result<usize, Failed> {
+    debug_assert_eq!(chat.id.bot_api_dialog_id(), Some(guard.chat));
+    debug_assert_eq!(target.id.bare_id(), Some(guard.user));
+    apply_inner(
+        ctx,
+        chat,
+        target,
+        ApplySpec {
+            action: Mute,
+            duration: Some(duration),
+            exact_until: Some(until),
+            wipe_override: None,
+            critical_outbound: true,
+        },
+        by,
+    )
+    .await
+}
+
+pub(super) async fn kick_member(
+    ctx: &Ctx,
+    chat: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+) -> Result<(), MemberMutationError> {
+    let (Some(chat_id), Some(user_id)) = (chat.id.bot_api_dialog_id(), target.id.bare_id()) else {
+        return ctx
+            .client
+            .kick_participant_critical(chat, target)
+            .await
+            .map_err(MemberMutationError::Telegram);
+    };
+    let guard = lock_member(ctx, chat_id, user_id).await;
+    cancel_captcha_for_override(ctx, &guard)
+        .await
+        .map_err(MemberMutationError::State)?;
+    kick_member_locked(ctx, chat, target, &guard)
+        .await
+        .map_err(MemberMutationError::Telegram)
+}
+
+pub(super) async fn kick_member_locked(
+    ctx: &Ctx,
+    chat: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+    guard: &MemberGuard<'_>,
+) -> Result<(), grammers_client::InvocationError> {
+    debug_assert_eq!(chat.id.bot_api_dialog_id(), Some(guard.chat));
+    debug_assert_eq!(target.id.bare_id(), Some(guard.user));
+    ctx.client.kick_participant_critical(chat, target).await
+}
+
+pub(super) fn kick_intermediate_rights(
+    until_date: i32,
+) -> grammers_client::tl::types::ChatBannedRights {
+    grammers_client::tl::types::ChatBannedRights {
+        view_messages: true,
+        send_messages: false,
+        send_media: false,
+        send_stickers: false,
+        send_gifs: false,
+        send_games: false,
+        send_inline: false,
+        embed_links: false,
+        send_polls: false,
+        change_info: false,
+        invite_users: false,
+        pin_messages: false,
+        manage_topics: false,
+        send_photos: false,
+        send_videos: false,
+        send_roundvideos: false,
+        send_audios: false,
+        send_voices: false,
+        send_docs: false,
+        send_plain: false,
+        edit_rank: false,
+        send_reactions: false,
+        manage_linked_peers: false,
+        until_date,
+    }
+}
+
+pub(super) async fn kick_member_exact_locked(
+    ctx: &Ctx,
+    chat: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+    until_date: i32,
+    guard: &MemberGuard<'_>,
+) -> Result<(), grammers_client::InvocationError> {
+    debug_assert_eq!(chat.id.bot_api_dialog_id(), Some(guard.chat));
+    debug_assert_eq!(target.id.bare_id(), Some(guard.user));
+    ctx.client
+        .invoke_outbound_critical(&grammers_client::tl::functions::channels::EditBanned {
+            channel: chat.into(),
+            participant: target.into(),
+            banned_rights: kick_intermediate_rights(until_date).into(),
+        })
+        .await?;
+    clear_member_restriction_locked(ctx, chat, target, guard).await
+}
+
+pub(super) async fn clear_member_restriction_locked(
+    ctx: &Ctx,
+    chat: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+    guard: &MemberGuard<'_>,
+) -> Result<(), grammers_client::InvocationError> {
+    debug_assert_eq!(chat.id.bot_api_dialog_id(), Some(guard.chat));
+    debug_assert_eq!(target.id.bare_id(), Some(guard.user));
+    ctx.client.set_banned_rights_critical(chat, target).await
+}
+
+async fn cancel_captcha_for_override(
+    ctx: &Ctx,
+    guard: &MemberGuard<'_>,
+) -> Result<(), sqlx::Error> {
+    if let Some(message) = ctx
+        .settings
+        .cancel_captcha_for_member_override(guard.chat, guard.user)
+        .await?
+    {
+        ctx.schedule_delete(guard.chat, message, Instant::now());
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) enum MemberMutationError {
+    State(sqlx::Error),
+    Telegram(grammers_client::InvocationError),
+}
+
+impl std::fmt::Display for MemberMutationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::State(error) => write!(f, "member-state ownership update failed: {error}"),
+            Self::Telegram(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for MemberMutationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::State(error) => Some(error),
+            Self::Telegram(error) => Some(error),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct AdminRightsSpec {
+    pub delete_messages: bool,
+    pub ban_users: bool,
+    pub invite_users: bool,
+    pub pin_messages: bool,
+    pub manage_call: bool,
+    pub change_info: bool,
+    pub add_admins: bool,
+}
+
+pub(super) async fn set_member_admin_rights(
+    ctx: &Ctx,
+    chat: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+    rights: AdminRightsSpec,
+) -> Result<(), MemberMutationError> {
+    let (Some(chat_id), Some(user_id)) = (chat.id.bot_api_dialog_id(), target.id.bare_id()) else {
+        return ctx
+            .client
+            .set_admin_rights(chat, target)
+            .delete_messages(rights.delete_messages)
+            .ban_users(rights.ban_users)
+            .invite_users(rights.invite_users)
+            .pin_messages(rights.pin_messages)
+            .manage_call(rights.manage_call)
+            .change_info(rights.change_info)
+            .add_admins(rights.add_admins)
+            .await
+            .map_err(MemberMutationError::Telegram);
+    };
+    let guard = lock_member(ctx, chat_id, user_id).await;
+    cancel_captcha_for_override(ctx, &guard)
+        .await
+        .map_err(MemberMutationError::State)?;
+    ctx.client
+        .set_admin_rights(chat, target)
+        .delete_messages(rights.delete_messages)
+        .ban_users(rights.ban_users)
+        .invite_users(rights.invite_users)
+        .pin_messages(rights.pin_messages)
+        .manage_call(rights.manage_call)
+        .change_info(rights.change_info)
+        .add_admins(rights.add_admins)
+        .await
+        .map_err(MemberMutationError::Telegram)
+}
+
+pub(super) async fn set_member_admin_rank(
+    ctx: &Ctx,
+    chat: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+    rank: &str,
+) -> Result<(), MemberMutationError> {
+    let (Some(chat_id), Some(user_id)) = (chat.id.bot_api_dialog_id(), target.id.bare_id()) else {
+        return ctx
+            .client
+            .set_admin_rights(chat, target)
+            .load_current()
+            .await
+            .map_err(MemberMutationError::Telegram)?
+            .rank(rank)
+            .await
+            .map_err(MemberMutationError::Telegram);
+    };
+    let guard = lock_member(ctx, chat_id, user_id).await;
+    cancel_captcha_for_override(ctx, &guard)
+        .await
+        .map_err(MemberMutationError::State)?;
+    ctx.client
+        .set_admin_rights(chat, target)
+        .load_current()
+        .await
+        .map_err(MemberMutationError::Telegram)?
+        .rank(rank)
+        .await
+        .map_err(MemberMutationError::Telegram)
+}
+
+async fn apply_inner(
+    ctx: &Ctx,
+    chat: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+    spec: ApplySpec,
+    by: By<'_>,
+) -> Result<usize, Failed> {
+    let ApplySpec {
+        action,
+        duration,
+        exact_until,
+        wipe_override,
+        critical_outbound,
+    } = spec;
     if matches!(action, Mute | Ban | Kick)
         && !by.admins_too
         && let (Some(chat_id), Some(user)) = (chat.id.bot_api_dialog_id(), target.id.bare_id())
         && super::is_admin(ctx, chat, chat_id, user).await
     {
-        return Err(Failed::Protected);
+        let failed = Failed::Protected;
+        if let (Some(chat_id), Some(user), Some(case)) = (
+            chat.id.bot_api_dialog_id(),
+            target.id.bare_id(),
+            by.case.as_ref(),
+        ) {
+            super::cases::record_restriction(
+                ctx,
+                super::cases::RestrictionRecord {
+                    chat: chat_id,
+                    target: user,
+                    target_name: by.target_name,
+                    actor: by.actor,
+                    action,
+                    duration: honoured(duration),
+                    case,
+                    result: Err(&failed),
+                },
+            )
+            .await;
+        }
+        return Err(failed);
     }
 
     let duration = honoured(duration);
-    let done = apply_rights(ctx, chat, target, action, duration).await;
+    let done = apply_rights(
+        ctx,
+        chat,
+        target,
+        action,
+        duration,
+        exact_until,
+        critical_outbound,
+    )
+    .await;
 
-    let wiped = if done.is_ok()
-        && let Some(key) = wipe_key(action)
-        && let Some(chat_id) = chat.id.bot_api_dialog_id()
-        && ctx.settings.is_locked(chat_id, key)
-    {
-        wipe_history(ctx, chat, chat_id, target).await
+    let wipe_requested = match wipe_override {
+        Some(wipe) => wipe && wipe_key(action).is_some(),
+        None => wipe_key(action)
+            .zip(chat.id.bot_api_dialog_id())
+            .is_some_and(|(key, chat_id)| ctx.settings.is_locked(chat_id, key)),
+    };
+    let wiped = if done.is_ok() && wipe_requested {
+        if let Some(chat_id) = chat.id.bot_api_dialog_id() {
+            wipe_history(ctx, chat, chat_id, target).await
+        } else {
+            0
+        }
     } else {
         0
     };
@@ -466,7 +985,28 @@ pub async fn apply(
         )
         .await;
     }
-
+    if matches!(action, Mute | Ban | Kick)
+        && let (Some(chat_id), Some(user), Some(case)) = (
+            chat.id.bot_api_dialog_id(),
+            target.id.bare_id(),
+            by.case.as_ref(),
+        )
+    {
+        super::cases::record_restriction(
+            ctx,
+            super::cases::RestrictionRecord {
+                chat: chat_id,
+                target: user,
+                target_name: by.target_name,
+                actor: by.actor,
+                action,
+                duration,
+                case,
+                result: done.as_ref().map(|_| ()),
+            },
+        )
+        .await;
+    }
     if done.is_ok()
         && matches!(action, Unmute | Unban)
         && let Some(user) = target.id.bare_id()
@@ -481,18 +1021,26 @@ pub struct By<'a> {
     pub actor: Option<(i64, &'a str)>,
     pub reason: &'a str,
     pub target_name: &'a str,
-
+    pub case: Option<super::cases::CaseContext>,
     pub admins_too: bool,
 }
 
-fn until_date(duration: Option<Duration>) -> i32 {
+fn until_date_at(now: u64, duration: Option<Duration>) -> i32 {
     let Some(duration) = duration else {
         return 0;
     };
+    i32::try_from(now.saturating_add(duration.as_secs())).unwrap_or(i32::MAX)
+}
+
+fn until_date(duration: Option<Duration>) -> i32 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
-    i32::try_from(now + duration.as_secs()).unwrap_or(i32::MAX)
+    until_date_at(now, duration)
+}
+
+pub(super) fn strict_until_date(duration: Option<Duration>) -> i32 {
+    until_date(honoured(duration))
 }
 
 async fn apply_rights(
@@ -501,40 +1049,81 @@ async fn apply_rights(
     target: grammers_client::session::types::PeerRef,
     action: Action,
     duration: Option<Duration>,
+    exact_until: Option<i32>,
+    critical_outbound: bool,
 ) -> Result<(), Failed> {
     if action == Mute {
         if chat.id.kind() != grammers_client::session::types::PeerKind::Channel {
             return Err(Failed::BasicGroup);
         }
-        return ctx
-            .client
-            .invoke_outbound(&grammers_client::tl::functions::channels::EditBanned {
-                channel: chat.into(),
-                participant: target.into(),
-                banned_rights: super::rights::muted(until_date(duration)).into(),
-            })
-            .await
-            .map(drop)
-            .map_err(Failed::Telegram);
+        let request = grammers_client::tl::functions::channels::EditBanned {
+            channel: chat.into(),
+            participant: target.into(),
+            banned_rights: super::rights::muted(
+                exact_until.unwrap_or_else(|| until_date(duration)),
+            )
+            .into(),
+        };
+        return if critical_outbound {
+            ctx.client.invoke_outbound_critical(&request).await
+        } else {
+            ctx.client.invoke_outbound(&request).await
+        }
+        .map(drop)
+        .map_err(Failed::Telegram);
     }
 
     if action == Kick {
-        return ctx
-            .client
-            .kick_participant(chat, target)
-            .await
-            .map_err(Failed::Telegram);
+        return if critical_outbound {
+            ctx.client.kick_participant_critical(chat, target).await
+        } else {
+            ctx.client.kick_participant(chat, target).await
+        }
+        .map_err(Failed::Telegram);
     }
 
-    let mut rights = ctx.client.set_banned_rights(chat, target);
-    if let Some(duration) = duration {
-        rights = rights.duration(duration);
+    if action == Ban
+        && let Some(until_date) = exact_until
+    {
+        if chat.id.kind() != grammers_client::session::types::PeerKind::Channel {
+            return Err(Failed::BasicGroup);
+        }
+        let mut banned_rights = super::rights::muted(until_date);
+        banned_rights.view_messages = true;
+        let request = grammers_client::tl::functions::channels::EditBanned {
+            channel: chat.into(),
+            participant: target.into(),
+            banned_rights: banned_rights.into(),
+        };
+        return if critical_outbound {
+            ctx.client.invoke_outbound_critical(&request).await
+        } else {
+            ctx.client.invoke_outbound(&request).await
+        }
+        .map(drop)
+        .map_err(Failed::Telegram);
     }
-    match action {
-        Ban => rights.view_messages(false).await,
-        _ => rights.await,
-    }
-    .map_err(Failed::Telegram)
+
+    let result = if critical_outbound {
+        let mut rights = ctx.client.set_banned_rights_critical(chat, target);
+        if let Some(duration) = duration {
+            rights = rights.duration(duration);
+        }
+        match action {
+            Ban => rights.view_messages(false).await,
+            _ => rights.await,
+        }
+    } else {
+        let mut rights = ctx.client.set_banned_rights(chat, target);
+        if let Some(duration) = duration {
+            rights = rights.duration(duration);
+        }
+        match action {
+            Ban => rights.view_messages(false).await,
+            _ => rights.await,
+        }
+    };
+    result.map_err(Failed::Telegram)
 }
 
 #[derive(Debug, PartialEq)]
@@ -736,79 +1325,109 @@ async fn set_custom(ctx: &Ctx, message: &Message, chat: i64, rest: &str) -> bool
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-        let _ = message
-            .reply(
-                "بنویسید: «تنظیم دستور <کلمه یا عبارت> <بن یا کیک یا سکوت>»\n\
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            "بنویسید: «تنظیم دستور <کلمه یا عبارت> <بن یا کیک یا سکوت>»\n\
                  مثال: «تنظیم دستور زنجیر بن» یا «تنظیم دستور بیرونش کن کیک»",
-            )
-            .await;
+        )
+        .await;
         return true;
     }
-
     let Some((word, label)) = rest.rsplit_once(char::is_whitespace) else {
         return false;
     };
     let Some(action) = action_word(label) else {
         return false;
     };
-
     let word = normalize_phrase(word);
 
     if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
     if word.is_empty() {
-        let _ = message
-            .reply("بعد از «تنظیم دستور» یک کلمه یا عبارت بنویسید، مثل «زنجیر».")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            "بعد از «تنظیم دستور» یک کلمه یا عبارت بنویسید، مثل «زنجیر».",
+        )
+        .await;
         return true;
     }
     if word.split_whitespace().count() > MAX_TRIGGER_WORDS {
-        let _ = message
-            .reply(format!(
-                "کلمه دستور باید حداکثر {MAX_TRIGGER_WORDS} کلمه باشد."
-            ))
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            format!("کلمه دستور باید حداکثر {MAX_TRIGGER_WORDS} کلمه باشد."),
+        )
+        .await;
         return true;
     }
     if word.chars().count() > MAX_CUSTOM_TRIGGER_CHARS {
-        let _ = message
-            .reply(format!(
-                "کلمه دستور باید حداکثر {MAX_CUSTOM_TRIGGER_CHARS} نویسه باشد."
-            ))
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            format!("کلمه دستور باید حداکثر {MAX_CUSTOM_TRIGGER_CHARS} نویسه باشد."),
+        )
+        .await;
         return true;
     }
     if is_builtin_command(&word) {
-        let _ = message
-            .reply(format!("«{}» از قبل یک دستور آماده ربات است.", esc(&word)))
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            format!("«{}» از قبل یک دستور آماده ربات است.", esc(&word)),
+        )
+        .await;
         return true;
     }
     let key = custom_key(&word);
     if ctx.settings.value(chat, &key).is_none()
         && custom_triggers(ctx, chat).len() >= MAX_CUSTOM_COMMANDS
     {
-        let _ = message
-            .reply(format!(
-                "لیست دستورهای سفارشی پر است ({MAX_CUSTOM_COMMANDS} مورد)."
-            ))
-            .await;
-        return true;
-    }
-    if !ctx.settings.set_value(chat, &key, action_code(action)).await {
-        let _ = message
-            .reply("ذخیره دستور انجام نشد؛ ظرفیت تنظیمات یا پایگاه داده را بررسی کنید.")
-            .await;
-        return true;
-    }
-    let _ = message
-        .reply(format!(
-            "✓ «{}» دستور {} شد.",
-            esc(&word),
-            action_label(action)
-        ))
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            format!("لیست دستورهای سفارشی پر است ({MAX_CUSTOM_COMMANDS} مورد)."),
+        )
         .await;
+        return true;
+    }
+    if let Err(error) = ctx
+        .settings
+        .try_set_value(chat, &key, action_code(action))
+        .await
+    {
+        ::log::warn!("custom command: write for {chat}/{word} failed: {error}");
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                if error.commit_outcome_unknown() {
+                    "نتیجه ذخیره دستور نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                } else {
+                    "ذخیره دستور انجام نشد؛ ظرفیت تنظیمات یا پایگاه داده را بررسی کنید."
+                },
+            ),
+        )
+        .await;
+        return true;
+    }
+    super::respond(
+        ctx,
+        message,
+        ResponseKind::AdminTool,
+        format!("✓ «{}» دستور {} شد.", esc(&word), action_label(action)),
+    )
+    .await;
     true
 }
 
@@ -817,37 +1436,122 @@ async fn remove_custom(ctx: &Ctx, message: &Message, chat: i64, rest: &str) -> b
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-        let _ = message
-            .reply("بنویسید: «حذف دستور <کلمه یا عبارت>»")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            "بنویسید: «حذف دستور <کلمه یا عبارت>»",
+        )
+        .await;
         return true;
     }
-
     if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
     let word = normalize_phrase(rest);
-    let mut existed = ctx.settings.set(chat, &custom_key(&word), false).await;
-
-    if !existed {
-        let legacy = rest.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
-        if legacy != word {
-            existed = ctx.settings.set(chat, &custom_key(&legacy), false).await;
+    let normalized_key = custom_key(&word);
+    let legacy = rest
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    let legacy_key = (legacy != word).then(|| custom_key(&legacy));
+    let result = match legacy_key.as_deref() {
+        Some(legacy_key) => {
+            ctx.settings
+                .try_apply_batch(
+                    chat,
+                    &[
+                        crate::state::SettingMutation::Delete {
+                            key: &normalized_key,
+                        },
+                        crate::state::SettingMutation::Delete { key: legacy_key },
+                    ],
+                )
+                .await
         }
-    }
-    let _ = message
-        .reply(if existed {
+        None => ctx
+            .settings
+            .try_set(chat, &normalized_key, false)
+            .await
+            .map(usize::from),
+    };
+    let existed = match result {
+        Ok(changed) => changed != 0,
+        Err(error) => {
+            ::log::warn!("custom command: delete for {chat}/{word} failed: {error}");
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                if error.commit_outcome_unknown() {
+                    "نتیجه حذف دستور نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                } else {
+                    "دستور حذف نشد؛ دوباره تلاش کنید."
+                },
+            )
+            .await;
+            return true;
+        }
+    };
+    super::respond(
+        ctx,
+        message,
+        ResponseKind::AdminTool,
+        if existed {
             format!("✗ دستور «{}» حذف شد.", esc(&word))
         } else {
             format!("«{}» در لیست دستورهای سفارشی نبود.", esc(&word))
-        })
-        .await;
+        },
+    )
+    .await;
     true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_direct_kick_call_sites_route_through_the_member_serializer() {
+        fn collect_rust(path: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(path).expect("source directory is readable") {
+                let entry = entry.expect("source entry is readable");
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rust(&path, found);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        collect_rust(std::path::Path::new("src"), &mut files);
+        for path in files {
+            if path.ends_with("handlers/restrict.rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("Rust source is readable");
+            assert!(
+                !source.contains(".kick_participant("),
+                "{} bypasses restrict::kick_member",
+                path.display()
+            );
+            assert!(
+                !source.contains(".set_admin_rights("),
+                "{} bypasses restrict::set_member_admin_rights",
+                path.display()
+            );
+            assert!(
+                !source.contains(".set_banned_rights(")
+                    && !source.contains("tl::functions::channels::EditBanned")
+                    && !source.contains("tl::functions::channels::EditAdmin"),
+                "{} bypasses the serialized member-rights boundary",
+                path.display()
+            );
+        }
+    }
 
     fn p(text: &str) -> Parsed<'_> {
         parse(text).expect("should parse")
@@ -956,10 +1660,12 @@ mod tests {
             Some("زنجیر بن")
         );
         assert_eq!(strip_command("تنظیم دستور", CUSTOM_SET), Some(""));
-
         assert_eq!(strip_command("تنظیم دستورخاصی چیزی", CUSTOM_SET), None);
         assert_eq!(strip_command("سلام", CUSTOM_SET), None);
-        assert_eq!(strip_command("حذف دستور زنجیر", CUSTOM_REMOVE), Some("زنجیر"));
+        assert_eq!(
+            strip_command("حذف دستور زنجیر", CUSTOM_REMOVE),
+            Some("زنجیر")
+        );
     }
 
     #[test]
@@ -1026,7 +1732,10 @@ mod tests {
     #[test]
     fn a_full_length_trigger_keeps_its_tail_in_a_longer_message() {
         let text = "a b c d e f";
-        let words: Vec<&str> = text.split_whitespace().take(MAX_TRIGGER_WORDS + 1).collect();
+        let words: Vec<&str> = text
+            .split_whitespace()
+            .take(MAX_TRIGGER_WORDS + 1)
+            .collect();
 
         assert_eq!(words.len(), MAX_TRIGGER_WORDS + 1);
         assert_eq!(tail_after(text, &words, MAX_TRIGGER_WORDS), "e f");

@@ -50,6 +50,12 @@ pub fn rank_at(total: u64) -> Option<(usize, u64, &'static str)> {
         .map(|(index, (needed, title))| (index + 1, *needed, *title))
 }
 
+pub(crate) fn rank_award_milestone(previous_total: u64, total: u64, awarded: u64) -> Option<u64> {
+    rank_at(total).and_then(|(_, milestone, _)| {
+        (previous_total < milestone && awarded < milestone).then_some(milestone)
+    })
+}
+
 pub fn next_rank(total: u64) -> Option<(u64, &'static str)> {
     MILESTONES
         .iter()
@@ -163,27 +169,51 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         let Some(opener) = message.sender_id().and_then(PeerId::bare_id) else {
             return false;
         };
-        let _ = message
-            .reply(
-                InputMessage::new()
-                    .html(section_text(ctx, chat, "sum").await)
-                    .reply_markup(markup(ctx, chat, opener, "sum").await),
-            )
-            .await;
+        let card = match section_card(ctx, chat, opener, "sum").await {
+            Ok(card) => card,
+            Err(error) => {
+                log::warn!("stats: could not build summary for {chat}: {error}");
+                unavailable_card()
+            }
+        };
+        super::respond_shared(
+            ctx,
+            message,
+            crate::response::ResponseKind::Statistics,
+            card,
+        )
+        .await;
         return true;
     }
     if REPORT_CLEAR.contains(&text) {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-        set_report_at(ctx, chat, None).await;
-        let _ = message.reply("✗ گزارش روزانه خاموش شد.").await;
+        let reply = match set_report_at(ctx, chat, None).await {
+            Ok(()) => super::premium::icon_text(
+                Some(super::premium::Icon::DocumentActivity),
+                "گزارش روزانه خاموش شد.",
+            ),
+            Err(error) => {
+                ::log::warn!("daily report: could not disable schedule for {chat}: {error}");
+                super::premium::icon_text(
+                    Some(super::premium::Icon::ErrorRed),
+                    "تنظیم گزارش روزانه ذخیره نشد؛ دوباره تلاش کنید.",
+                )
+            }
+        };
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::SettingsChanged,
+            reply,
+        )
+        .await;
         return true;
     }
     if let Some((command, rest)) = REPORT_SET.iter().find_map(|command| {
         let rest = text.strip_prefix(command)?;
-        (rest.is_empty() || rest.starts_with(char::is_whitespace))
-            .then(|| (*command, rest.trim()))
+        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| (*command, rest.trim()))
     }) {
         let typed = super::digits(rest);
         let at = match typed.split_once([':', '.']) {
@@ -200,29 +230,53 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
                 .filter(|h| *h < 24)
                 .map(|h| h * 60),
         };
-
         if at.is_none() && !rest.is_empty() && !super::phrase_carries_text(command) {
             return false;
         }
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-        let _ = match at {
-            Some(at) => {
-                set_report_at(ctx, chat, Some(at)).await;
-                message
-                    .reply(format!(
-                        "✓ گزارش روزانه هر روز ساعت {} در همین گروه فرستاده می شود.",
-                        super::extras::clock(at)
-                    ))
+        match at {
+            Some(at) => match set_report_at(ctx, chat, Some(at)).await {
+                Ok(()) => {
+                    super::respond(
+                        ctx,
+                        message,
+                        crate::response::ResponseKind::SettingsChanged,
+                        super::premium::icon_text(
+                            Some(super::premium::Icon::Calendar),
+                            format!(
+                                "گزارش روزانه هر روز ساعت {} در همین گروه فرستاده می شود.",
+                                super::extras::clock(at)
+                            ),
+                        ),
+                    )
                     .await
-            }
+                }
+                Err(error) => {
+                    ::log::warn!("daily report: could not save schedule for {chat}: {error}");
+                    super::respond(
+                        ctx,
+                        message,
+                        crate::response::ResponseKind::CommandError,
+                        super::premium::icon_text(
+                            Some(super::premium::Icon::ErrorRed),
+                            "تنظیم گزارش روزانه ذخیره نشد؛ دوباره تلاش کنید.",
+                        ),
+                    )
+                    .await
+                }
+            },
             None => {
-                message
-                    .reply(InputMessage::new().html(report_status(ctx, chat)))
-                    .await
+                super::respond(
+                    ctx,
+                    message,
+                    crate::response::ResponseKind::SettingsView,
+                    super::premium::html(report_status(ctx, chat)),
+                )
+                .await
             }
-        };
+        }
         return true;
     }
     if names_a_user(RANK, text) {
@@ -264,49 +318,70 @@ pub async fn on_callback(ctx: &Ctx, query: &grammers_client::update::CallbackQue
     if query.sender_id().bare_id() != Some(opener) {
         let _ = query
             .answer()
-            .alert("این آمار را شخص دیگری باز کرده است.")
+            .alert(super::premium::plain_label(
+                Some(super::premium::Icon::Locked),
+                "این آمار را شخص دیگری باز کرده است.",
+            ))
             .send()
             .await;
         return;
     }
 
     if let Some(user) = section.strip_prefix("kick:") {
-        if let Ok(user) = user.parse::<i64>() {
-            kick_idle(ctx, chat, user).await;
+        if let Ok(user) = user.parse::<i64>()
+            && let Err(error) = kick_idle(ctx, chat, user).await
+        {
+            let _ = query.answer().alert(error).send().await;
+            return;
         }
-        let _ = query
-            .answer()
-            .edit(
-                InputMessage::new()
-                    .html(section_text(ctx, chat, "idle").await)
-                    .reply_markup(markup(ctx, chat, opener, "idle").await),
-            )
-            .await;
+        match section_card(ctx, chat, opener, "idle").await {
+            Ok(card) => {
+                let _ = query.answer().edit(card).await;
+            }
+            Err(error) => {
+                log::warn!("stats: idle refresh for {chat} failed: {error}");
+                let _ = query
+                    .answer()
+                    .alert("آمار اکنون در دسترس نیست؛ دوباره تلاش کنید.")
+                    .send()
+                    .await;
+            }
+        }
         return;
     }
 
-    let _ = query
-        .answer()
-        .edit(
-            InputMessage::new()
-                .html(section_text(ctx, chat, section).await)
-                .reply_markup(markup(ctx, chat, opener, section).await),
-        )
-        .await;
+    match section_card(ctx, chat, opener, section).await {
+        Ok(card) => {
+            let _ = query.answer().edit(card).await;
+        }
+        Err(error) => {
+            log::warn!("stats: section {section} refresh for {chat} failed: {error}");
+            let _ = query
+                .answer()
+                .alert("آمار اکنون در دسترس نیست؛ دوباره تلاش کنید.")
+                .send()
+                .await;
+        }
+    }
 }
 
-async fn kick_idle(ctx: &Ctx, chat: i64, user: i64) {
+async fn kick_idle(ctx: &Ctx, chat: i64, user: i64) -> Result<(), String> {
     let (Some(chat_ref), Some(target)) = (
         ctx.chat_ref(chat),
         PeerId::user(user).map(PeerId::to_ambient_ref),
     ) else {
-        return;
+        return Err("گروه یا کاربر پیدا نشد؛ فهرست را تازه کنید.".to_owned());
     };
-    if let Err(e) = ctx.client.kick_participant(chat_ref, target).await {
+    if let Err(e) = super::restrict::kick_member(ctx, chat_ref, target).await {
         eprintln!("stats: {chat}: could not kick idle {user}: {e}");
-        return;
+        return Err("اخراج انجام نشد؛ دسترسی ربات را بررسی و دوباره تلاش کنید.".to_owned());
     }
-    ctx.settings.clear_seen(chat, user).await;
+    ctx.settings.clear_seen(chat, user).await.map_err(|error| {
+        log::error!(
+            "stats: {chat}: idle member {user} was kicked but seen cleanup failed: {error}"
+        );
+        "عضو اخراج شد، اما پاکسازی آمار ذخیره نشد؛ ممکن است موقتاً در فهرست بماند.".to_owned()
+    })
 }
 
 async fn markup(
@@ -314,15 +389,15 @@ async fn markup(
     chat: i64,
     opener: i64,
     current: &str,
-) -> grammers_client::message::ReplyMarkup {
-    use grammers_client::message::{Button, ReplyMarkup};
+) -> Result<grammers_client::message::ReplyMarkup, sqlx::Error> {
+    use grammers_client::message::Button;
 
     let mut rows: Vec<Vec<Button>> = Vec::new();
     if current == "idle" {
         let (idle, _) = ctx
             .settings
             .idle(chat, today(), IDLE_DAYS, IDLE_SHOWN)
-            .await;
+            .await?;
         for (user, name, quiet) in idle {
             rows.push(vec![super::style::data(
                 format!("✗  {name} · {quiet} روز"),
@@ -344,7 +419,7 @@ async fn markup(
                 .collect(),
         );
     }
-    ReplyMarkup::from_buttons(&rows)
+    Ok(super::premium::buttons(&rows))
 }
 
 const SECTIONS: &[(&str, &str)] = &[
@@ -375,11 +450,31 @@ fn clamp(text: String) -> String {
     format!("{cut}\n\n<i>…کوتاه شد</i>")
 }
 
-async fn section_text(ctx: &Ctx, chat: i64, section: &str) -> String {
-    clamp(section_body(ctx, chat, section).await)
+fn unavailable_card() -> InputMessage {
+    super::premium::icon_text(
+        Some(super::premium::Icon::ErrorRed),
+        "آمار اکنون در دسترس نیست؛ دوباره تلاش کنید.",
+    )
 }
 
-async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
+async fn section_card(
+    ctx: &Ctx,
+    chat: i64,
+    opener: i64,
+    section: &str,
+) -> Result<InputMessage, sqlx::Error> {
+    Ok(super::premium::icon_html(
+        Some(super::premium::Icon::Stats),
+        section_text(ctx, chat, section).await?,
+    )
+    .reply_markup(markup(ctx, chat, opener, section).await?))
+}
+
+async fn section_text(ctx: &Ctx, chat: i64, section: &str) -> Result<String, sqlx::Error> {
+    Ok(clamp(section_body(ctx, chat, section).await?))
+}
+
+async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> Result<String, sqlx::Error> {
     let day = today();
     let title = ctx
         .settings
@@ -389,13 +484,13 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
 
     match section {
         "top" => {
-            let today_rows = ctx.settings.board(chat, Period::Today, day, BOARD).await;
-            let all_rows = ctx.settings.board(chat, Period::Total, 0, BOARD).await;
-            format!(
+            let today_rows = ctx.settings.board(chat, Period::Today, day, BOARD).await?;
+            let all_rows = ctx.settings.board(chat, Period::Total, 0, BOARD).await?;
+            Ok(format!(
                 "{head} › <b>پرچت ها</b>\n\n<b>امروز</b>\n{}\n\n<b>کل</b>\n{}",
                 leaderboard(&today_rows),
                 leaderboard(&all_rows)
-            )
+            ))
         }
         "week" | "month" => {
             let (period, stamp, label) = if section == "week" {
@@ -403,27 +498,27 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
             } else {
                 (Period::Month, month_of(day), "ماه")
             };
-            let ranked = ctx.settings.board(chat, period, stamp, BOARD).await;
-            let (total, active) = ctx.settings.board_totals(chat, period, stamp).await;
-            format!(
+            let ranked = ctx.settings.board(chat, period, stamp, BOARD).await?;
+            let (total, active) = ctx.settings.board_totals(chat, period, stamp).await?;
+            Ok(format!(
                 "{head} › <b>{label}</b>\n\n\
                  پیام های این {label} · <b>{total}</b>\n\
                  کاربران فعال · <b>{active}</b>\n\n{}",
                 leaderboard(&ranked)
-            )
+            ))
         }
         "idle" => {
-            let (_, idle) = ctx.settings.idle(chat, day, IDLE_DAYS, IDLE_SHOWN).await;
-            format!(
+            let (_, idle) = ctx.settings.idle(chat, day, IDLE_DAYS, IDLE_SHOWN).await?;
+            Ok(format!(
                 "{head} › <b>غیرفعال ها</b>\n\n\
                  کسانی که بیش از <b>{IDLE_DAYS}</b> روز پیامی نفرستاده اند ({}).\n\
                  برای اخراج روی هر نام بزنید.\n\n\
                  <i>تنها کسانی شمرده می شوند که از زمان نصب ربات پیامی فرستاده اند.</i>",
                 idle
-            )
+            ))
         }
         "hours" => {
-            let t = ctx.settings.tallies(chat, day).await;
+            let t = ctx.settings.tallies(chat, day).await?;
             let counts: Vec<u64> = HOURS.iter().map(|hour| of(&t, hour)).collect();
             let peak = counts.iter().copied().max().unwrap_or(0);
             let busiest = counts
@@ -448,17 +543,17 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
                     )
                 })
                 .collect::<Vec<_>>();
-            format!(
+            Ok(format!(
                 "{head} › <b>ساعت ها</b> (امروز، به وقت تهران)\n\n{}\n\nشلوغ ترین ساعت · <b>{busiest:02}</b>",
                 if chart.is_empty() {
                     "‹ هنوز پیامی امروز ثبت نشده".to_owned()
                 } else {
                     chart.join("\n")
                 }
-            )
+            ))
         }
         "kinds" => {
-            let t = ctx.settings.tallies(chat, day).await;
+            let t = ctx.settings.tallies(chat, day).await?;
             let counts: Vec<(&str, u64)> = KINDS
                 .iter()
                 .map(|(key, label)| (*label, of(&t, key)))
@@ -471,19 +566,19 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
                     format!("{label} · <b>{count}</b> ({}٪)", count * 100 / total)
                 })
                 .collect::<Vec<_>>();
-            format!(
+            Ok(format!(
                 "{head} › <b>نوع پیام</b> (امروز)\n\n{}",
                 if lines.is_empty() {
                     "‹ هنوز پیامی امروز ثبت نشده".to_owned()
                 } else {
                     lines.join("\n")
                 }
-            )
+            ))
         }
         "members" => {
-            let adds = ctx.settings.board(chat, Period::Adds, 0, BOARD).await;
-            let t = ctx.settings.tallies(chat, day).await;
-            format!(
+            let adds = ctx.settings.board(chat, Period::Adds, 0, BOARD).await?;
+            let t = ctx.settings.tallies(chat, day).await?;
+            Ok(format!(
                 "{head} › <b>اعضا</b>\n\n\
                  پیوستن امروز · <b>{}</b>\n\
                  خروج امروز · <b>{}</b>\n\
@@ -495,11 +590,11 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
                 of(&t, CAPTCHA_PASSED),
                 of(&t, CAPTCHA_FAILED),
                 leaderboard(&adds)
-            )
+            ))
         }
         "mod" => {
-            let t = ctx.settings.tallies(chat, day).await;
-            format!(
+            let t = ctx.settings.tallies(chat, day).await?;
+            Ok(format!(
                 "{head} › <b>مدیریت</b> (امروز)\n\n\
                  پیام های حذف شده · <b>{}</b>\n\
                  اخطارها · <b>{}</b>\n\
@@ -517,13 +612,13 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
                     .filter(|lock| ctx.settings.is_locked(chat, lock.key))
                     .count(),
                 super::locks::LOCKS.len(),
-            )
+            ))
         }
         _ => {
             let (today_total, today_users) =
-                ctx.settings.board_totals(chat, Period::Today, day).await;
-            let (all_total, members) = ctx.settings.board_totals(chat, Period::Total, 0).await;
-            let t = ctx.settings.tallies(chat, day).await;
+                ctx.settings.board_totals(chat, Period::Today, day).await?;
+            let (all_total, members) = ctx.settings.board_totals(chat, Period::Total, 0).await?;
+            let t = ctx.settings.tallies(chat, day).await?;
             let busiest = HOURS
                 .iter()
                 .enumerate()
@@ -532,7 +627,7 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
                 .filter(|(_, count)| *count > 0)
                 .map(|(hour, _)| format!("{hour:02}"))
                 .unwrap_or_else(|| "—".to_owned());
-            format!(
+            Ok(format!(
                 "{head} › <b>خلاصه</b>\n\n\
                  پیام های امروز · <b>{today_total}</b>\n\
                  پیام های کل · <b>{all_total}</b>\n\
@@ -543,7 +638,7 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> String {
                  پیوستن امروز · <b>{}</b>",
                 of(&t, DELETED),
                 of(&t, JOINED),
-            )
+            ))
         }
     }
 }
@@ -573,21 +668,41 @@ fn leaderboard(rows: &[Counter]) -> String {
 
 async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool {
     let arg = tail_of(INFO, text);
-
     let Some(named) = super::named(message, arg.as_deref()) else {
         return false;
     };
     let Some((target, name)) = super::resolve(ctx, message, named).await else {
-        let _ = message
-            .reply("کاربر پیدا نشد. ریپلای کنید یا @username / آیدی عددی بفرستید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "کاربر پیدا نشد. ریپلای کنید یا @username / آیدی عددی بفرستید.",
+            ),
+        )
+        .await;
         return true;
     };
     let Some(user) = target.id.bare_id() else {
         return true;
     };
 
-    let counts = ctx.settings.card(chat, user, today()).await;
+    let counts = match ctx.settings.card(chat, user, today()).await {
+        Ok(Some(counts)) => counts,
+        Ok(None) => crate::state::Card::default(),
+        Err(error) => {
+            log::warn!("user card: counter read for {chat}/{user} failed: {error}");
+            super::respond(
+                ctx,
+                message,
+                crate::response::ResponseKind::CommandError,
+                unavailable_card(),
+            )
+            .await;
+            return true;
+        }
+    };
     let place = counts
         .place
         .map(|place| place.to_string())
@@ -603,12 +718,27 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool 
         .and_then(|peer| peer.username().map(|u| format!("@{u}")))
         .unwrap_or_else(|| "بدون یوزرنیم".to_owned());
 
-    let note = super::extras::note(ctx, chat, user).await;
+    let note = match super::extras::read_note(ctx, chat, user).await {
+        Ok(note) => note,
+        Err(error) => {
+            ::log::warn!("user card: note read for {chat}/{user} failed: {error}");
+            super::respond(
+                ctx,
+                message,
+                crate::response::ResponseKind::CommandError,
+                "اطلاعات کاربر خوانده نشد؛ دوباره تلاش کنید.",
+            )
+            .await;
+            return true;
+        }
+    };
 
     let mut photos = ctx.client.iter_profile_photos(target);
     let photo_count = photos.total().await.unwrap_or(0);
-    let mut card = InputMessage::new().html(format!(
-        "<b>اطلاعات کاربر</b>\n\n\
+    let mut card = super::premium::icon_html(
+        Some(super::premium::Icon::User),
+        format!(
+            "<b>اطلاعات کاربر</b>\n\n\
          نام · <a href=\"tg://user?id={user}\">{}</a>\n\
          آیدی عددی · <code>{user}</code>\n\
          یوزرنیم · {}\n\
@@ -620,21 +750,22 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool 
          پیام های کل · <b>{}</b>\n\
          رتبه امروز · <b>{place}</b>\n\
          اعضای اضافه کرده · <b>{}</b>{}",
-        esc(&name),
-        esc(&username),
-        rank_title(counts.total),
-        match rank_at(counts.total) {
-            Some((level, _, _)) => format!("· سطح {level}"),
-            None => String::new(),
-        },
-        counts.today,
-        counts.total,
-        counts.adds,
-        match note {
-            Some(note) => format!("\n\n<b>یادداشت</b>\n{}", esc(&note)),
-            None => String::new(),
-        },
-    ));
+            esc(&name),
+            esc(&username),
+            rank_title(counts.total),
+            match rank_at(counts.total) {
+                Some((level, _, _)) => format!("· سطح {level}"),
+                None => String::new(),
+            },
+            counts.today,
+            counts.total,
+            counts.adds,
+            match note {
+                Some(note) => format!("\n\n<b>یادداشت</b>\n{}", esc(&note)),
+                None => String::new(),
+            },
+        ),
+    );
 
     if let Ok(Some(photo)) = photos.next().await
         && let Some(media) =
@@ -643,7 +774,13 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool 
     {
         card = card.media(media);
     }
-    let _ = message.reply(card).await;
+    super::respond(
+        ctx,
+        message,
+        crate::response::ResponseKind::PersonalInformation,
+        card,
+    )
+    .await;
     true
 }
 
@@ -665,16 +802,37 @@ async fn rank_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool 
         return false;
     };
     let Some((target, name)) = super::resolve(ctx, message, named).await else {
-        let _ = message
-            .reply("کاربر پیدا نشد. ریپلای کنید یا @username / آیدی عددی بفرستید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "کاربر پیدا نشد. ریپلای کنید یا @username / آیدی عددی بفرستید.",
+            ),
+        )
+        .await;
         return true;
     };
     let Some(user) = target.id.bare_id() else {
         return true;
     };
 
-    let counts = ctx.settings.card(chat, user, today()).await;
+    let counts = match ctx.settings.card(chat, user, today()).await {
+        Ok(Some(counts)) => counts,
+        Ok(None) => crate::state::Card::default(),
+        Err(error) => {
+            log::warn!("rank card: counter read for {chat}/{user} failed: {error}");
+            super::respond(
+                ctx,
+                message,
+                crate::response::ResponseKind::CommandError,
+                unavailable_card(),
+            )
+            .await;
+            return true;
+        }
+    };
     let total = counts.total;
     let (level, title) = match rank_at(total) {
         Some((level, _, title)) => (level, title),
@@ -698,8 +856,11 @@ async fn rank_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool 
         ""
     };
 
-    let _ = message
-        .reply(InputMessage::new().html(format!(
+    super::respond(
+        ctx,
+        message,
+        crate::response::ResponseKind::MemberLookup,
+        super::premium::html(format!(
             "{}  <b>کارنامه مقام</b>\n\n\
              👤  <a href=\"tg://user?id={user}\">{}</a>\n\
              {}  مقام · <b>{title}</b>\n\
@@ -719,8 +880,9 @@ async fn rank_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool 
                 .place
                 .map(|place| place.to_string())
                 .unwrap_or_else(|| "بدون رتبه".to_owned()),
-        )))
-        .await;
+        )),
+    )
+    .await;
     true
 }
 
@@ -763,87 +925,331 @@ fn of(tallies: &HashMap<String, u64>, counter: &str) -> u64 {
     tallies.get(counter).copied().unwrap_or(0)
 }
 
-pub async fn flush(ctx: &std::sync::Arc<Ctx>) {
-    let day = today();
-
-    let (tallies, counts) = ctx.take_stats();
-
-    let rows: Vec<(i64, &'static str, u64)> = tallies
-        .into_iter()
-        .map(|((chat, counter), added)| (chat, counter, added))
-        .collect();
-    if !rows.is_empty() {
-        ctx.settings.add_tallies(&rows, day).await;
+pub async fn flush(ctx: &std::sync::Arc<Ctx>) -> bool {
+    let mut pending = ctx.stats_pending.lock().await;
+    let batches = ctx.stats_flush_batches() + usize::from(pending.is_some());
+    for _ in 0..batches {
+        if !flush_batch(ctx, &mut pending).await {
+            break;
+        }
     }
-
-    let bumps: Vec<Bump> = counts
-        .into_iter()
-        .map(|((chat, user), (added, name))| Bump {
-            chat,
-            user,
-            name,
-            added,
-        })
-        .collect();
-    if bumps.is_empty() {
-        return;
+    recover_awards(ctx).await;
+    if let Err(error) = ctx.settings.prune_stats_receipts().await {
+        log::error!("stats: receipt cleanup deferred: {error}");
     }
-
-    let awards = ctx
-        .settings
-        .bump(bumps, day, week_of(day), month_of(day))
-        .await;
-    let owner = std::sync::Arc::clone(ctx);
-    super::bounded(awards, super::FLEET_CAMPAIGNS, move |bumped| {
-        let ctx = std::sync::Arc::clone(&owner);
-        async move { award_rank(&ctx, &bumped).await }
-    })
-    .await;
+    pending.is_none() && ctx.stats_flush_batches() == 0
 }
 
-pub async fn prune(ctx: &Ctx) {
+async fn flush_batch(
+    ctx: &std::sync::Arc<Ctx>,
+    pending: &mut Option<crate::state::StatsBatch>,
+) -> bool {
+    let day = today();
+
+    if pending.is_none() {
+        let (tallies, counts) = ctx.take_stats();
+
+        let rows: Vec<(i64, String, u64)> = tallies
+            .into_iter()
+            .map(|((chat, counter), added)| (chat, counter.to_owned(), added))
+            .collect();
+
+        let bumps: Vec<Bump> = counts
+            .into_iter()
+            .map(|((chat, user), (added, name))| Bump {
+                chat,
+                user,
+                name,
+                added,
+            })
+            .collect();
+        if bumps.is_empty() && rows.is_empty() {
+            return true;
+        }
+        *pending = Some(crate::state::StatsBatch::new(day, rows, bumps));
+    }
+    let Some(batch) = pending.as_ref() else {
+        return true;
+    };
+    if let Err(error) = ctx.settings.stage_stats(batch).await {
+        if error.is_permanent() {
+            ctx.persistence_failed(&format!(
+                "statistics batch has a non-retryable staging failure: {error}"
+            ));
+            log::error!("stats: retaining unstaged batch and stopping intake: {error}");
+        } else {
+            log::error!("stats: retaining unstaged batch for retry: {error}");
+        }
+        return false;
+    }
+    if let Err(error) = ctx
+        .settings
+        .apply_stats(batch, |chat, previous_total, total, awarded| {
+            if ctx.settings.is_locked(chat, RANKS) {
+                rank_award_milestone(previous_total, total, awarded)
+            } else {
+                None
+            }
+        })
+        .await
+    {
+        if error.is_permanent() {
+            ctx.persistence_failed(&format!(
+                "statistics batch has a non-retryable persistence failure: {error}"
+            ));
+            log::error!("stats: retaining rejected durable batch and stopping intake: {error}");
+        } else {
+            log::error!("stats: retaining durable batch for retry: {error}");
+        }
+        return false;
+    }
+    if let Err(error) = ctx.settings.finish_stats(batch).await {
+        log::error!("stats: retaining committed batch receipt for cleanup: {error}");
+    }
+    *pending = None;
+    true
+}
+
+pub async fn recover_awards(ctx: &std::sync::Arc<Ctx>) {
+    const AWARDS_PER_PASS: usize = 512;
+    let mut remaining = AWARDS_PER_PASS;
+    while remaining > 0 {
+        let page_size = remaining.min(super::FLEET_CAMPAIGNS);
+        let awards = match ctx.settings.claim_rank_awards(page_size).await {
+            Ok(awards) => awards,
+            Err(error) => {
+                log::error!("ranks: could not claim durable awards: {error}");
+                return;
+            }
+        };
+        if awards.is_empty() {
+            return;
+        }
+        remaining -= awards.len();
+        let owner = std::sync::Arc::clone(ctx);
+        super::bounded(awards, page_size, move |delivery| {
+            let ctx = std::sync::Arc::clone(&owner);
+            async move {
+                let outcome = award_rank(&ctx, &delivery.bumped, delivery.milestone).await;
+                match outcome {
+                    RankAwardOutcome::Delivered { milestone } => {
+                        match ctx.settings.ack_rank_award(&delivery, milestone).await {
+                        Ok(true) => {}
+                        Ok(false) => log::debug!(
+                            "ranks: a newer delivery superseded {}/{}",
+                            delivery.bumped.chat,
+                            delivery.bumped.user
+                        ),
+                        Err(error) => log::error!(
+                            "ranks: retaining completed award {}/{} because acknowledgement failed: {error}",
+                            delivery.bumped.chat,
+                            delivery.bumped.user
+                        ),
+                        }
+                    }
+                    RankAwardOutcome::Terminal { milestone, reason } => {
+                        log::warn!(
+                            "ranks: terminal delivery {}/{}: {reason}",
+                            delivery.bumped.chat,
+                            delivery.bumped.user
+                        );
+                        match ctx.settings.ack_rank_award(&delivery, milestone).await {
+                            Ok(true) => {}
+                            Ok(false) => log::debug!(
+                                "ranks: a newer delivery superseded {}/{}",
+                                delivery.bumped.chat,
+                                delivery.bumped.user
+                            ),
+                            Err(error) => log::error!(
+                                "ranks: retaining terminal award {}/{} because acknowledgement failed: {error}",
+                                delivery.bumped.chat,
+                                delivery.bumped.user
+                            ),
+                        }
+                    }
+                    RankAwardOutcome::Retry {
+                        reason,
+                        delay_seconds,
+                    } => match ctx
+                        .settings
+                        .defer_rank_award(&delivery, reason, delay_seconds)
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(error) => log::error!(
+                            "ranks: could not schedule retry for {}/{}: {error}",
+                            delivery.bumped.chat,
+                            delivery.bumped.user
+                        ),
+                    },
+                }
+            }
+        })
+        .await;
+    }
+}
+
+pub async fn prune(ctx: &Ctx) -> Result<u64, sqlx::Error> {
     const BATCH: usize = 500;
 
     let before = today().saturating_sub(FORGET_DAYS) as i64;
     let chats = ctx.settings.chats();
     let mut dropped = 0;
     for batch in chats.chunks(BATCH) {
-        dropped += ctx.settings.forget_idle(batch, before).await;
-
+        dropped += ctx.settings.forget_idle(batch, before).await?;
         tokio::task::yield_now().await;
     }
     if dropped > 0 {
         println!("forgot {dropped} members quiet for {FORGET_DAYS}+ days");
     }
+    Ok(dropped)
 }
 
-async fn award_rank(ctx: &Ctx, bumped: &Bumped) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RankAwardOutcome {
+    Delivered {
+        milestone: Option<u64>,
+    },
+    Terminal {
+        milestone: Option<u64>,
+        reason: &'static str,
+    },
+    Retry {
+        reason: &'static str,
+        delay_seconds: Option<u64>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InvocationDisposition {
+    Permanent(&'static str),
+    Retry {
+        reason: &'static str,
+        delay_seconds: Option<u64>,
+    },
+}
+
+fn classify_rank_invocation(error: &grammers_client::InvocationError) -> InvocationDisposition {
+    match error {
+        grammers_client::InvocationError::Rpc(rpc)
+            if matches!(rpc.code, 303 | 408 | 420 | 429) || rpc.code >= 500 =>
+        {
+            InvocationDisposition::Retry {
+                reason: "telegram_rpc_transient",
+                delay_seconds: if rpc.code == 420 {
+                    rpc.value.map(u64::from)
+                } else {
+                    None
+                },
+            }
+        }
+        grammers_client::InvocationError::Rpc(_) => {
+            InvocationDisposition::Permanent("telegram_rpc_permanent")
+        }
+        grammers_client::InvocationError::Session(_) => InvocationDisposition::Retry {
+            reason: "telegram_session",
+            delay_seconds: None,
+        },
+        grammers_client::InvocationError::Io(_) => InvocationDisposition::Retry {
+            reason: "telegram_io",
+            delay_seconds: None,
+        },
+        grammers_client::InvocationError::Deserialize(_) => InvocationDisposition::Retry {
+            reason: "telegram_deserialize",
+            delay_seconds: None,
+        },
+        grammers_client::InvocationError::Serialize(_) => InvocationDisposition::Retry {
+            reason: "telegram_serialize",
+            delay_seconds: None,
+        },
+        grammers_client::InvocationError::UnexpectedResponse { .. } => {
+            InvocationDisposition::Retry {
+                reason: "telegram_unexpected_response",
+                delay_seconds: None,
+            }
+        }
+        grammers_client::InvocationError::MissingPeerAuth(_) => InvocationDisposition::Retry {
+            reason: "telegram_missing_peer_auth",
+            delay_seconds: None,
+        },
+        grammers_client::InvocationError::Transport(_) => InvocationDisposition::Retry {
+            reason: "telegram_transport",
+            delay_seconds: None,
+        },
+        grammers_client::InvocationError::Dropped => InvocationDisposition::Retry {
+            reason: "telegram_dropped",
+            delay_seconds: None,
+        },
+        grammers_client::InvocationError::InvalidDc => InvocationDisposition::Retry {
+            reason: "telegram_invalid_dc",
+            delay_seconds: None,
+        },
+        grammers_client::InvocationError::Authentication(_) => InvocationDisposition::Retry {
+            reason: "telegram_authentication",
+            delay_seconds: None,
+        },
+    }
+}
+
+async fn award_rank(ctx: &Ctx, bumped: &Bumped, delivery_milestone: u64) -> RankAwardOutcome {
     let (chat, user, total) = (bumped.chat, bumped.user, bumped.total);
     if !ctx.settings.is_locked(chat, RANKS) {
-        return;
+        return RankAwardOutcome::Terminal {
+            milestone: None,
+            reason: "ranks_disabled",
+        };
     }
-    let Some((level, milestone, title)) = rank_at(total) else {
-        return;
+    let Some((index, (_, title))) = MILESTONES
+        .iter()
+        .enumerate()
+        .find(|(_, (milestone, _))| *milestone == delivery_milestone)
+    else {
+        return RankAwardOutcome::Terminal {
+            milestone: None,
+            reason: "obsolete_milestone",
+        };
     };
-    if bumped.awarded >= milestone {
-        return;
+    let level = index + 1;
+    let milestone = delivery_milestone;
+    if total < milestone || bumped.awarded >= milestone {
+        return RankAwardOutcome::Terminal {
+            milestone: None,
+            reason: "obsolete_award",
+        };
     }
     let name = bumped.name.as_str();
 
-    let (Some(chat_ref), Some(target)) = (
-        ctx.chat_ref(chat),
-        PeerId::user(user).map(PeerId::to_ambient_ref),
-    ) else {
-        return;
+    let Some(chat_ref) = ctx.chat_ref(chat) else {
+        return RankAwardOutcome::Retry {
+            reason: "missing_chat_reference",
+            delay_seconds: None,
+        };
+    };
+    let Some(target) = PeerId::user(user).map(PeerId::to_ambient_ref) else {
+        return RankAwardOutcome::Terminal {
+            milestone: None,
+            reason: "invalid_user_id",
+        };
     };
 
-    ctx.settings.set_awarded(chat, user, milestone).await;
     let titled = match super::promote::set_rank(ctx, chat_ref, Some(user), target, title).await {
         Ok(()) => true,
-        Err(e) => {
-            eprintln!("ranks: {chat}: could not title {user}: {e}");
-            false
-        }
+        Err(error) => match classify_rank_invocation(&error) {
+            InvocationDisposition::Retry {
+                reason,
+                delay_seconds,
+            } => {
+                log::warn!("ranks: {chat}: transient title failure for {user}: {error}");
+                return RankAwardOutcome::Retry {
+                    reason,
+                    delay_seconds,
+                };
+            }
+            InvocationDisposition::Permanent(reason) => {
+                log::warn!("ranks: {chat}: permanent title failure for {user} ({reason}): {error}");
+                false
+            }
+        },
     };
 
     let (bar, percent) = progress(total);
@@ -854,11 +1260,11 @@ async fn award_rank(ctx: &Ctx, bumped: &Bumped) {
         ),
         None => "👑  بالاترین مقام گروه را گرفت.".to_owned(),
     };
-    let _ = ctx
+    if let Err(error) = ctx
         .client
         .send_message(
             chat_ref,
-            InputMessage::new().html(format!(
+            super::premium::html(format!(
                 "{}  <b>مقام جدید</b>\n\n\
                  <a href=\"tg://user?id={user}\">{}</a> با <b>{milestone}</b> پیام به مقام \
                  «<b>{title}</b>» رسید.\n\n\
@@ -876,7 +1282,25 @@ async fn award_rank(ctx: &Ctx, bumped: &Bumped) {
                 },
             )),
         )
-        .await;
+        .await
+    {
+        return match classify_rank_invocation(&error) {
+            InvocationDisposition::Retry {
+                reason,
+                delay_seconds,
+            } => RankAwardOutcome::Retry {
+                reason,
+                delay_seconds,
+            },
+            InvocationDisposition::Permanent(reason) => RankAwardOutcome::Terminal {
+                milestone: Some(milestone),
+                reason,
+            },
+        };
+    }
+    RankAwardOutcome::Delivered {
+        milestone: Some(milestone),
+    }
 }
 
 pub async fn sweep_badges(ctx: &std::sync::Arc<Ctx>) {
@@ -884,7 +1308,13 @@ pub async fn sweep_badges(ctx: &std::sync::Arc<Ctx>) {
     let mut inspected = 0usize;
 
     loop {
-        let rows = ctx.settings.badge_rows(BATCH).await;
+        let rows = match ctx.settings.badge_rows(BATCH).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                log::error!("ranks: badge cleanup query failed; leaving rows for restart: {error}");
+                return;
+            }
+        };
         if rows.is_empty() {
             break;
         }
@@ -906,16 +1336,34 @@ pub async fn sweep_badges(ctx: &std::sync::Arc<Ctx>) {
                     .await
                     .map(|(peer, _)| peer)
                     .unwrap_or(target);
-
-                if let Err(e) = ctx.client.set_admin_rights(chat_ref, peer).await {
+                if let Err(e) = super::restrict::set_member_admin_rights(
+                    &ctx,
+                    chat_ref,
+                    peer,
+                    super::restrict::AdminRightsSpec::default(),
+                )
+                .await
+                {
                     eprintln!("ranks: {chat}: could not undo the badge of {user}: {e}");
                     return;
                 }
-                ctx.settings.set(chat, &badge_key(user), false).await;
+                if let Err(error) = ctx.settings.try_set(chat, &badge_key(user), false).await {
+                    log::warn!(
+                        "ranks: {chat}: demoted badge for {user}, but state write failed: {error}"
+                    );
+                    return;
+                }
                 ctx.forget_admins(chat);
                 fixed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                let total = ctx.settings.card(chat, user, today()).await.total;
+                let total = match ctx.settings.card(chat, user, today()).await {
+                    Ok(Some(card)) => card.total,
+                    Ok(None) => 0,
+                    Err(error) => {
+                        log::warn!("ranks: counter read for {chat}/{user} failed: {error}");
+                        return;
+                    }
+                };
                 if let Some((_, _, title)) = rank_at(total)
                     && let Err(e) =
                         super::promote::set_rank(&ctx, chat_ref, Some(user), target, title).await
@@ -959,23 +1407,25 @@ pub fn report_status(ctx: &Ctx, chat: i64) -> String {
 }
 
 pub fn report_at(ctx: &Ctx, chat: i64) -> Option<u32> {
-    ctx.settings
-        .value_parsed::<u32>(chat, REPORT_AT)
-        .filter(|at| *at < 1440)
+    ctx.settings.value_parsed::<u32>(chat, REPORT_AT)
 }
 
-pub async fn set_report_at(ctx: &Ctx, chat: i64, at: Option<u32>) {
+pub async fn set_report_at(
+    ctx: &Ctx,
+    chat: i64,
+    at: Option<u32>,
+) -> Result<(), crate::state::SettingsWriteError> {
     match at {
         Some(at) => {
-            let _ = ctx
-                .settings
-                .set_value(chat, REPORT_AT, &(at % 1440).to_string())
-                .await;
+            ctx.settings
+                .try_set_value(chat, REPORT_AT, &(at % 1440).to_string())
+                .await?;
         }
         None => {
-            ctx.settings.set(chat, REPORT_AT, false).await;
+            ctx.settings.try_set(chat, REPORT_AT, false).await?;
         }
     }
+    Ok(())
 }
 
 pub async fn run_daily(ctx: &std::sync::Arc<Ctx>) {
@@ -983,8 +1433,15 @@ pub async fn run_daily(ctx: &std::sync::Arc<Ctx>) {
     let day = today();
     let minutes = super::recent_minutes(now);
 
+    let chats = match ctx.settings.chats_with_values(REPORT_AT, &minutes).await {
+        Ok(chats) => chats,
+        Err(error) => {
+            log::warn!("daily report: due-chat query failed; retrying next tick: {error}");
+            return;
+        }
+    };
     let mut due = Vec::new();
-    for chat in ctx.settings.chats_with_values(REPORT_AT, &minutes).await {
+    for chat in chats {
         let Some(at) = report_at(ctx, chat).filter(|at| (0..=2).contains(&now.wrapping_sub(*at)))
         else {
             continue;
@@ -1003,16 +1460,28 @@ pub async fn run_daily(ctx: &std::sync::Arc<Ctx>) {
     super::bounded(due, super::FLEET_CONCURRENCY, move |(chat, chat_ref)| {
         let ctx = std::sync::Arc::clone(&owner);
         async move {
-            let body = daily_body(&ctx, chat, day).await;
+            let body = match daily_body(&ctx, chat, day).await {
+                Ok(body) => body,
+                Err(error) => {
+                    log::warn!("daily report: state read for {chat} failed; not stamping: {error}");
+                    return;
+                }
+            };
             match ctx
                 .client
-                .send_message(chat_ref, InputMessage::new().html(body))
+                .send_message(chat_ref, super::premium::html(body))
                 .await
             {
                 Ok(_) => {
-                    ctx.settings
-                        .set_value(chat, REPORT_DAY, &day.to_string())
-                        .await;
+                    if let Err(error) = ctx
+                        .settings
+                        .try_set_value(chat, REPORT_DAY, &day.to_string())
+                        .await
+                    {
+                        log::warn!(
+                            "daily report: sent day {day} for {chat}, but marker write failed: {error}"
+                        );
+                    }
                 }
                 Err(e) => eprintln!("daily report: {chat}: {e}"),
             }
@@ -1021,11 +1490,11 @@ pub async fn run_daily(ctx: &std::sync::Arc<Ctx>) {
     .await;
 }
 
-pub async fn daily_body(ctx: &Ctx, chat: i64, day: u64) -> String {
-    let ranked = ctx.settings.board(chat, Period::Today, day, BOARD).await;
-    let (sent, active) = ctx.settings.board_totals(chat, Period::Today, day).await;
-    let t = ctx.settings.tallies(chat, day).await;
-    format!(
+pub async fn daily_body(ctx: &Ctx, chat: i64, day: u64) -> Result<String, sqlx::Error> {
+    let ranked = ctx.settings.board(chat, Period::Today, day, BOARD).await?;
+    let (sent, active) = ctx.settings.board_totals(chat, Period::Today, day).await?;
+    let t = ctx.settings.tallies(chat, day).await?;
+    Ok(format!(
         "<b>گزارش امروز</b>\n\n\
          پیام ها · <b>{sent}</b>\n\
          کاربران فعال · <b>{active}</b>\n\
@@ -1043,23 +1512,24 @@ pub async fn daily_body(ctx: &Ctx, chat: i64, day: u64) -> String {
         of(&t, MUTED),
         of(&t, WARNED),
         leaderboard(&ranked),
-    )
+    ))
 }
 
-pub async fn adds(ctx: &Ctx, chat: i64, user: i64) -> u64 {
+pub async fn adds(ctx: &Ctx, chat: i64, user: i64) -> Result<u64, sqlx::Error> {
     if let Some(added) = ctx.cached_adds(chat, user) {
-        return added;
+        return Ok(added);
     }
-    let added = ctx.settings.adds_of(chat, user).await;
+    let added = ctx.settings.adds_of(chat, user).await?.unwrap_or(0);
     ctx.remember_adds(chat, user, added);
-    added
+    Ok(added)
 }
 
-pub async fn known_name(ctx: &Ctx, chat: i64, user: i64) -> Option<String> {
-    ctx.settings
+pub async fn known_name(ctx: &Ctx, chat: i64, user: i64) -> Result<Option<String>, sqlx::Error> {
+    Ok(ctx
+        .settings
         .name_of(chat, user)
-        .await
-        .filter(|name| *name != user.to_string())
+        .await?
+        .filter(|name| *name != user.to_string()))
 }
 
 pub async fn count_add(ctx: &Ctx, message: &Message, added: usize) {
@@ -1069,11 +1539,19 @@ pub async fn count_add(ctx: &Ctx, message: &Message, added: usize) {
     ) else {
         return;
     };
-    let total = ctx
+    match ctx
         .settings
         .credit_add(chat, user, &name_of(message), added as u64)
-        .await;
-    ctx.remember_adds(chat, user, total);
+        .await
+    {
+        Ok(Some(total)) => ctx.remember_adds(chat, user, total),
+        Ok(None) => log::warn!(
+            "counters: capacity prevented add credit for {chat}/{user}; no cache value published"
+        ),
+        Err(error) => log::warn!(
+            "counters: add credit for {chat}/{user} failed; no cache value published: {error}"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1112,10 +1590,22 @@ mod tests {
     #[test]
     fn rank_at_lands_on_the_level_it_reached() {
         assert!(rank_at(MILESTONES[0].0 - 1).is_none());
+        assert_eq!(rank_award_milestone(0, MILESTONES[0].0 - 1, 0), None);
+        assert_eq!(
+            rank_award_milestone(MILESTONES[0].0 - 1, MILESTONES[0].0, 0),
+            Some(MILESTONES[0].0)
+        );
+        assert_eq!(
+            rank_award_milestone(MILESTONES[0].0, MILESTONES[0].0 + 1, 0),
+            None
+        );
+        assert_eq!(
+            rank_award_milestone(MILESTONES[0].0 - 1, MILESTONES[0].0, MILESTONES[0].0,),
+            None
+        );
         assert_eq!(rank_title(0), NO_RANK);
         for (level, (needed, title)) in MILESTONES.iter().enumerate() {
             assert_eq!(rank_at(*needed), Some((level + 1, *needed, *title)));
-
             match MILESTONES.get(level + 1) {
                 Some((above, _)) => {
                     assert_eq!(rank_at(above - 1), Some((level + 1, *needed, *title)));
@@ -1124,6 +1614,51 @@ mod tests {
                 None => assert_eq!(next_rank(*needed), None),
             }
         }
+    }
+
+    #[test]
+    fn rank_delivery_classifies_transient_and_permanent_failures() {
+        use grammers_client::sender::RpcError;
+
+        let transient = grammers_client::InvocationError::Rpc(RpcError {
+            code: 420,
+            name: "FLOOD_WAIT".into(),
+            value: Some(75),
+            caused_by: None,
+        });
+        assert_eq!(
+            classify_rank_invocation(&transient),
+            InvocationDisposition::Retry {
+                reason: "telegram_rpc_transient",
+                delay_seconds: Some(75),
+            }
+        );
+        assert!(matches!(
+            classify_rank_invocation(&grammers_client::InvocationError::Dropped),
+            InvocationDisposition::Retry {
+                reason: "telegram_dropped",
+                ..
+            }
+        ));
+        assert!(matches!(
+            classify_rank_invocation(&grammers_client::InvocationError::Io(
+                std::io::Error::other("offline")
+            )),
+            InvocationDisposition::Retry {
+                reason: "telegram_io",
+                ..
+            }
+        ));
+        let permanent = grammers_client::InvocationError::Rpc(RpcError {
+            code: 400,
+            name: "CHAT_ADMIN_REQUIRED".into(),
+            value: None,
+            caused_by: None,
+        });
+        assert_eq!(
+            classify_rank_invocation(&permanent),
+            InvocationDisposition::Permanent("telegram_rpc_permanent")
+        );
     }
 
     #[test]

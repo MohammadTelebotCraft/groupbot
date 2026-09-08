@@ -1,3 +1,4 @@
+
 use std::sync::Arc;
 
 use axum::Json;
@@ -7,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::handlers::{self, Ctx, extras, locks, purge, setting, stats};
 
-use super::auth::AdminGate;
+use super::auth::ViewerGate;
 
 const SECTIONS: &[(&str, &str)] = &[
     ("fl", "ضد رگبار"),
@@ -39,41 +40,50 @@ fn section_label(id: &str) -> String {
         .map_or_else(|| id.to_owned(), |(_, label)| (*label).to_owned())
 }
 
-fn setting_json(ctx: &Ctx, chat: i64, item: &setting::Setting) -> Value {
+async fn setting_json(
+    ctx: &Ctx,
+    chat: i64,
+    item: &setting::Setting,
+    night: Option<(u32, u32)>,
+) -> Result<Value, setting::ApplyError> {
     match &item.kind {
-        setting::Kind::Flag => json!({
+        setting::Kind::Flag => Ok(json!({
             "id": item.id,
             "kind": "flag",
             "label": item.label,
             "on": ctx.settings.is_locked(chat, item.key),
-        }),
+            "icon": setting::flag_icon(item, ctx.settings.is_locked(chat, item.key)).map(|icon| icon.key()),
+        })),
         setting::Kind::Number {
             range,
             presets,
             show,
-            read,
             ..
         } => {
-            let (range, presets, show, read) = (*range, *presets, *show, *read);
-            let current = read(ctx, chat);
-            json!({
+            let (range, presets, show) = (*range, *presets, *show);
+            let current = match item.id {
+                "ngf" => night.map_or(23 * 60, |window| window.0),
+                "ngt" => night.map_or(7 * 60, |window| window.1),
+                _ => setting::read_number(ctx, chat, item).await?,
+            };
+            Ok(json!({
                 "id": item.id,
                 "kind": "number",
+                "icon": setting::number_icon(item.id).map(|icon| icon.key()),
                 "label": item.label,
                 "value": current,
                 "shown": show(current),
                 "range": [range.0, range.1],
-
                 "clock": range == setting::CLOCK,
                 "presets": presets
                     .iter()
                     .map(|&value| json!({ "value": value, "shown": show(value) }))
                     .collect::<Vec<_>>(),
-            })
+            }))
         }
         setting::Kind::Pick { options, .. } => {
             let chosen = setting::chosen(ctx, chat, item);
-            json!({
+            Ok(json!({
                 "id": item.id,
                 "kind": "pick",
                 "label": item.label,
@@ -85,16 +95,16 @@ fn setting_json(ctx: &Ctx, chat: i64, item: &setting::Setting) -> Value {
                         "value": pick.value,
                         "label": pick.label,
                         "danger": pick.danger,
+                        "icon": handlers::premium::icon_for(handlers::premium::Context { action: pick.value, ..Default::default() }).map(|icon| icon.key()),
                     }))
                     .collect::<Vec<_>>(),
-            })
+            }))
         }
     }
 }
 
-pub async fn dashboard(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> impl IntoResponse {
+pub async fn dashboard(State(ctx): State<Arc<Ctx>>, gate: ViewerGate) -> impl IntoResponse {
     let chat = gate.chat;
-
     let title = handlers::esc(
         &ctx.settings
             .value(chat, handlers::TITLE)
@@ -107,29 +117,41 @@ pub async fn dashboard(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> impl Int
             order.push(item.section);
         }
     }
-    let sections: Vec<Value> = order
-        .iter()
-        .map(|&section| {
-            let items: Vec<Value> = setting::SETTINGS
-                .iter()
-                .filter(|item| item.section == section)
-                .map(|item| setting_json(&ctx, chat, item))
-                .collect();
-
-            let enabled = match section {
-                "ap" => Some(purge::auto_at(&ctx, chat).is_some()),
-                "dr" => Some(stats::report_at(&ctx, chat).is_some()),
-                "ng" => Some(extras::night(&ctx, chat).is_some()),
-                _ => None,
-            };
-            json!({
-                "id": section,
-                "label": section_label(section),
-                "settings": items,
-                "enabled": enabled,
-            })
-        })
-        .collect();
+    let night = match extras::night(&ctx, chat).await {
+        Ok(night) => night,
+        Err(error) => {
+            log::warn!("miniapp: dashboard default-rights read for {chat} failed: {error}");
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+    let mut sections: Vec<Value> = Vec::with_capacity(order.len());
+    for &section in &order {
+        let mut items: Vec<Value> = Vec::new();
+        for item in setting::SETTINGS
+            .iter()
+            .filter(|item| item.section == section)
+        {
+            match setting_json(&ctx, chat, item, night).await {
+                Ok(value) => items.push(value),
+                Err(error) => {
+                    log::warn!("miniapp: dashboard setting read for {chat} failed: {error}");
+                    return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+            }
+        }
+        let enabled = match section {
+            "ap" => Some(purge::auto_at(&ctx, chat).is_some()),
+            "dr" => Some(stats::report_at(&ctx, chat).is_some()),
+            "ng" => Some(night.is_some()),
+            _ => None,
+        };
+        sections.push(json!({
+            "id": section,
+            "label": section_label(section),
+            "settings": items,
+            "enabled": enabled,
+        }));
+    }
 
     let active = locks::plain()
         .filter(|lock| ctx.settings.is_locked(chat, lock.key))
@@ -146,6 +168,7 @@ pub async fn dashboard(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> impl Int
         "locks_summary": { "active": active, "total": total, "ai_active": ai_active },
         "sections": sections,
     }))
+    .into_response()
 }
 
 #[cfg(test)]

@@ -1,11 +1,13 @@
+
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use grammers_client::message::{InputMessage, Message, ReplyMarkup};
+use grammers_client::message::{Message, ReplyMarkup};
 use grammers_client::update::CallbackQuery;
 use scraper::{ElementRef, Html, Selector};
 
 use super::Ctx;
+use crate::response::ResponseKind;
 
 pub const COMMANDS: &[&str] = &["نرخ ارز", "قیمت ارز"];
 
@@ -57,7 +59,7 @@ static HTTP: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
         .map_err(|error| error.to_string())
 });
 
-pub async fn handle(_ctx: &Ctx, message: &Message) -> bool {
+pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     if !is_command(message.text().trim()) {
         return false;
     }
@@ -80,16 +82,16 @@ pub async fn handle(_ctx: &Ctx, message: &Message) -> bool {
 
     match body {
         Some((body, page, total)) => {
-            let _ = message
-                .reply(
-                    InputMessage::new()
-                        .html(body)
-                        .reply_markup(markup(page, total)),
-                )
-                .await;
+            super::respond_shared(
+                ctx,
+                message,
+                ResponseKind::UtilityResult,
+                super::premium::html(body).reply_markup(markup(page, total)),
+            )
+            .await;
         }
         None => {
-            let _ = message.reply(ERROR_MESSAGE).await;
+            super::respond(ctx, message, ResponseKind::CommandError, ERROR_MESSAGE).await;
         }
     }
     true
@@ -305,11 +307,7 @@ pub async fn on_callback(_ctx: &Ctx, query: &CallbackQuery, payload: &str) {
     let body = render_page(&served.snapshot, served.stale, page);
     let _ = query
         .answer()
-        .edit(
-            InputMessage::new()
-                .html(body)
-                .reply_markup(markup(page, total)),
-        )
+        .edit(super::premium::html(body).reply_markup(markup(page, total)))
         .await;
 }
 
@@ -320,17 +318,23 @@ fn page_count(rows: usize) -> usize {
 fn markup(page: usize, total: usize) -> ReplyMarkup {
     let mut navigation = Vec::new();
     if page > 0 {
-        navigation.push(super::style::data(
-            "‹ قبلی",
-            format!("fx:p:{}", page - 1),
-            super::style::Colour::Primary,
+        navigation.push(super::premium::decorate(
+            super::style::data(
+                "قبلی",
+                format!("fx:p:{}", page - 1),
+                super::style::Colour::Primary,
+            ),
+            Some(super::premium::Icon::Back),
         ));
     }
     if page + 1 < total {
-        navigation.push(super::style::data(
-            "بعدی ›",
-            format!("fx:p:{}", page + 1),
-            super::style::Colour::Primary,
+        navigation.push(super::premium::decorate(
+            super::style::data(
+                "بعدی ›",
+                format!("fx:p:{}", page + 1),
+                super::style::Colour::Primary,
+            ),
+            Some(super::premium::Icon::Back),
         ));
     }
 
@@ -339,11 +343,11 @@ fn markup(page: usize, total: usize) -> ReplyMarkup {
         rows.push(navigation);
     }
     rows.push(vec![super::style::data(
-        "🔄 بروزرسانی",
+        "↔️ بروزرسانی",
         format!("fx:r:{page}").into_bytes(),
         super::style::Colour::Success,
     )]);
-    ReplyMarkup::from_buttons(&rows)
+    super::premium::buttons(&rows)
 }
 
 fn render_page(snapshot: &RateSnapshot, stale: bool, page: usize) -> String {
@@ -352,9 +356,9 @@ fn render_page(snapshot: &RateSnapshot, stale: bool, page: usize) -> String {
     let start = page * PAGE_SIZE;
     let end = (start + PAGE_SIZE).min(snapshot.rows.len());
 
-    let mut out = String::from("💱 <b>نرخ ارز بازار آزاد</b>\n");
+    let mut out = String::from("💶 <b>نرخ ارز بازار آزاد</b>\n");
     if stale {
-        out.push_str("⚠️ <i>بروزرسانی جدید دریافت نشد؛ آخرین داده موفق نمایش داده خواهد شد.</i>\n");
+        out.push_str("❗️ <i>بروزرسانی جدید دریافت نشد؛ آخرین داده موفق نمایش داده خواهد شد.</i>\n");
     }
     let updated = snapshot
         .updated_at
@@ -370,7 +374,7 @@ fn render_page(snapshot: &RateSnapshot, stale: bool, page: usize) -> String {
 
     for (index, row) in snapshot.rows[start..end].iter().enumerate() {
         out.push_str(&format!(
-            "🔹 <b>{}</b>\nخرید: <code>{}</code> تومان\nفروش: <code>{}</code> تومان\n",
+            "🪙 <b>{}</b>\nخرید: <code>{}</code> تومان\nفروش: <code>{}</code> تومان\n",
             display_cell(&row.name, MAX_NAME_CHARS),
             display_cell(&row.buy, MAX_PRICE_CHARS),
             display_cell(&row.sell, MAX_PRICE_CHARS),

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use grammers_client::message::{InputMessage, Message};
+use grammers_client::message::Message;
 use grammers_client::session::types::{PeerId, PeerRef};
 use grammers_client::tl;
 
@@ -147,6 +147,11 @@ async fn surge(ctx: &Ctx, chat: i64, chat_ref: PeerRef, arrivals: Vec<Newcomer>)
     if fresh.is_empty() || count <= limit(ctx, chat) as usize {
         return;
     }
+    let count = if count > LIMIT_RANGE.1 as usize {
+        format!("{count}+")
+    } else {
+        count.to_string()
+    };
 
     let held = Duration::from_secs(u64::from(minutes(ctx, chat)) * 60);
     let mut muted = 0;
@@ -160,6 +165,12 @@ async fn surge(ctx: &Ctx, chat: i64, chat_ref: PeerRef, arrivals: Vec<Newcomer>)
             restrict::By {
                 reason: "ضد هجوم",
                 target_name: &member.name,
+                case: Some(super::cases::CaseContext {
+                    source: "automatic",
+                    rule: MODE,
+                    reason: "ضد هجوم",
+                    evidence: None,
+                }),
                 ..Default::default()
             },
         )
@@ -188,6 +199,17 @@ async fn surge(ctx: &Ctx, chat: i64, chat_ref: PeerRef, arrivals: Vec<Newcomer>)
     };
     let _ = ctx
         .client
-        .send_message(chat_ref, InputMessage::new().html(told))
+        .send_message(
+            chat_ref,
+            super::premium::icon_html(
+                super::premium::icon_for(super::premium::Context {
+                    object: "raid",
+                    state: if muted == 0 { "failed" } else { "triggered" },
+                    severity: "high",
+                    ..Default::default()
+                }),
+                told,
+            ),
+        )
         .await;
 }

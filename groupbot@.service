@@ -8,16 +8,15 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/shards/%i
 EnvironmentFile=/home/ubuntu/shards/%i/.env
-
 Environment=SHARD_NAME=%i
 LimitNOFILE=65536
 TasksMax=4096
-
 MemoryHigh=3G
 MemoryMax=4G
 ExecStart=/home/ubuntu/GroupManagement/groupbot/target/release/groupbot
 Restart=always
 RestartSec=5
+TimeoutStopSec=120
 
 [Install]
 WantedBy=multi-user.target

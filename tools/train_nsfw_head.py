@@ -169,7 +169,10 @@ def write_rust(tower: str, w: np.ndarray, b: float, metrics: str, pin: float | N
 //!
 //! checkpoint: {tower}
 //! {metrics}
-{pin_line}#![allow(clippy::unreadable_literal, clippy::excessive_precision)]
+{pin_line}// Generated decimal spellings are the trainer's serialized f32 parameters. Hand-grouping digits
+// would make every regeneration noisy, and rounding `excessive_precision` literals can change the
+// fitted model. This narrow data-only exception contains no executable control flow.
+#![allow(clippy::unreadable_literal, clippy::excessive_precision)]
 
 pub const BIAS: f32 = {b:.6f};
 

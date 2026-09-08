@@ -1,9 +1,10 @@
 use std::time::Duration;
 
-use grammers_client::message::{InputMessage, Message};
+use grammers_client::message::Message;
 
 use super::restrict::{self, Action};
 use super::{Ctx, esc, name_of};
+use crate::response::ResponseKind;
 
 pub const MODE: &str = "flood";
 
@@ -37,16 +38,6 @@ fn number(ctx: &Ctx, chat: i64, key: &str, default: u32, range: (u32, u32)) -> u
         .with_chat(chat, |settings| settings.number(key, default, range))
 }
 
-pub async fn set(ctx: &Ctx, chat: i64, key: &str, value: u32) {
-    let range = if key == LIMIT {
-        LIMIT_RANGE
-    } else {
-        WINDOW_RANGE
-    };
-    let value = value.clamp(range.0, range.1);
-    ctx.settings.set_value(chat, key, &value.to_string()).await;
-}
-
 pub const COMMANDS: &[&str] = &["ضد رگبار", "ضدرگبار", "ضد فلاد"];
 
 pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
@@ -60,7 +51,6 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
-
     let numbers = match super::numbers_in(&rest) {
         Some(numbers) => numbers,
         None => return false,
@@ -70,22 +60,67 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
     }
 
     if numbers.len() != 2 {
-        let _ = message
-            .reply("مثال: «ضد رگبار 10 5» یعنی ۱۰ پیام در ۵ ثانیه. برای خاموش کردن از پنل استفاده کنید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            "مثال: «ضد رگبار 10 5» یعنی ۱۰ پیام در ۵ ثانیه. برای خاموش کردن از پنل استفاده کنید.",
+        )
+        .await;
         return true;
     }
 
-    set(ctx, chat, LIMIT, numbers[0]).await;
-    set(ctx, chat, WINDOW, numbers[1]).await;
-    ctx.settings.set(chat, MODE, true).await;
-    let _ = message
-        .reply(format!(
-            "✓ ضد رگبار روشن شد: بیش از {} پیام در {} ثانیه.",
-            limit(ctx, chat),
-            window(ctx, chat)
-        ))
+    let limit_value = numbers[0].clamp(LIMIT_RANGE.0, LIMIT_RANGE.1).to_string();
+    let window_value = numbers[1].clamp(WINDOW_RANGE.0, WINDOW_RANGE.1).to_string();
+    if let Err(error) = ctx
+        .settings
+        .try_apply_batch(
+            chat,
+            &[
+                crate::state::SettingMutation::Put {
+                    key: LIMIT,
+                    value: &limit_value,
+                },
+                crate::state::SettingMutation::Put {
+                    key: WINDOW,
+                    value: &window_value,
+                },
+                crate::state::SettingMutation::Put {
+                    key: MODE,
+                    value: "",
+                },
+            ],
+        )
+        .await
+    {
+        ::log::warn!("flood: setup for {chat} failed: {error}");
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            if error.commit_outcome_unknown() {
+                "نتیجه ذخیره ضد رگبار نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+            } else {
+                "ضد رگبار ذخیره نشد؛ دوباره تلاش کنید."
+            },
+        )
         .await;
+        return true;
+    }
+    super::respond(
+        ctx,
+        message,
+        ResponseKind::AntiSpamControl,
+        super::premium::icon_text(
+            Some(super::premium::Icon::Timer),
+            format!(
+                "ضد رگبار روشن شد: بیش از {} پیام در {} ثانیه.",
+                limit(ctx, chat),
+                window(ctx, chat)
+            ),
+        ),
+    )
+    .await;
     true
 }
 
@@ -137,6 +172,12 @@ pub async fn check(ctx: &Ctx, message: &Message) -> bool {
         restrict::By {
             reason: "ضد رگبار",
             target_name: &name_of(message),
+            case: Some(super::cases::context(
+                message,
+                "automatic",
+                MODE,
+                "ضد رگبار",
+            )),
             ..Default::default()
         },
     )
@@ -153,10 +194,13 @@ pub async fn check(ctx: &Ctx, message: &Message) -> bool {
             "سکوت شد"
         };
         let _ = message
-            .respond(InputMessage::new().html(format!(
-                "<b>ضد رگبار</b>\n\n<b>{}</b> پیام های پیاپی فرستاد و {what}.",
-                esc(&name_of(message))
-            )))
+            .respond(super::premium::icon_html(
+                action.icon(),
+                format!(
+                    "<b>ضد رگبار</b>\n\n<b>{}</b> پیام های پیاپی فرستاد و {what}.",
+                    esc(&name_of(message))
+                ),
+            ))
             .await;
     }
     true

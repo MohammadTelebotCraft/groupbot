@@ -1,11 +1,12 @@
 use std::time::{Duration, Instant};
 
-use grammers_client::message::{Button, InputMessage, Message, ReplyMarkup};
+use grammers_client::message::{Button, Message, ReplyMarkup};
 use grammers_client::session::types::PeerRef;
 use grammers_client::tl;
 use grammers_client::update::CallbackQuery;
 
 use super::{Ctx, bot_admin_key, esc, is_owner, sender_is_creator};
+use crate::response::ResponseKind;
 
 pub const COMMANDS: &[&str] = &["افزودن ادمین", "ادمین کن", "اضافه کردن ادمین"];
 pub const DEMOTE: &[&str] = &["حذف ادمین", "عزل ادمین", "برکناری ادمین"];
@@ -57,22 +58,37 @@ async fn tag(ctx: &Ctx, message: &Message, text: &str) -> bool {
         return false;
     };
     if title.chars().count() > TAG_MAX {
-        let _ = message
-            .reply(format!("تگ باید حداکثر {TAG_MAX} حرف باشد."))
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            format!("تگ باید حداکثر {TAG_MAX} حرف باشد."),
+        )
+        .await;
         return true;
     }
     if title.is_empty() && !clearing {
-        let _ = message
-            .reply("متن تگ را بنویسید، مثل «تنظیم تگ مدیر ارشد».")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            "متن تگ را بنویسید، مثل «تنظیم تگ مدیر ارشد».",
+        )
+        .await;
         return true;
     }
 
     let Some((target, name)) = super::resolve(ctx, message, named).await else {
-        let _ = message
-            .reply("کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.",
+            ),
+        )
+        .await;
         return true;
     };
     let Ok(Some(chat_ref)) = message.peer_ref().await else {
@@ -81,16 +97,39 @@ async fn tag(ctx: &Ctx, message: &Message, text: &str) -> bool {
 
     let outcome = set_rank(ctx, chat_ref, target.id.bare_id(), target, title).await;
 
-    let _ = match outcome {
-        Ok(()) if clearing => message.reply(format!("✗ تگ {name} برداشته شد.")).await,
-        Ok(()) => message.reply(format!("✓ تگ {name} · {title}")).await,
+    match outcome {
+        Ok(()) if clearing => {
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::SettingsChanged,
+                super::premium::text(format!("✗ تگ {name} برداشته شد.")),
+            )
+            .await
+        }
+        Ok(()) => {
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::SettingsChanged,
+                super::premium::text(format!("✓ تگ {name} · {title}")),
+            )
+            .await
+        }
         Err(e) => {
             eprintln!("tag: {chat}: could not title {name}: {e}");
-            message
-                .reply(format!(
-                    "انجام نشد · {e}\nربات باید ادمین باشد و اجازه «مدیریت مقام ها» داشته باشد."
-                ))
-                .await
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                super::premium::icon_text(
+                    Some(super::premium::Icon::ErrorRed),
+                    format!(
+                        "انجام نشد · {e}\nربات باید ادمین باشد و اجازه «مدیریت مقام ها» داشته باشد."
+                    ),
+                ),
+            )
+            .await
         }
     };
     true
@@ -119,14 +158,8 @@ pub async fn set_rank(
     let Some((peer, _)) = super::admin_ref(ctx, chat_ref, user.unwrap_or_default()).await else {
         return Err(failed);
     };
-    match ctx
-        .client
-        .set_admin_rights(chat_ref, peer)
-        .load_current()
-        .await
-    {
-        Ok(builder) => builder.rank(rank).await,
-
+    match super::restrict::set_member_admin_rank(ctx, chat_ref, peer, rank).await {
+        Ok(()) => Ok(()),
         Err(_) => Err(failed),
     }
 }
@@ -170,9 +203,16 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
     }
 
     let Some((target, name)) = super::resolve(ctx, message, named).await else {
-        let _ = message
-            .reply("کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.",
+            ),
+        )
+        .await;
         return true;
     };
 
@@ -197,24 +237,31 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
         return true;
     };
 
-    let _ = message
-        .reply(
-            InputMessage::new()
-                .html(title(&pending))
-                .reply_markup(markup(&pending, opener, key)),
-        )
-        .await;
+    super::respond_shared(
+        ctx,
+        message,
+        ResponseKind::AdminTool,
+        super::premium::html(title(&pending)).reply_markup(markup(&pending, opener, key)),
+    )
+    .await;
     true
 }
 
 pub enum DemoteError {
     NotFound,
-    Rpc(grammers_client::InvocationError),
+    Rpc(super::restrict::MemberMutationError),
+    State(crate::state::SettingsWriteError),
 }
 
-impl From<grammers_client::InvocationError> for DemoteError {
-    fn from(error: grammers_client::InvocationError) -> Self {
+impl From<super::restrict::MemberMutationError> for DemoteError {
+    fn from(error: super::restrict::MemberMutationError) -> Self {
         Self::Rpc(error)
+    }
+}
+
+impl From<crate::state::SettingsWriteError> for DemoteError {
+    fn from(error: crate::state::SettingsWriteError) -> Self {
+        Self::State(error)
     }
 }
 
@@ -229,11 +276,24 @@ pub async fn demote_by_id(
     let Some((peer, _)) = super::admin_ref(ctx, chat_ref, user_id).await else {
         return Err(DemoteError::NotFound);
     };
-    ctx.client.set_admin_rights(chat_ref, peer).await?;
-    ctx.settings.set(chat, &bot_admin_key(user_id), false).await;
+    super::restrict::set_member_admin_rights(
+        ctx,
+        chat_ref,
+        peer,
+        super::restrict::AdminRightsSpec::default(),
+    )
+    .await?;
+    let admin_key = bot_admin_key(user_id);
+    let badge_key = super::stats::badge_key(user_id);
     ctx.settings
-        .set(chat, &super::stats::badge_key(user_id), false)
-        .await;
+        .try_apply_batch(
+            chat,
+            &[
+                crate::state::SettingMutation::Delete { key: &admin_key },
+                crate::state::SettingMutation::Delete { key: &badge_key },
+            ],
+        )
+        .await?;
     ctx.forget_admins(chat);
     super::log::write(
         ctx,
@@ -270,27 +330,50 @@ async fn demote(ctx: &Ctx, message: &Message, target: PeerRef, name: &str) {
     )
     .await;
 
-    let _ = match outcome {
+    match outcome {
         Ok(()) => {
-            message
-                .reply(InputMessage::new().html(format!(
+            super::announce(
+                ctx,
+                message,
+                ResponseKind::ModerationAnnouncement,
+                super::premium::html(format!(
                     "✗ <b>{}</b> از ادمینی گروه و ربات عزل شد.",
                     esc(name)
-                )))
-                .await
+                )),
+            )
+            .await;
+            super::respond_if_private(
+                ctx,
+                message,
+                ResponseKind::ModerationConfirmation,
+                "عزل از دسترسی تلگرام و فهرست ادمین های ربات تکمیل شد.",
+            )
+            .await
         }
         Err(e) => {
-            match e {
+            match &e {
                 DemoteError::NotFound => {
                     eprintln!("promote: {chat}: could not demote {user_id}: not a listed admin")
                 }
                 DemoteError::Rpc(e) => {
                     eprintln!("promote: {chat}: could not demote {user_id}: {e}")
                 }
+                DemoteError::State(e) => {
+                    eprintln!("promote: {chat}: demoted {user_id}, but state write failed: {e}")
+                }
             }
-            message
-                .reply("انجام نشد. ربات فقط می تواند ادمین هایی را عزل کند که خودش اضافه کرده است.")
-                .await
+            super::respond(ctx, message, ResponseKind::CommandError, super::premium::icon_text(
+                    Some(super::premium::Icon::ErrorRed),
+                    match e {
+                        DemoteError::State(error) if error.commit_outcome_unknown() => {
+                            "کاربر در تلگرام عزل شد، اما نتیجه ثبت آن نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                        }
+                        DemoteError::State(_) => {
+                            "کاربر در تلگرام عزل شد، اما وضعیت ربات ذخیره نشد؛ دوباره تلاش نکنید و گزارش دهید."
+                        }
+                        _ => "انجام نشد. ربات فقط می تواند ادمین هایی را عزل کند که خودش اضافه کرده است.",
+                    },
+                )).await
         }
     };
 }
@@ -306,7 +389,10 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, chat: 
     if query.sender_id().bare_id() != Some(opener) {
         let _ = query
             .answer()
-            .alert("این صفحه را شخص دیگری باز کرده است.")
+            .alert(super::premium::plain_label(
+                Some(super::premium::Icon::Locked),
+                "این صفحه را شخص دیگری باز کرده است.",
+            ))
             .send()
             .await;
         return;
@@ -314,7 +400,10 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, chat: 
     let Some(mut pending) = ctx.pending_admin(key) else {
         let _ = query
             .answer()
-            .alert("این درخواست منقضی شده است. دوباره «افزودن ادمین» را بفرستید.")
+            .alert(super::premium::plain_label(
+                Some(super::premium::Icon::Timer),
+                "این درخواست منقضی شده است. دوباره «افزودن ادمین» را بفرستید.",
+            ))
             .send()
             .await;
         return;
@@ -325,7 +414,10 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, chat: 
             ctx.pending_admin_done(key);
             let _ = query
                 .answer()
-                .edit(InputMessage::new().html("✗ افزودن ادمین لغو شد."))
+                .edit(super::premium::icon_html(
+                    Some(super::premium::Icon::Close),
+                    "افزودن ادمین لغو شد.",
+                ))
                 .await;
         }
         "ok" => {
@@ -341,8 +433,7 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, chat: 
             let _ = query
                 .answer()
                 .edit(
-                    InputMessage::new()
-                        .html(title(&pending))
+                    super::premium::html(title(&pending))
                         .reply_markup(markup(&pending, opener, key)),
                 )
                 .await;
@@ -356,36 +447,66 @@ async fn confirm(ctx: &Ctx, query: &CallbackQuery, chat: i64, pending: &Pending)
     };
     let has = |bit: u32| pending.rights & bit != 0;
 
-    let result = ctx
-        .client
-        .set_admin_rights(chat_ref, pending.target)
-        .delete_messages(has(RIGHTS[0].1))
-        .ban_users(has(RIGHTS[1].1))
-        .invite_users(has(RIGHTS[2].1))
-        .pin_messages(has(RIGHTS[3].1))
-        .manage_call(has(RIGHTS[4].1))
-        .change_info(has(RIGHTS[5].1))
-        .add_admins(has(RIGHTS[6].1))
-        .await;
+    let result = super::restrict::set_member_admin_rights(
+        ctx,
+        chat_ref,
+        pending.target,
+        super::restrict::AdminRightsSpec {
+            delete_messages: has(RIGHTS[0].1),
+            ban_users: has(RIGHTS[1].1),
+            invite_users: has(RIGHTS[2].1),
+            pin_messages: has(RIGHTS[3].1),
+            manage_call: has(RIGHTS[4].1),
+            change_info: has(RIGHTS[5].1),
+            add_admins: has(RIGHTS[6].1),
+        },
+    )
+    .await;
 
     if let Err(e) = result {
         eprintln!("promote: {chat}: could not promote {}: {e}", pending.name);
         let _ = query
             .answer()
-            .edit(
-                InputMessage::new()
-                    .html("انجام نشد. مطمئن شوید ربات ادمین است و اجازه «افزودن ادمین» دارد."),
-            )
+            .edit(super::premium::icon_html(
+                Some(super::premium::Icon::ErrorRed),
+                "انجام نشد. مطمئن شوید ربات ادمین است و اجازه «افزودن ادمین» دارد.",
+            ))
             .await;
         return;
     }
 
     if let Some(id) = pending.target.id.bare_id() {
-        ctx.settings.set(chat, &bot_admin_key(id), true).await;
-
-        ctx.settings
-            .set(chat, &super::stats::badge_key(id), false)
-            .await;
+        let admin_key = bot_admin_key(id);
+        let badge_key = super::stats::badge_key(id);
+        if let Err(error) = ctx
+            .settings
+            .try_apply_batch(
+                chat,
+                &[
+                    crate::state::SettingMutation::Put {
+                        key: &admin_key,
+                        value: "",
+                    },
+                    crate::state::SettingMutation::Delete { key: &badge_key },
+                ],
+            )
+            .await
+        {
+            ::log::error!("promote: {chat}: promoted {id}, but state write failed: {error}");
+            let text = if error.commit_outcome_unknown() {
+                "کاربر در تلگرام ادمین شد، اما نتیجه ثبت آن نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+            } else {
+                "کاربر در تلگرام ادمین شد، اما وضعیت ربات ذخیره نشد؛ دوباره تلاش نکنید و گزارش دهید."
+            };
+            let _ = query
+                .answer()
+                .edit(super::premium::icon_text(
+                    Some(super::premium::Icon::ErrorRed),
+                    text,
+                ))
+                .await;
+            return;
+        }
     }
     ctx.forget_admins(chat);
 
@@ -420,19 +541,22 @@ async fn confirm(ctx: &Ctx, query: &CallbackQuery, chat: i64, pending: &Pending)
     .await;
     let _ = query
         .answer()
-        .edit(InputMessage::new().html(format!(
-            "<b>ادمین جدید</b>\n\n<b>{}</b> ادمین گروه و ربات شد.\n\n<b>دسترسی ها</b>\n{}",
-            pending.name,
-            if granted.is_empty() {
-                "‹ بدون دسترسی خاص".to_owned()
-            } else {
-                granted
-                    .iter()
-                    .map(|label| format!("✓ {label}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-        )))
+        .edit(super::premium::icon_html(
+            Some(super::premium::Icon::User),
+            format!(
+                "<b>ادمین جدید</b>\n\n<b>{}</b> ادمین گروه و ربات شد.\n\n<b>دسترسی ها</b>\n{}",
+                pending.name,
+                if granted.is_empty() {
+                    "‹ بدون دسترسی خاص".to_owned()
+                } else {
+                    granted
+                        .iter()
+                        .map(|label| format!("✓ {label}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            ),
+        ))
         .await;
 }
 
@@ -466,18 +590,24 @@ fn markup(pending: &Pending, opener: i64, key: u64) -> ReplyMarkup {
         })
         .collect();
     rows.push(vec![
-        super::style::data(
-            "✅  تایید",
-            format!("a:{opener}:{key}:ok").into_bytes(),
-            super::style::Colour::Success,
+        super::premium::decorate(
+            super::style::data(
+                "تایید",
+                format!("a:{opener}:{key}:ok").into_bytes(),
+                super::style::Colour::Success,
+            ),
+            Some(super::premium::Icon::Success),
         ),
-        super::style::data(
-            "❌  لغو",
-            format!("a:{opener}:{key}:no").into_bytes(),
-            super::style::Colour::Danger,
+        super::premium::decorate(
+            super::style::data(
+                "لغو",
+                format!("a:{opener}:{key}:no").into_bytes(),
+                super::style::Colour::Danger,
+            ),
+            Some(super::premium::Icon::Close),
         ),
     ]);
-    ReplyMarkup::from_buttons(&rows)
+    super::premium::buttons(&rows)
 }
 
 #[cfg(test)]

@@ -1,8 +1,10 @@
-use grammers_client::message::{InputMessage, Message};
+
+use grammers_client::message::Message;
 use grammers_client::session::types::PeerRef;
 use grammers_client::tl;
 
 use super::{Ctx, esc};
+use crate::response::ResponseKind;
 
 pub const COMMANDS: &[&str] = &["لینک", "لینک گروه"];
 
@@ -92,7 +94,6 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
     let show = COMMANDS.contains(&text);
     let renew = RENEW.contains(&text);
-
     if !show && !renew {
         return false;
     }
@@ -108,12 +109,24 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
 
     let current = primary(ctx, chat_ref).await;
     if show {
-        let _ = match &current {
-            Some(link) => message.reply(InputMessage::new().html(card(link, false))).await,
+        match &current {
+            Some(link) => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::UtilityResult,
+                    super::premium::html(card(link, false)),
+                )
+                .await
+            }
             None => {
-                message
-                    .reply("هنوز لینکی ساخته نشده. «لینک جدید» بفرستید.")
-                    .await
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::UtilityResult,
+                    "هنوز لینکی ساخته نشده. «لینک جدید» بفرستید.",
+                )
+                .await
             }
         };
         return true;
@@ -123,15 +136,34 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         Some(link) => revoke(ctx, chat_ref, link).await,
         None => create(ctx, chat_ref).await,
     };
-    let _ = match made {
+    match made {
         Ok(link) => match match link {
             Some(link) => Some(link),
             None => primary(ctx, chat_ref).await,
         } {
-            Some(link) => message.reply(InputMessage::new().html(card(&link, true))).await,
-            None => message.reply("لینک تازه ساخته نشد.").await,
+            Some(link) => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::UtilityResult,
+                    super::premium::html(card(&link, true)),
+                )
+                .await
+            }
+            None => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    super::premium::icon_text(
+                        Some(super::premium::Icon::ErrorRed),
+                        "لینک تازه ساخته نشد.",
+                    ),
+                )
+                .await
+            }
         },
-        Err(reason) => message.reply(reason).await,
+        Err(reason) => super::respond(ctx, message, ResponseKind::CommandError, reason).await,
     };
     true
 }

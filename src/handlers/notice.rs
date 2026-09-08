@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use grammers_client::message::{InputMessage, Message, ReplyMarkup};
+use grammers_client::message::{Message, ReplyMarkup};
 use grammers_client::session::types::PeerId;
 
 use super::{Ctx, esc, name_of};
@@ -19,11 +19,6 @@ pub fn ttl(ctx: &Ctx, chat: i64) -> u32 {
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_TTL)
         .clamp(TTL_RANGE.0, TTL_RANGE.1)
-}
-
-pub async fn set_ttl(ctx: &Ctx, chat: i64, value: u32) {
-    let value = value.clamp(TTL_RANGE.0, TTL_RANGE.1);
-    ctx.settings.set_value(chat, TTL, &value.to_string()).await;
 }
 
 pub async fn send(
@@ -58,17 +53,31 @@ pub async fn send_with_markup(
         Some(chances) => super::strict::chances_line(chances),
         None => "<i>لطفا دوباره نفرستید.</i>".to_owned(),
     };
-    let mut card = InputMessage::new().html(format!(
+    let mut card = super::premium::icon_html(
+        Some(super::premium::Icon::Locked),
+        format!(
             "<a href=\"tg://user?id={user}\">{}</a> پیام شما حذف شد · <b>{}</b> در این گروه قفل است.\n{tail}",
             esc(&name_of(message)),
             esc(reason)
-        ));
+        ),
+    );
     if let Some(markup) = markup {
         card = card.reply_markup(markup);
     }
-    let sent = message.respond(card).await;
+    let sent = crate::response::send_tracked(
+        &ctx.client,
+        &ctx.settings,
+        message,
+        crate::response::ResponseKind::ContentRemovalNotice,
+        crate::response::IntendedAudience::RequesterOnly,
+        card,
+    )
+    .await;
 
     let Ok(sent) = sent else {
+        return;
+    };
+    let Some(id) = sent.group_message_id else {
         return;
     };
     let seconds = ttl(ctx, chat);
@@ -76,7 +85,6 @@ pub async fn send_with_markup(
         return;
     }
 
-    let id = sent.id();
     ctx.schedule_delete(
         chat,
         id,

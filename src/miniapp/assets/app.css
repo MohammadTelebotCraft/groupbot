@@ -1,3 +1,4 @@
+
 :root {
   color-scheme: dark;
   --bg: oklch(0.155 0.014 250);
@@ -45,6 +46,7 @@ button { border: none; background: none; padding: 0; cursor: pointer; text-align
 
 #app { min-height: 100%; display: flex; flex-direction: column; max-width: 560px; margin: 0 auto; }
 
+
 .state { padding: 48px 24px; text-align: center; color: var(--muted); width: 100%; }
 .state.error { color: var(--danger); }
 .empty {
@@ -60,6 +62,7 @@ button { border: none; background: none; padding: 0; cursor: pointer; text-align
 
 .sk { background: oklch(1 0 0 / 0.07); border-radius: 8px; animation: sk 1.2s ease-in-out infinite; }
 @keyframes sk { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
+
 
 .top {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -89,6 +92,7 @@ button { border: none; background: none; padding: 0; cursor: pointer; text-align
 .ibtn:active { background: var(--card-2); }
 .ibtn.danger { color: var(--danger); }
 .ptitle { font-size: 16px; font-weight: 700; line-height: 1.25; }
+
 
 #main { flex: 1; min-width: 0; padding-bottom: calc(var(--tabbar-h) + var(--safe-b) + 16px); }
 #main.nobar { padding-bottom: calc(24px + var(--safe-b)); }
@@ -135,6 +139,7 @@ button.row:active, .row.tap:active { background: var(--card-2); }
 .pill.accent { background: var(--accent-soft); color: var(--accent-text); }
 .count { color: var(--muted); font-size: 13px; flex-shrink: 0; }
 
+
 .hero {
   display: flex; align-items: center; gap: 12px; padding: 14px 16px;
   border-radius: 16px; background: var(--card);
@@ -171,6 +176,7 @@ button.row:active, .row.tap:active { background: var(--card-2); }
 .stats .v { font-size: 20px; font-weight: 600; line-height: 1.2; }
 .stats .v.dim { color: var(--muted-2); }
 .stats .l { font-size: 11.5px; color: var(--muted); }
+
 
 .sw {
   width: 42px; height: 24px; border-radius: 12px; background: oklch(1 0 0 / 0.12);
@@ -249,6 +255,7 @@ textarea.text-input { min-height: 96px; resize: vertical; }
 .hint { font-size: 12px; color: var(--muted-2); padding: 10px 2px 0; text-align: center; }
 .hint.start { text-align: start; }
 
+
 .confirm {
   position: fixed; right: 0; left: 0; bottom: 0; z-index: 25;
   padding: 12px 14px calc(16px + var(--safe-b)); border-top: 1px solid var(--border);
@@ -258,6 +265,7 @@ textarea.text-input { min-height: 96px; resize: vertical; }
 .confirm .s { font-size: 12.5px; color: var(--muted); margin-bottom: 12px; }
 .confirm .b { display: flex; gap: 8px; }
 .confirm .b .btn { flex: 1; }
+
 
 #toast {
   position: fixed; left: 14px; right: 14px; bottom: calc(var(--tabbar-h) + var(--safe-b) + 12px);
@@ -269,6 +277,7 @@ textarea.text-input { min-height: 96px; resize: vertical; }
 }
 #toast.show { transform: none; opacity: 1; pointer-events: auto; }
 #toast.ok { background: var(--success-soft); color: var(--success); }
+
 
 #tabs {
   position: fixed; right: 0; left: 0; bottom: 0; z-index: 20;
@@ -288,6 +297,7 @@ textarea.text-input { min-height: 96px; resize: vertical; }
   background: var(--warn); color: var(--accent-ink); font-size: 10px; font-weight: 700;
   display: flex; align-items: center; justify-content: center;
 }
+
 
 #dim {
   position: fixed; inset: 0; background: oklch(0 0 0 / 0.55); z-index: 29;
@@ -312,5 +322,17 @@ textarea.text-input { min-height: 96px; resize: vertical; }
 .disclose > button.row { padding-right: 4px; padding-left: 4px; border-bottom: none; }
 .disclose .rt .t { font-weight: 500; }
 
+
 .lockchips .chip { height: 40px; }
 .lockchips .chip svg { margin-left: -2px; }
+.semantic-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  line-height: 1;
+  direction: ltr;
+  unicode-bidi: isolate;
+  min-width: 1em;
+  vertical-align: middle;
+}

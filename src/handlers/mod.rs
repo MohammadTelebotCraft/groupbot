@@ -5,13 +5,16 @@ pub mod biolink;
 pub mod bots;
 pub mod callbacks;
 pub mod captcha;
+pub mod cases;
 pub mod cleaner;
+pub mod cleaner_setup;
 pub mod comment;
 pub mod concept_vectors;
 pub mod concepts;
 pub mod config;
 pub mod currency;
 pub mod emoji_image;
+pub mod ephemeral;
 pub mod extras;
 pub mod filters;
 pub mod flood;
@@ -36,6 +39,7 @@ pub mod packs;
 pub mod panel;
 pub mod ping;
 pub mod pinlock;
+pub mod premium;
 pub mod promote;
 pub mod purge;
 pub mod raid;
@@ -60,8 +64,9 @@ pub mod welcome;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::hash::Hash;
+use std::num::NonZeroI64;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use grammers_client::Client;
@@ -70,7 +75,28 @@ use grammers_client::peer::Peer;
 use grammers_client::session::types::{PeerAuth, PeerId, PeerKind, PeerRef};
 use grammers_client::update::Update;
 
-use crate::state::Settings;
+use crate::state::{Settings, SettingsWriteError};
+
+#[derive(Debug)]
+pub enum ChatAdmissionError {
+    RouteRejected,
+    RuntimeCapacityReached,
+    DurableCapacityReached(&'static str),
+    Persistence(SettingsWriteError),
+}
+
+impl std::fmt::Display for ChatAdmissionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RouteRejected => formatter.write_str("chat is not assigned to this shard"),
+            Self::RuntimeCapacityReached => formatter.write_str("runtime chat capacity reached"),
+            Self::DurableCapacityReached(scope) => {
+                write!(formatter, "durable {scope} capacity reached")
+            }
+            Self::Persistence(error) => write!(formatter, "durable chat admission failed: {error}"),
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct ChatState {
@@ -82,27 +108,22 @@ pub struct ChatState {
     peer: RwLock<Option<PeerRef>>,
 
     admins: RwLock<Option<(Instant, HashSet<i64>)>>,
-
     admin_fetch: tokio::sync::Mutex<()>,
+    configure_lock: Arc<tokio::sync::Mutex<()>>,
+    setup_next_check: AtomicU64,
 
     messages: std::sync::Mutex<HashMap<i64, VecDeque<Instant>>>,
     removals: std::sync::Mutex<HashMap<i64, VecDeque<Instant>>>,
-
     notices: std::sync::Mutex<HashMap<(u8, i64), (Instant, Duration)>>,
     members: std::sync::Mutex<HashMap<i64, Instant>>,
     adds: std::sync::Mutex<HashMap<i64, (Instant, u64)>>,
-    captchas: std::sync::Mutex<HashMap<i64, captcha::Pending>>,
     counts: std::sync::Mutex<HashMap<i64, (u64, String)>>,
     tallies: std::sync::Mutex<HashMap<&'static str, u64>>,
     logs: std::sync::Mutex<Vec<String>>,
     temp_media: std::sync::Mutex<VecDeque<(Instant, i32)>>,
-
     said: std::sync::Mutex<VecDeque<(i64, i32)>>,
-
     roots: std::sync::Mutex<HashMap<i32, (Instant, Root)>>,
-
     swept_bots: AtomicBool,
-
     tag_run: AtomicU64,
     joined: std::sync::Mutex<HashMap<i32, Vec<Joined>>>,
 
@@ -118,17 +139,13 @@ pub struct Queued {
 
 pub enum Root {
     Post,
-
     NotPost,
-
     Pending(Vec<Queued>),
 }
 
 pub enum RootClaim {
     Known(bool),
-
     Mine,
-
     Waiting,
 }
 
@@ -138,6 +155,17 @@ const ROOT_QUEUE_MAX: usize = 32;
 
 pub struct ChatPermit<'a> {
     state: &'a ChatState,
+}
+
+pub(super) struct GroupRightsGuard<'a> {
+    chat: i64,
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+}
+
+impl GroupRightsGuard<'_> {
+    pub(super) fn chat(&self) -> i64 {
+        self.chat
+    }
 }
 
 impl Drop for ChatPermit<'_> {
@@ -228,6 +256,8 @@ impl ChatState {
     pub async fn slot(&self) -> ChatPermit<'_> {
         loop {
             let notified = self.inflight_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let acquired = self
                 .inflight
                 .fetch_update(Ordering::Acquire, Ordering::Relaxed, |current| {
@@ -251,9 +281,9 @@ impl ChatState {
         }
         self.logs.lock().unwrap().is_empty()
             && self.temp_media.lock().unwrap().is_empty()
-            && self.captchas.lock().unwrap().is_empty()
             && self.counts.lock().unwrap().is_empty()
             && self.tallies.lock().unwrap().is_empty()
+            && self.configure_lock.try_lock().is_ok()
     }
 
     pub fn remember_post(&self, id: i32) {
@@ -310,19 +340,36 @@ impl ChatState {
 }
 
 #[derive(Default)]
-struct DirtyList(std::sync::Mutex<HashSet<i64>>);
+struct DirtyList(std::sync::Mutex<DirtyQueue>);
+
+#[derive(Default)]
+struct DirtyQueue {
+    members: HashSet<i64>,
+    order: VecDeque<i64>,
+}
+
+impl DirtyQueue {
+    fn len(&self) -> usize {
+        self.members.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+}
 
 #[derive(Default)]
 struct Dirty {
     logs: DirtyList,
     media: DirtyList,
-
     stats: DirtyList,
 }
 
 impl Dirty {
     fn mark(list: &DirtyList, chat: i64) {
-        list.0.lock().unwrap().insert(chat);
+        let mut queue = list.0.lock().unwrap();
+        if queue.members.insert(chat) {
+            queue.order.push_back(chat);
+        }
     }
 
     fn take(list: &DirtyList, limit: usize) -> Vec<i64> {
@@ -330,9 +377,13 @@ impl Dirty {
             return Vec::new();
         }
         let mut dirty = list.0.lock().unwrap();
-        let selected: Vec<i64> = dirty.iter().copied().take(limit).collect();
-        for chat in &selected {
-            dirty.remove(chat);
+        let mut selected = Vec::with_capacity(limit.min(dirty.len()));
+        for _ in 0..limit {
+            let Some(chat) = dirty.order.pop_front() else {
+                break;
+            };
+            dirty.members.remove(&chat);
+            selected.push(chat);
         }
         selected
     }
@@ -371,16 +422,129 @@ pub struct CapacitySnapshot {
     pub filtered_voices: usize,
     pub outbound_active: usize,
     pub outbound_waiting: usize,
+    pub outbound_critical_waiting: usize,
+}
+
+struct PendingPassword {
+    id: u64,
+    armed: Instant,
+    deliver: tokio::sync::oneshot::Sender<String>,
+}
+
+pub(super) struct PasswordWait {
+    id: u64,
+    receive: tokio::sync::oneshot::Receiver<String>,
+}
+
+pub struct BotIdentity {
+    id: NonZeroI64,
+    username: Option<String>,
+}
+
+impl BotIdentity {
+    pub fn new(id: NonZeroI64, username: Option<String>) -> Self {
+        Self { id, username }
+    }
+}
+
+#[derive(Default)]
+struct PasswordMailbox {
+    next_id: AtomicU64,
+    pending: Mutex<Option<PendingPassword>>,
+}
+
+impl PasswordMailbox {
+    fn arm(&self) -> PasswordWait {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (deliver, receive) = tokio::sync::oneshot::channel();
+        *self.pending.lock().unwrap() = Some(PendingPassword {
+            id,
+            armed: Instant::now(),
+            deliver,
+        });
+        PasswordWait { id, receive }
+    }
+
+    fn give(&self, password: String) -> bool {
+        let Some(request) = self.pending.lock().unwrap().take() else {
+            return false;
+        };
+        request.armed.elapsed() < PENDING_PASSWORD_TTL && request.deliver.send(password).is_ok()
+    }
+
+    fn cancel(&self, id: u64) {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.as_ref().is_some_and(|request| request.id == id) {
+            pending.take();
+        }
+    }
+
+    async fn wait(&self, request: PasswordWait, timeout: Duration) -> Option<String> {
+        let id = request.id;
+        match tokio::time::timeout(timeout, request.receive).await {
+            Ok(Ok(password)) => Some(password),
+            Ok(Err(_)) | Err(_) => {
+                self.cancel(id);
+                None
+            }
+        }
+    }
+}
+
+pub struct BackgroundEpochGuard<'a> {
+    _epoch: tokio::sync::RwLockReadGuard<'a, ()>,
+    panicked: &'a AtomicBool,
+}
+
+#[derive(Default)]
+struct PersistenceBarrier {
+    poisoned: AtomicBool,
+    wake_supervisor: tokio::sync::Notify,
+}
+
+impl PersistenceBarrier {
+    fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
+        self.wake_supervisor.notify_one();
+    }
+
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
+    async fn wait(&self) {
+        loop {
+            let notified = self.wake_supervisor.notified();
+            if self.is_poisoned() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Drop for BackgroundEpochGuard<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.panicked.store(true, Ordering::Release);
+        }
+    }
 }
 
 pub struct Ctx {
     pub client: Client,
     pub settings: Arc<Settings>,
+    bot_session: Arc<grammers_session::storages::ErasedSession>,
     max_runtime_chats: usize,
-
     allowed_chats: Option<Arc<HashSet<i64>>>,
 
     chats: RwLock<HashMap<i64, Arc<ChatState>>>,
+
+    owned_tasks: std::sync::Mutex<OwnedTasks>,
+
+    background_epoch: tokio::sync::RwLock<()>,
+
+    background_panicked: AtomicBool,
 
     dirty: Arc<Dirty>,
 
@@ -395,17 +559,26 @@ pub struct Ctx {
 
     cleaner_id: AtomicI64,
 
-    me_id: AtomicI64,
+    bot_identity: BotIdentity,
+    runtime_config: RuntimeConfig,
 
     user_chats: RwLock<HashMap<i64, PeerRef>>,
 
-    pending_password: RwLock<Option<(Instant, Option<String>)>>,
+    pending_password: PasswordMailbox,
+
+    cleaner_login: tokio::sync::Mutex<()>,
+
+    restriction_writes: Box<[tokio::sync::Mutex<()>]>,
+
+    group_rights: Box<[tokio::sync::Mutex<()>]>,
 
     join_refs: RwLock<HashMap<String, PeerRef>>,
 
     pending_writes: std::sync::Mutex<Vec<(i64, i32, i64)>>,
 
     pending_drops: std::sync::Mutex<Vec<(i64, i32)>>,
+
+    persistence_barrier: PersistenceBarrier,
 
     deferred_deletes: std::sync::Mutex<BinaryHeap<DeferredEntry>>,
     next_deferred: AtomicU64,
@@ -447,17 +620,248 @@ pub struct Ctx {
     adverts: RwLock<HashMap<i64, (Instant, Option<&'static str>)>>,
 
     image_filters: LoadedFilters,
+    stats_pending: tokio::sync::Mutex<Option<crate::state::StatsBatch>>,
+    media_pending: tokio::sync::Mutex<Vec<(i64, i32, i64)>>,
+    pub(super) log_flush: tokio::sync::Mutex<()>,
+    sample_flush: tokio::sync::Mutex<()>,
+    filter_versions: [AtomicU64; 256],
+    filter_loads: [tokio::sync::Mutex<()>; 256],
 
     custom: RwLock<HashMap<(i64, u64), CachedCustom>>,
 
     intents: RwLock<HashMap<u64, (Instant, f32)>>,
 
     intent_tasks: OnceLock<Arc<tokio::sync::Semaphore>>,
+    trade_history: std::sync::Mutex<trade::context::History>,
 
     samples: RwLock<Vec<Box<[f32]>>>,
     sample_at: AtomicUsize,
-
     samples_dirty: std::sync::atomic::AtomicBool,
+}
+
+struct OwnedTasks {
+    accepting: bool,
+    tasks: tokio::task::JoinSet<()>,
+    retained_epochs: Vec<tokio::task::JoinSet<()>>,
+    failures: usize,
+}
+
+struct SampleFlushGuard<'a> {
+    dirty: &'a AtomicBool,
+    complete: bool,
+}
+
+impl Drop for SampleFlushGuard<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.dirty.store(true, Ordering::Release);
+        }
+    }
+}
+
+impl Default for OwnedTasks {
+    fn default() -> Self {
+        Self {
+            accepting: true,
+            tasks: tokio::task::JoinSet::new(),
+            retained_epochs: Vec::new(),
+            failures: 0,
+        }
+    }
+}
+
+impl OwnedTasks {
+    fn spawn(&mut self, future: impl std::future::Future<Output = ()> + Send + 'static) -> bool {
+        if !self.accepting {
+            return false;
+        }
+        while let Some(done) = self.tasks.try_join_next() {
+            if let Err(error) = done {
+                ::log::error!("owned handler task failed: {error}");
+                self.failures += 1;
+            }
+        }
+        self.tasks.spawn(future);
+        true
+    }
+
+    fn begin_drain(&mut self) -> OwnedTaskDrain {
+        self.accepting = false;
+        let mut tasks = std::mem::take(&mut self.retained_epochs);
+        tasks.push(std::mem::take(&mut self.tasks));
+        OwnedTaskDrain {
+            tasks,
+            failures: std::mem::take(&mut self.failures),
+        }
+    }
+
+    fn take_epoch(&mut self) -> OwnedTaskDrain {
+        OwnedTaskDrain {
+            tasks: vec![std::mem::take(&mut self.tasks)],
+            failures: std::mem::take(&mut self.failures),
+        }
+    }
+
+    fn retain_epoch(&mut self, mut epoch: OwnedTaskDrain) {
+        self.retained_epochs.append(&mut epoch.tasks);
+        self.failures += epoch.failures;
+    }
+}
+
+pub struct OwnedTaskDrain {
+    tasks: Vec<tokio::task::JoinSet<()>>,
+    failures: usize,
+}
+
+impl OwnedTaskDrain {
+    fn is_empty(&self) -> bool {
+        self.tasks.iter().all(tokio::task::JoinSet::is_empty)
+    }
+
+    pub async fn join(&mut self) -> usize {
+        for tasks in &mut self.tasks {
+            while let Some(result) = tasks.join_next().await {
+                if let Err(error) = result {
+                    ::log::error!("owned handler task failed while draining: {error}");
+                    self.failures += 1;
+                }
+            }
+        }
+        self.failures
+    }
+
+    pub async fn abort(&mut self) -> usize {
+        for tasks in &mut self.tasks {
+            tasks.abort_all();
+        }
+        self.join().await;
+        self.failures
+    }
+}
+
+pub struct OwnedTaskCheckpoint {
+    epoch: OwnedTaskDrain,
+    failures: usize,
+}
+
+impl OwnedTaskCheckpoint {
+    pub fn retain_for_shutdown(self, ctx: &Ctx) {
+        self.retain_epoch(&ctx.owned_tasks);
+    }
+
+    fn retain_epoch(self, owned: &std::sync::Mutex<OwnedTasks>) {
+        let Self {
+            mut epoch,
+            failures,
+        } = self;
+        epoch.failures += failures;
+        owned.lock().unwrap().retain_epoch(epoch);
+    }
+
+    pub async fn join(&mut self, ctx: &Ctx) -> usize {
+        self.join_epochs(&ctx.owned_tasks).await
+    }
+
+    async fn join_epochs(&mut self, owned: &std::sync::Mutex<OwnedTasks>) -> usize {
+        loop {
+            self.failures += self.epoch.join().await;
+            let next = owned.lock().unwrap().take_epoch();
+            let empty = next.is_empty();
+            self.epoch = next;
+            if empty {
+                self.failures += self.epoch.join().await;
+                return self.failures;
+            }
+        }
+    }
+
+    pub async fn abort(&mut self, ctx: &Ctx) -> usize {
+        self.abort_epochs(&ctx.owned_tasks).await
+    }
+
+    async fn abort_epochs(&mut self, owned: &std::sync::Mutex<OwnedTasks>) -> usize {
+        loop {
+            self.failures += self.epoch.abort().await;
+            let next = owned.lock().unwrap().take_epoch();
+            let empty = next.is_empty();
+            self.epoch = next;
+            if empty {
+                self.failures += self.epoch.join().await;
+                return self.failures;
+            }
+        }
+    }
+}
+
+pub struct RuntimeConfig {
+    sudo_id: Option<i64>,
+    api_hash: String,
+    start_links: config::ConfiguredLinks,
+    miniapp_link: Option<String>,
+    voice_admission: usize,
+    nsfw_slots: usize,
+    intent_tasks: usize,
+    voice: voicemonitor::VoiceConfig,
+}
+
+impl RuntimeConfig {
+    pub fn from_environment(
+        sudo_id: Option<i64>,
+        api_hash: String,
+        miniapp_link: Option<String>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            sudo_id,
+            api_hash,
+            start_links: config::ConfiguredLinks::from_environment()?,
+            miniapp_link,
+            voice_admission: configured_usize("VOICE_ADMISSION", 32, 1, 1_024)?,
+            nsfw_slots: configured_usize("NSFW_SLOTS", DEFAULT_NSFW_SLOTS, 1, 256)?,
+            intent_tasks: configured_usize("INTENT_TASKS", INTENT_TASKS, 1, 1_024)?,
+            voice: voicemonitor::VoiceConfig::from_environment()?,
+        })
+    }
+
+    pub async fn validate(&self) -> Result<(), String> {
+        self.voice.validate().await
+    }
+
+    #[cfg(test)]
+    fn for_test() -> Self {
+        Self {
+            sudo_id: None,
+            api_hash: String::new(),
+            start_links: config::ConfiguredLinks::default(),
+            miniapp_link: None,
+            voice_admission: 32,
+            nsfw_slots: DEFAULT_NSFW_SLOTS,
+            intent_tasks: INTENT_TASKS,
+            voice: voicemonitor::VoiceConfig::for_test(),
+        }
+    }
+}
+
+fn configured_usize(
+    name: &str,
+    default: usize,
+    minimum: usize,
+    maximum: usize,
+) -> Result<usize, String> {
+    let value = match std::env::var(name) {
+        Ok(value) => value.parse::<usize>().map_err(|_| {
+            format!("{name} must be an integer in {minimum}..={maximum}, got {value:?}")
+        })?,
+        Err(std::env::VarError::NotPresent) => default,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(format!("{name} is not valid Unicode"));
+        }
+    };
+    if !(minimum..=maximum).contains(&value) {
+        return Err(format!(
+            "{name} must be in {minimum}..={maximum}, got {value}"
+        ));
+    }
+    Ok(value)
 }
 
 pub const CONCEPT_SLOTS: usize = 8;
@@ -471,25 +875,19 @@ pub const NOTICE_EVERY: Duration = Duration::from_secs(120);
 mod kind {
     pub const FILTER_NOTICE: u8 = 0;
     pub const REPORT: u8 = 1;
-
     pub const LOCK_NOTICE: u8 = 2;
-
     pub const GATE_NOTICE: u8 = 3;
-
     pub const SIGHTING: u8 = 4;
-
     pub const MODERATION: u8 = 5;
     pub const FLOOD_NOTICE: u8 = 6;
-
     pub const BOT_REMOVAL: u8 = 7;
-
-    pub const AUTOCONFIG: u8 = 8;
-
     pub const INSTALL_NOTICE: u8 = 9;
-
     pub const CLEANER_INSTALL: u8 = 10;
-
     pub const COMMENT_SIGN: u8 = 11;
+    pub const MINIAPP_FILTER_CREATE: u8 = 12;
+    pub const MINIAPP_LIST_READ: u8 = 13;
+    pub const MINIAPP_LIST_REMOVE: u8 = 14;
+    pub const MINIAPP_LIST_CLEAR: u8 = 15;
 
     #[cfg(test)]
     pub const ALL: &[(&str, u8)] = &[
@@ -501,10 +899,13 @@ mod kind {
         ("MODERATION", MODERATION),
         ("FLOOD_NOTICE", FLOOD_NOTICE),
         ("BOT_REMOVAL", BOT_REMOVAL),
-        ("AUTOCONFIG", AUTOCONFIG),
         ("INSTALL_NOTICE", INSTALL_NOTICE),
         ("CLEANER_INSTALL", CLEANER_INSTALL),
         ("COMMENT_SIGN", COMMENT_SIGN),
+        ("MINIAPP_FILTER_CREATE", MINIAPP_FILTER_CREATE),
+        ("MINIAPP_LIST_READ", MINIAPP_LIST_READ),
+        ("MINIAPP_LIST_REMOVE", MINIAPP_LIST_REMOVE),
+        ("MINIAPP_LIST_CLEAR", MINIAPP_LIST_CLEAR),
     ];
 }
 
@@ -515,15 +916,7 @@ const PENDING_WRITE_MAX: usize = 200_000;
 const PENDING_ADMIN_MAX: usize = 10_000;
 
 pub(super) enum DeferredAction {
-    Delete {
-        chat: i64,
-        message: i32,
-    },
-    Captcha {
-        chat: i64,
-        user: i64,
-        target: PeerRef,
-    },
+    Delete { chat: i64, message: i32 },
 }
 
 struct DeferredEntry {
@@ -570,7 +963,9 @@ impl PendingNumbers {
     fn arm(&mut self, input_chat: i64, user: i64, target_chat: i64, setting: &'static str) {
         self.entries
             .retain(|_, pending| pending.armed.elapsed() < PENDING_NUMBER_TTL);
-        make_room(&mut self.entries, PENDING_NUMBERS_MAX, |pending| pending.armed);
+        make_room(&mut self.entries, PENDING_NUMBERS_MAX, |pending| {
+            pending.armed
+        });
         self.entries.insert(
             (input_chat, user),
             PendingNumber {
@@ -625,11 +1020,27 @@ const ARMED_WINDOW: u64 = 130_000;
 const ADMIN_CACHE_TTL: Duration = Duration::from_secs(1800);
 const ADMIN_CACHE_MAX: usize = 20_000;
 
-const PER_CHAT_UPDATES: usize = 8;
+pub const PER_CHAT_UPDATES: usize = 8;
 
 const ADDS_TTL: Duration = Duration::from_secs(300);
 
 const PER_CHAT_MAX: usize = 20_000;
+
+const RESTRICTION_WRITE_STRIPES: usize = 4_096;
+const GROUP_RIGHTS_STRIPES: usize = 2_048;
+
+fn restriction_write_stripe(chat: i64, user: i64) -> usize {
+    let mixed = (chat as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (user as u64)
+            .rotate_left(29)
+            .wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed as usize % RESTRICTION_WRITE_STRIPES
+}
+
+fn group_rights_stripe(chat: i64) -> usize {
+    let mixed = (chat as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    mixed as usize % GROUP_RIGHTS_STRIPES
+}
 
 const FLUSH_CHAT_BATCH: usize = 512;
 const STATS_ROWS_PER_FLUSH: usize = 50_000;
@@ -657,19 +1068,39 @@ where
     }
 }
 
-const EVENTS_PER_SUBJECT_MAX: usize = 4_096;
+const EVENTS_PER_SUBJECT_MAX: usize = raid::LIMIT_RANGE.1 as usize + 1;
+const FLOOD_EVENTS_MAX: usize = flood::LIMIT_RANGE.1 as usize + 1;
+const REMOVAL_EVENTS_MAX: usize = betrayal::LIMIT_RANGE.1 as usize + 1;
 
+#[cfg(test)]
 fn record_event(times: &mut VecDeque<Instant>, window: Duration) -> usize {
-    times.retain(|time| time.elapsed() < window);
-    while times.len() >= EVENTS_PER_SUBJECT_MAX {
+    record_event_bounded(times, window, EVENTS_PER_SUBJECT_MAX)
+}
+
+fn record_event_bounded(times: &mut VecDeque<Instant>, window: Duration, capacity: usize) -> usize {
+    record_event_at(times, window, capacity, Instant::now())
+}
+
+fn record_event_at(
+    times: &mut VecDeque<Instant>,
+    window: Duration,
+    capacity: usize,
+    now: Instant,
+) -> usize {
+    while times
+        .front()
+        .is_some_and(|time| now.duration_since(*time) >= window)
+    {
         times.pop_front();
     }
-    times.push_back(Instant::now());
+    while times.len() >= capacity {
+        times.pop_front();
+    }
+    times.push_back(now);
     times.len()
 }
 
 const SAID_MAX: usize = 5_000;
-const CAPTCHA_TTL: Duration = Duration::from_secs(900);
 
 const BIO_TTL: Duration = Duration::from_secs(600);
 
@@ -708,46 +1139,32 @@ pub fn recent_minutes(now: u32) -> [String; 3] {
     [now, (now + 1_439) % 1_440, (now + 1_438) % 1_440].map(|minute| minute.to_string())
 }
 
-pub async fn bounded<T, F>(items: Vec<T>, cap: usize, run: impl Fn(T) -> F)
+pub async fn bounded<T, F>(items: Vec<T>, cap: usize, run: impl Fn(T) -> F + Send + 'static)
 where
     T: Send + 'static,
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    let permits = Arc::new(tokio::sync::Semaphore::new(cap));
-    let mut tasks = tokio::task::JoinSet::new();
-    for item in items {
-        while let Some(done) = tasks.try_join_next() {
-            if let Err(e) = done {
-                eprintln!("fleet job task failed: {e}");
-            }
+    assert!(cap > 0, "fleet concurrency must be nonzero");
+    let mut items = items.into_iter();
+    let mut active: Vec<std::pin::Pin<Box<F>>> = Vec::with_capacity(cap);
+    loop {
+        while active.len() < cap {
+            let Some(item) = items.next() else { break };
+            active.push(Box::pin(run(item)));
         }
-
-        let permit = loop {
-            let acquire = Arc::clone(&permits).acquire_owned();
-            if tasks.is_empty() {
-                break acquire.await.expect("the fleet semaphore is never closed");
-            }
-            tokio::select! {
-                permit = acquire => {
-                    break permit.expect("the fleet semaphore is never closed");
-                }
-                done = tasks.join_next() => {
-                    if let Some(Err(e)) = done {
-                        eprintln!("fleet job task failed: {e}");
-                    }
+        if active.is_empty() {
+            break;
+        }
+        std::future::poll_fn(|context| {
+            for index in 0..active.len() {
+                if active[index].as_mut().poll(context).is_ready() {
+                    drop(active.swap_remove(index));
+                    return std::task::Poll::Ready(());
                 }
             }
-        };
-        let work = run(item);
-        tasks.spawn(async move {
-            let _permit = permit;
-            work.await;
-        });
-    }
-    while let Some(done) = tasks.join_next().await {
-        if let Err(e) = done {
-            eprintln!("fleet job task failed: {e}");
-        }
+            std::task::Poll::Pending
+        })
+        .await;
     }
 }
 
@@ -755,15 +1172,22 @@ impl Ctx {
     pub fn new_with_allowed_chats(
         client: Client,
         settings: Arc<Settings>,
+        bot_session: Arc<grammers_session::storages::ErasedSession>,
+        bot_identity: BotIdentity,
+        runtime_config: RuntimeConfig,
         max_runtime_chats: usize,
         allowed_chats: Option<Arc<HashSet<i64>>>,
     ) -> Self {
         Self {
             client,
             settings,
+            bot_session,
             max_runtime_chats,
             allowed_chats,
             chats: RwLock::new(HashMap::new()),
+            owned_tasks: std::sync::Mutex::new(OwnedTasks::default()),
+            background_epoch: tokio::sync::RwLock::new(()),
+            background_panicked: AtomicBool::new(false),
             dirty: Arc::default(),
             deleted: RwLock::new(HashMap::new()),
             next_deleted_key: AtomicU64::new(1),
@@ -771,12 +1195,23 @@ impl Ctx {
             pending_admins: RwLock::new(HashMap::new()),
             user: RwLock::new(None),
             cleaner_id: AtomicI64::new(0),
-            me_id: AtomicI64::new(0),
+            bot_identity,
+            runtime_config,
             user_chats: RwLock::new(HashMap::new()),
-            pending_password: RwLock::new(None),
+            pending_password: PasswordMailbox::default(),
+            cleaner_login: tokio::sync::Mutex::new(()),
+            restriction_writes: (0..RESTRICTION_WRITE_STRIPES)
+                .map(|_| tokio::sync::Mutex::new(()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            group_rights: (0..GROUP_RIGHTS_STRIPES)
+                .map(|_| tokio::sync::Mutex::new(()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             join_refs: RwLock::new(HashMap::new()),
             pending_writes: std::sync::Mutex::new(Vec::new()),
             pending_drops: std::sync::Mutex::new(Vec::new()),
+            persistence_barrier: PersistenceBarrier::default(),
             deferred_deletes: std::sync::Mutex::new(BinaryHeap::new()),
             next_deferred: AtomicU64::new(0),
             last_armed: AtomicU64::new(0),
@@ -798,9 +1233,16 @@ impl Ctx {
             margins: RwLock::new(HashMap::new()),
             adverts: RwLock::new(HashMap::new()),
             image_filters: RwLock::new(HashMap::new()),
+            stats_pending: tokio::sync::Mutex::new(None),
+            media_pending: tokio::sync::Mutex::new(Vec::new()),
+            log_flush: tokio::sync::Mutex::new(()),
+            sample_flush: tokio::sync::Mutex::new(()),
+            filter_versions: std::array::from_fn(|_| AtomicU64::new(0)),
+            filter_loads: std::array::from_fn(|_| tokio::sync::Mutex::new(())),
             custom: RwLock::new(HashMap::new()),
             intents: RwLock::new(HashMap::new()),
             intent_tasks: OnceLock::new(),
+            trade_history: std::sync::Mutex::new(trade::context::History::default()),
             samples: RwLock::new(Vec::new()),
             sample_at: AtomicUsize::new(0),
             samples_dirty: std::sync::atomic::AtomicBool::new(false),
@@ -813,6 +1255,89 @@ impl Ctx {
             .is_none_or(|allowed| allowed.contains(&chat))
     }
 
+    pub fn sudo_id(&self) -> Option<i64> {
+        self.runtime_config.sudo_id
+    }
+
+    pub fn api_hash(&self) -> &str {
+        &self.runtime_config.api_hash
+    }
+
+    fn start_links(&self) -> &[config::ConfiguredLink] {
+        self.runtime_config.start_links.as_slice()
+    }
+
+    pub fn miniapp_link(&self) -> Option<&str> {
+        self.runtime_config.miniapp_link.as_deref()
+    }
+
+    pub(super) async fn restriction_write(
+        &self,
+        chat: i64,
+        user: i64,
+    ) -> tokio::sync::MutexGuard<'_, ()> {
+        self.restriction_writes[restriction_write_stripe(chat, user)]
+            .lock()
+            .await
+    }
+
+    pub(super) async fn group_rights(&self, chat: i64) -> GroupRightsGuard<'_> {
+        GroupRightsGuard {
+            chat,
+            _guard: self.group_rights[group_rights_stripe(chat)].lock().await,
+        }
+    }
+
+    pub(super) fn try_group_rights(&self, chat: i64) -> Option<GroupRightsGuard<'_>> {
+        Some(GroupRightsGuard {
+            chat,
+            _guard: self.group_rights[group_rights_stripe(chat)]
+                .try_lock()
+                .ok()?,
+        })
+    }
+
+    pub fn spawn_owned(&self, future: impl std::future::Future<Output = ()> + Send + 'static) {
+        let mut owned = self.owned_tasks.lock().unwrap();
+        if !owned.spawn(future) {
+            ::log::error!("owned handler work was submitted after shutdown closed task admission");
+        }
+    }
+
+    pub fn begin_owned_checkpoint(&self) -> OwnedTaskCheckpoint {
+        OwnedTaskCheckpoint {
+            epoch: self.owned_tasks.lock().unwrap().take_epoch(),
+            failures: 0,
+        }
+    }
+
+    pub async fn background_epoch(&self) -> BackgroundEpochGuard<'_> {
+        BackgroundEpochGuard {
+            _epoch: self.background_epoch.read().await,
+            panicked: &self.background_panicked,
+        }
+    }
+
+    pub async fn checkpoint_epoch(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+        self.background_epoch.write().await
+    }
+
+    pub fn background_task_panicked(&self) -> bool {
+        self.background_panicked.load(Ordering::Acquire)
+    }
+
+    pub fn begin_owned_drain(&self) -> OwnedTaskDrain {
+        let mut owned = self.owned_tasks.lock().unwrap();
+        owned.begin_drain()
+    }
+
+    pub async fn shutdown_voice(&self) {
+        if let Some(voice_pool) = self.voice_pool.get() {
+            voice_pool.shutdown().await;
+        }
+    }
+
+    #[cfg(test)]
     pub fn state(&self, chat: i64) -> Arc<ChatState> {
         if let Some(state) = self.chats.read().unwrap().get(&chat) {
             return Arc::clone(state);
@@ -863,10 +1388,6 @@ impl Ctx {
         *self.user.write().unwrap() = Some(client);
     }
 
-    pub fn set_me_id(&self, user: i64) {
-        self.me_id.store(user, Ordering::Relaxed);
-    }
-
     pub fn capacity_snapshot(&self) -> CapacitySnapshot {
         let (outbound_active, outbound_waiting) = self.client.outbound_snapshot();
         CapacitySnapshot {
@@ -888,6 +1409,7 @@ impl Ctx {
             filtered_voices: self.filtered_voices.read().unwrap().len(),
             outbound_active,
             outbound_waiting,
+            outbound_critical_waiting: self.client.outbound_critical_waiting(),
         }
     }
 
@@ -1037,20 +1559,18 @@ impl Ctx {
     }
 
     pub fn voice_pool(&self) -> Arc<voicemonitor::VoicePool> {
-        Arc::clone(
-            self.voice_pool
-                .get_or_init(|| Arc::new(voicemonitor::VoicePool::new())),
-        )
+        Arc::clone(self.voice_pool.get_or_init(|| {
+            Arc::new(voicemonitor::VoicePool::new(
+                self.runtime_config.voice.clone(),
+            ))
+        }))
     }
 
     pub async fn voice_job_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
         Arc::clone(self.voice_jobs.get_or_init(|| {
-            let jobs = std::env::var("VOICE_ADMISSION")
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(32)
-                .clamp(1, 1_024);
-            Arc::new(tokio::sync::Semaphore::new(jobs))
+            Arc::new(tokio::sync::Semaphore::new(
+                self.runtime_config.voice_admission,
+            ))
         }))
         .acquire_owned()
         .await
@@ -1058,14 +1578,11 @@ impl Ctx {
     }
 
     pub async fn nsfw_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
-        Arc::clone(self.nsfw_slots.get_or_init(|| {
-            let slots = std::env::var("NSFW_SLOTS")
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(DEFAULT_NSFW_SLOTS)
-                .clamp(1, 256);
-            Arc::new(tokio::sync::Semaphore::new(slots))
-        }))
+        Arc::clone(
+            self.nsfw_slots.get_or_init(|| {
+                Arc::new(tokio::sync::Semaphore::new(self.runtime_config.nsfw_slots))
+            }),
+        )
         .acquire_owned()
         .await
         .expect("the nsfw semaphore is never closed")
@@ -1108,47 +1625,60 @@ impl Ctx {
         adverts.insert(file, (Instant::now(), why));
     }
 
-    pub async fn image_filters(&self, chat: i64) -> Arc<Vec<imgfilter::Filter>> {
-        {
-            let cache = self.image_filters.read().unwrap();
-            if let Some((at, filters)) = cache.get(&chat)
-                && at.elapsed() < FILTERS_TTL
+    pub async fn image_filters(
+        &self,
+        chat: i64,
+    ) -> Result<Arc<Vec<imgfilter::Filter>>, sqlx::Error> {
+        let slot = (chat as u64 % 256) as usize;
+        let _loading = self.filter_loads[slot].lock().await;
+        loop {
+            let generation = self.filter_versions[slot].load(Ordering::Acquire);
             {
-                return Arc::clone(filters);
+                let cache = self.image_filters.read().unwrap();
+                if let Some((at, filters)) = cache.get(&chat)
+                    && at.elapsed() < FILTERS_TTL
+                {
+                    return Ok(Arc::clone(filters));
+                }
             }
+            let filters: Vec<imgfilter::Filter> = self
+                .settings
+                .image_filters(chat)
+                .await?
+                .into_iter()
+                .filter(|row| row.vector.len() == imgfilter::DIM)
+                .map(|row| imgfilter::Filter {
+                    print: imgfilter::fingerprint(&row.vector, row.scale),
+                    vector: vision::unit(&imgfilter::dequantize(&row.vector, row.scale)),
+                    name: row.name,
+                    cut: if row.samples == 0 {
+                        imgfilter::FIXED_MODEL_CUT
+                    } else {
+                        imgfilter::FIXED_EXAMPLE_CUT
+                    },
+                    live: true,
+                })
+                .collect();
+            let filters = Arc::new(filters);
+            {
+                let mut cache = self.image_filters.write().unwrap();
+                if self.filter_versions[slot].load(Ordering::Acquire) != generation {
+                    continue;
+                }
+                if cache.len() >= PER_CHAT_MAX {
+                    cache.retain(|_, (at, _)| at.elapsed() < FILTERS_TTL);
+                    make_room(&mut cache, PER_CHAT_MAX, |(at, _)| *at);
+                }
+                cache.insert(chat, (Instant::now(), Arc::clone(&filters)));
+            }
+            return Ok(filters);
         }
-        let filters: Vec<imgfilter::Filter> = self
-            .settings
-            .image_filters(chat)
-            .await
-            .into_iter()
-            .filter(|row| row.vector.len() == imgfilter::DIM)
-            .map(|row| imgfilter::Filter {
-                print: imgfilter::fingerprint(&row.vector, row.scale),
-
-                vector: vision::unit(&imgfilter::dequantize(&row.vector, row.scale)),
-                name: row.name,
-
-                cut: if row.samples == 0 {
-                    imgfilter::FIXED_MODEL_CUT
-                } else {
-                    imgfilter::FIXED_EXAMPLE_CUT
-                },
-                live: true,
-            })
-            .collect();
-        let filters = Arc::new(filters);
-        let mut cache = self.image_filters.write().unwrap();
-        if cache.len() >= PER_CHAT_MAX {
-            cache.retain(|_, (at, _)| at.elapsed() < FILTERS_TTL);
-            make_room(&mut cache, PER_CHAT_MAX, |(at, _)| *at);
-        }
-        cache.insert(chat, (Instant::now(), Arc::clone(&filters)));
-        filters
     }
 
     pub fn forget_image_filters(&self, chat: i64) {
-        self.image_filters.write().unwrap().remove(&chat);
+        let mut cache = self.image_filters.write().unwrap();
+        self.filter_versions[(chat as u64 % 256) as usize].fetch_add(1, Ordering::Release);
+        cache.remove(&chat);
     }
 
     pub fn known_intent(&self, key: u64) -> Option<f32> {
@@ -1170,12 +1700,9 @@ impl Ctx {
 
     pub async fn intent_task_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
         Arc::clone(self.intent_tasks.get_or_init(|| {
-            let tasks = std::env::var("INTENT_TASKS")
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(INTENT_TASKS)
-                .clamp(1, 1_024);
-            Arc::new(tokio::sync::Semaphore::new(tasks))
+            Arc::new(tokio::sync::Semaphore::new(
+                self.runtime_config.intent_tasks,
+            ))
         }))
         .acquire_owned()
         .await
@@ -1215,29 +1742,55 @@ impl Ctx {
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub async fn flush_samples(&self) {
+    pub async fn flush_samples(&self) -> bool {
+        let _flush = self.sample_flush.lock().await;
         if !self
             .samples_dirty
             .swap(false, std::sync::atomic::Ordering::Relaxed)
         {
-            return;
+            return true;
         }
+        let mut flush = SampleFlushGuard {
+            dirty: &self.samples_dirty,
+            complete: false,
+        };
         let samples = self.samples();
         if samples.is_empty() {
-            return;
+            flush.complete = true;
+            return true;
         }
         let flat: Vec<f32> = samples.iter().flat_map(|s| s.iter().copied()).collect();
         let (bytes, scale) = imgfilter::quantize(&flat);
-        self.settings
-            .save_samples(&bytes, scale, samples.len() as u32)
-            .await;
+        let count = match i32::try_from(samples.len()) {
+            Ok(count) => count,
+            Err(error) => {
+                ::log::error!("calibration: sample count exceeds PostgreSQL integer: {error}");
+                self.samples_dirty.store(true, Ordering::Relaxed);
+                return false;
+            }
+        };
+        if let Err(error) = self.settings.save_samples(&bytes, scale, count).await {
+            ::log::warn!(
+                "calibration: could not save the reservoir; retaining it for retry: {error}"
+            );
+            self.samples_dirty.store(true, Ordering::Relaxed);
+            return false;
+        }
+        flush.complete = true;
+        true
     }
 
-    pub async fn load_samples(&self) {
-        let Some((bytes, scale, count)) = self.settings.load_samples().await else {
-            return;
+    pub async fn load_samples(&self) -> Result<(), sqlx::Error> {
+        let Some((bytes, scale, count)) = self.settings.load_samples().await? else {
+            return Ok(());
         };
-        let count = (count as usize).min(SAMPLE_CAP);
+        let count = match usize::try_from(count) {
+            Ok(count) => count.min(SAMPLE_CAP),
+            Err(error) => {
+                ::log::error!("calibration: stored sample count is invalid: {error}");
+                return Ok(());
+            }
+        };
         if count == 0 || bytes.len() != count * imgfilter::DIM {
             if !bytes.is_empty() {
                 eprintln!(
@@ -1245,7 +1798,7 @@ impl Ctx {
                     bytes.len()
                 );
             }
-            return;
+            return Ok(());
         }
         let flat = imgfilter::dequantize(&bytes, scale);
         let mut samples = self.samples.write().unwrap();
@@ -1258,6 +1811,7 @@ impl Ctx {
         self.sample_at
             .store(samples.len() % SAMPLE_CAP, Ordering::Relaxed);
         println!("calibration: {} samples restored", samples.len());
+        Ok(())
     }
 
     pub fn samples(&self) -> Vec<Box<[f32]>> {
@@ -1301,10 +1855,30 @@ impl Ctx {
     }
 
     pub async fn cleaner_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
-        Arc::clone(self.cleaner_joins.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2))))
-            .acquire_owned()
-            .await
-            .expect("the cleaner semaphore is never closed")
+        Arc::clone(
+            self.cleaner_joins
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))),
+        )
+        .acquire_owned()
+        .await
+        .expect("the cleaner semaphore is never closed")
+    }
+
+    pub async fn resolve_group(&self, chat: i64) -> Option<PeerRef> {
+        if !self.owns_chat(chat) {
+            return None;
+        }
+        let id = PeerId::from_bot_api_dialog_id(chat)?;
+        autoconfig::resolve_peer(Some(self.bot_session.as_ref()), id, self.chat_ref(chat)).await
+    }
+
+    pub fn try_cleaner_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        Arc::clone(
+            self.cleaner_joins
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))),
+        )
+        .try_acquire_owned()
+        .ok()
     }
 
     pub fn cached_adds(&self, chat: i64, user: i64) -> Option<u64> {
@@ -1338,11 +1912,34 @@ impl Ctx {
         let was_empty = entries.is_empty();
         if entries.len() >= MAX_PER_CHAT {
             entries.remove(0);
+            self.poison_cursor_barrier();
+            ::log::error!(
+                "log: queue for {chat} exceeded {MAX_PER_CHAT}; cursor barrier poisoned after dropping the oldest entry"
+            );
         }
         entries.push(entry);
         if was_empty {
             Dirty::mark(&self.dirty.logs, chat);
         }
+    }
+
+    pub fn retry_logs(&self, chat: i64, mut retry: Vec<String>) {
+        const MAX_PER_CHAT: usize = 200;
+        let Some(state) = self.try_state(chat) else {
+            return;
+        };
+        let mut entries = state.logs.lock().unwrap();
+        retry.append(&mut entries);
+        if retry.len() > MAX_PER_CHAT {
+            let excess = retry.len() - MAX_PER_CHAT;
+            retry.drain(..excess);
+            self.poison_cursor_barrier();
+            ::log::error!(
+                "log: retry queue for {chat} exceeded {MAX_PER_CHAT}; dropped {excess} oldest entries"
+            );
+        }
+        *entries = retry;
+        Dirty::mark(&self.dirty.logs, chat);
     }
 
     pub fn remember_said(&self, chat: i64, user: i64, id: i32) {
@@ -1370,14 +1967,52 @@ impl Ctx {
                 Dirty::mark(&self.dirty.media, chat);
             }
             if !can_persist {
+                self.poison_cursor_barrier();
                 return;
             }
         }
-        let mut writes = self.pending_writes.lock().unwrap();
+        self.remember_pending_write(chat, id, due_at);
+    }
 
+    fn remember_pending_write(&self, chat: i64, id: i32, due_at: i64) -> bool {
+        let mut writes = self.pending_writes.lock().unwrap();
         if writes.len() < PENDING_WRITE_MAX {
             writes.push((chat, id, due_at));
+            true
+        } else {
+            self.poison_cursor_barrier();
+            false
         }
+    }
+
+    fn poison_cursor_barrier(&self) {
+        self.persistence_barrier.poison();
+    }
+
+    pub(super) fn persistence_failed(&self, reason: &str) {
+        ::log::error!("persistence barrier poisoned: {reason}");
+        self.poison_cursor_barrier();
+    }
+
+    pub(super) fn admission_failed(&self, chat: i64, error: ChatAdmissionError) {
+        match error {
+            ChatAdmissionError::Persistence(error) => {
+                self.persistence_failed(&format!("could not durably admit chat {chat}: {error}"))
+            }
+            ChatAdmissionError::RouteRejected
+            | ChatAdmissionError::RuntimeCapacityReached
+            | ChatAdmissionError::DurableCapacityReached(_) => {
+                ::log::warn!("chat admission rejected for {chat}: {error}");
+            }
+        }
+    }
+
+    pub fn cursor_barrier_poisoned(&self) -> bool {
+        self.persistence_barrier.is_poisoned()
+    }
+
+    pub async fn persistence_barrier_failed(&self) {
+        self.persistence_barrier.wait().await;
     }
 
     pub fn restore_temp_media(&self, chat: i64, id: i32, due: Instant) {
@@ -1421,6 +2056,7 @@ impl Ctx {
     pub fn schedule_delete(&self, chat: i64, message: i32, due: Instant) {
         let mut queue = self.deferred_deletes.lock().unwrap();
         if queue.len() >= DEFERRED_DELETE_MAX {
+            self.poison_cursor_barrier();
             return;
         }
         let sequence = self.next_deferred.fetch_add(1, Ordering::Relaxed);
@@ -1429,22 +2065,11 @@ impl Ctx {
             sequence,
             action: DeferredAction::Delete { chat, message },
         });
+        drop(queue);
+        self.remember_pending_write(chat, message, tempmedia::due_at_unix(due));
     }
 
-    pub fn schedule_captcha(&self, chat: i64, user: i64, target: PeerRef, due: Instant) {
-        let mut queue = self.deferred_deletes.lock().unwrap();
-        if queue.len() >= DEFERRED_DELETE_MAX {
-            return;
-        }
-        let sequence = self.next_deferred.fetch_add(1, Ordering::Relaxed);
-        queue.push(DeferredEntry {
-            due,
-            sequence,
-            action: DeferredAction::Captcha { chat, user, target },
-        });
-    }
-
-    pub fn take_due_actions(&self, limit: usize) -> Vec<DeferredAction> {
+    pub(super) fn take_due_actions(&self, limit: usize) -> Vec<DeferredAction> {
         let now = Instant::now();
         let mut queue = self.deferred_deletes.lock().unwrap();
         let mut due = Vec::with_capacity(limit.min(queue.len()));
@@ -1467,7 +2092,6 @@ impl Ctx {
             let Some(state) = self.peek(chat) else {
                 continue;
             };
-
             if self.chat_ref(chat).is_none() {
                 Dirty::mark(&self.dirty.media, chat);
                 continue;
@@ -1475,7 +2099,6 @@ impl Ctx {
             let due = {
                 let mut queue = state.temp_media.lock().unwrap();
                 let due = tempmedia::drain_due_up_to(&mut queue, now, remaining);
-
                 if !queue.is_empty() {
                     Dirty::mark(&self.dirty.media, chat);
                 } else {
@@ -1508,7 +2131,6 @@ impl Ctx {
                 continue;
             }
             let count = logs.len().min(remaining);
-
             let queued: Vec<String> = if count == logs.len() {
                 std::mem::take(&mut *logs)
             } else {
@@ -1521,6 +2143,10 @@ impl Ctx {
             ready.push((chat, queued));
         }
         ready
+    }
+
+    pub fn has_pending_logs(&self) -> bool {
+        !self.dirty.logs.0.lock().unwrap().is_empty()
     }
 
     fn joined_cached(&self, key: (i64, i32)) -> Option<Vec<Joined>> {
@@ -1548,7 +2174,11 @@ impl Ctx {
     }
 
     pub fn me_id(&self) -> i64 {
-        self.me_id.load(Ordering::Relaxed)
+        self.bot_identity.id.get()
+    }
+
+    pub fn bot_username(&self) -> Option<&str> {
+        self.bot_identity.username.as_deref()
     }
 
     pub fn set_cleaner_id(&self, user: i64) {
@@ -1580,31 +2210,24 @@ impl Ctx {
         }
     }
 
-    pub fn expect_password(&self) {
-        *self.pending_password.write().unwrap() = Some((Instant::now(), None));
+    pub(super) fn try_cleaner_login(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        self.cleaner_login.try_lock().ok()
     }
 
-    pub fn give_password(&self, password: String) -> bool {
-        let mut pending = self.pending_password.write().unwrap();
-        match pending.as_mut() {
-            Some((armed, slot)) if armed.elapsed() < PENDING_PASSWORD_TTL && slot.is_none() => {
-                *slot = Some(password);
-                true
-            }
-            _ => false,
-        }
+    pub(super) fn expect_password(&self) -> PasswordWait {
+        self.pending_password.arm()
     }
 
-    pub async fn await_password(&self, timeout: Duration) -> Option<String> {
-        let started = Instant::now();
-        while started.elapsed() < timeout {
-            if let Some((_, Some(password))) = self.pending_password.write().unwrap().take() {
-                return Some(password);
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        self.pending_password.write().unwrap().take();
-        None
+    pub(super) fn give_password(&self, password: String) -> bool {
+        self.pending_password.give(password)
+    }
+
+    pub(super) async fn await_password(
+        &self,
+        request: PasswordWait,
+        timeout: Duration,
+    ) -> Option<String> {
+        self.pending_password.wait(request, timeout).await
     }
 
     pub fn expect_number(
@@ -1704,8 +2327,20 @@ impl Ctx {
         self.throttle(kind::FLOOD_NOTICE, chat, user, NOTICE_EVERY)
     }
 
-    pub fn claim_autoconfig(&self, chat: i64) -> bool {
-        self.throttle(kind::AUTOCONFIG, chat, 0, Duration::from_secs(300))
+    pub fn try_autoconfig(&self, chat: i64) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        Arc::clone(&self.try_state(chat)?.configure_lock)
+            .try_lock_owned()
+            .ok()
+    }
+
+    pub fn claim_setup_probe(&self, state: &ChatState, explicit: bool) -> bool {
+        let now = self.uptime_millis();
+        state
+            .setup_next_check
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                (explicit || now >= next).then_some(now + 60_000)
+            })
+            .is_ok()
     }
 
     pub fn claim_install_notice(&self, chat: i64, missing: i64) -> bool {
@@ -1744,6 +2379,22 @@ impl Ctx {
 
     pub fn may_report(&self, chat: i64, user: i64) -> bool {
         self.throttle(kind::REPORT, chat, user, report::EVERY)
+    }
+
+    pub fn claim_miniapp_filter_create(&self, chat: i64, every: Duration) -> bool {
+        self.throttle(kind::MINIAPP_FILTER_CREATE, chat, 0, every)
+    }
+
+    pub fn claim_miniapp_list_read(&self, chat: i64, list: lists::Kind, every: Duration) -> bool {
+        self.throttle(kind::MINIAPP_LIST_READ, chat, list.throttle_id(), every)
+    }
+
+    pub fn claim_miniapp_list_remove(&self, chat: i64, list: lists::Kind, every: Duration) -> bool {
+        self.throttle(kind::MINIAPP_LIST_REMOVE, chat, list.throttle_id(), every)
+    }
+
+    pub fn claim_miniapp_list_clear(&self, chat: i64, list: lists::Kind, every: Duration) -> bool {
+        self.throttle(kind::MINIAPP_LIST_CLEAR, chat, list.throttle_id(), every)
     }
 
     fn throttle(&self, kind: u8, chat: i64, user: i64, every: Duration) -> bool {
@@ -1788,14 +2439,22 @@ impl Ctx {
             return 0;
         };
         let mut messages = state.messages.lock().unwrap();
-        if messages.len() >= PER_CHAT_MAX {
+        if messages.len() >= PER_CHAT_MAX && !messages.contains_key(&user) {
             messages.retain(|_, times| times.iter().any(|t| t.elapsed() < window));
             make_room(&mut messages, PER_CHAT_MAX, |times| {
                 times.front().copied().unwrap_or_else(Instant::now)
             });
         }
         let times = messages.entry(user).or_default();
-        record_event(times, window)
+        record_event_bounded(
+            times,
+            window,
+            if user == 0 {
+                EVENTS_PER_SUBJECT_MAX
+            } else {
+                FLOOD_EVENTS_MAX
+            },
+        )
     }
 
     pub fn record_removal(&self, chat: i64, actor: i64, window: Duration) -> usize {
@@ -1803,31 +2462,44 @@ impl Ctx {
             return 0;
         };
         let mut removals = state.removals.lock().unwrap();
-        if removals.len() >= PER_CHAT_MAX {
+        if removals.len() >= PER_CHAT_MAX && !removals.contains_key(&actor) {
             removals.retain(|_, times| times.iter().any(|t| t.elapsed() < window));
             make_room(&mut removals, PER_CHAT_MAX, |times| {
                 times.front().copied().unwrap_or_else(Instant::now)
             });
         }
         let times = removals.entry(actor).or_default();
-        record_event(times, window)
+        record_event_bounded(times, window, REMOVAL_EVENTS_MAX)
     }
 
-    pub async fn admit_chat(&self, chat: i64, peer: PeerRef) -> bool {
+    pub async fn admit_chat(
+        &self,
+        chat: i64,
+        peer: PeerRef,
+    ) -> Result<Arc<ChatState>, ChatAdmissionError> {
         if !self.owns_chat(chat) {
-            return false;
+            return Err(ChatAdmissionError::RouteRejected);
         }
         let hash = peer.auth.hash();
         if self.settings.value_parsed::<i64>(chat, HASH) != Some(hash)
-            && !self.settings.set_value(chat, HASH, &hash.to_string()).await
+            && let Err(error) = self
+                .settings
+                .try_set_value(chat, HASH, &hash.to_string())
+                .await
         {
-            return false;
+            return Err(match error {
+                SettingsWriteError::CapacityReached(scope) => {
+                    ChatAdmissionError::DurableCapacityReached(scope)
+                }
+                other => ChatAdmissionError::Persistence(other),
+            });
         }
-        let Some(state) = self.try_state(chat) else {
-            return false;
-        };
+        let state = self
+            .try_state(chat)
+            .ok_or(ChatAdmissionError::RuntimeCapacityReached)?;
         *state.peer.write().unwrap() = Some(peer);
-        true
+        self.touch(&state);
+        Ok(state)
     }
 
     pub fn bump(&self, chat: i64, counter: &'static str) {
@@ -1877,10 +2549,11 @@ impl Ctx {
         let mut chats = self.chats.write().unwrap();
         let before = chats.len();
         for chat in going {
-            if chats
-                .get(&chat)
-                .is_some_and(|state| Arc::strong_count(state) == 1 && state.is_quiet(idle, now))
-            {
+            if chats.get(&chat).is_some_and(|state| {
+                Arc::strong_count(state) == 1
+                    && !self.settings.is_locked(chat, bots::LOCK)
+                    && state.evictable(idle, now)
+            }) {
                 chats.remove(&chat);
             }
         }
@@ -1926,33 +2599,25 @@ impl Ctx {
         (tallies, counts)
     }
 
-    pub fn captcha_start(&self, chat: i64, user: i64, pending: captcha::Pending) {
-        let Some(state) = self.try_state(chat) else {
-            return;
-        };
-        let mut captchas = state.captchas.lock().unwrap();
-        captchas.retain(|_, p| p.started.elapsed() < CAPTCHA_TTL);
-        make_room(&mut captchas, PER_CHAT_MAX, |pending| pending.started);
-        captchas.insert(user, pending);
-    }
-
-    pub fn captcha_pending(&self, chat: i64, user: i64) -> Option<captcha::Pending> {
-        self.peek(chat)?
-            .captchas
+    pub fn stats_flush_batches(&self) -> usize {
+        self.dirty
+            .stats
+            .0
             .lock()
             .unwrap()
-            .get(&user)
-            .cloned()
-    }
-
-    pub fn captcha_done(&self, chat: i64, user: i64) {
-        if let Some(state) = self.peek(chat) {
-            state.captchas.lock().unwrap().remove(&user);
-        }
+            .len()
+            .div_ceil(FLUSH_CHAT_BATCH)
     }
 
     fn live_ref(&self, chat: i64) -> Option<PeerRef> {
-        *self.peek(chat)?.peer.read().unwrap()
+        let state = self.live_state(chat)?;
+        *state.peer.read().unwrap()
+    }
+
+    fn live_state(&self, chat: i64) -> Option<Arc<ChatState>> {
+        let state = self.peek(chat)?;
+        let has_peer = state.peer.read().unwrap().is_some();
+        has_peer.then_some(state)
     }
 
     pub fn chat_ref(&self, chat: i64) -> Option<PeerRef> {
@@ -1962,9 +2627,16 @@ impl Ctx {
         if let Some(peer) = self.live_ref(chat) {
             return Some(peer);
         }
-        let hash = self.settings.value_parsed::<i64>(chat, HASH)?;
+        let id = PeerId::from_bot_api_dialog_id(chat)?;
+        let hash = self
+            .settings
+            .value_parsed::<i64>(chat, HASH)
+            .or_else(|| self.settings.durable_chat_hash(chat))?;
+        if id.kind() == PeerKind::Channel && hash == 0 {
+            return None;
+        }
         Some(PeerRef {
-            id: PeerId::from_bot_api_dialog_id(chat)?,
+            id,
             auth: PeerAuth::from_hash(hash),
         })
     }
@@ -2078,7 +2750,13 @@ pub async fn chat_admins(ctx: &Ctx, chat_ref: PeerRef, chat: i64) -> Option<Hash
     loop {
         match participants.next().await {
             Ok(Some(participant)) => {
-                let id = participant.user.id().bare_id_unchecked();
+                let Some(id) = participant
+                    .id()
+                    .bare_id()
+                    .filter(|_| participant.id().kind() == PeerKind::User)
+                else {
+                    continue;
+                };
                 if holds_the_group(&participant) && !wears_only_a_badge(ctx, chat, id, &participant)
                 {
                     admins.insert(id);
@@ -2109,17 +2787,21 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         Update::NewMessage(message) if !message.outgoing() => message,
 
         Update::MessageEdited(message) if !message.outgoing() => {
-            if message.peer_id().kind() != PeerKind::User {
+            if is_group_message(ctx, &message).await {
                 let Some(chat) = message.peer_id().bot_api_dialog_id() else {
                     return;
                 };
                 let Ok(Some(peer)) = message.peer_ref().await else {
                     return;
                 };
-                if !ctx.admit_chat(chat, peer).await {
-                    return;
-                }
-
+                let _state = match ctx.admit_chat(chat, peer).await {
+                    Ok(state) => state,
+                    Err(error) => {
+                        ctx.admission_failed(chat, error);
+                        return;
+                    }
+                };
+                let _slot = _state.slot().await;
                 let view = locks::View::new(&message);
                 locks::on_edit(ctx, &message, &view).await;
                 trade::watch(ctx, &message, chat, &view).await;
@@ -2132,21 +2814,29 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         }
 
         Update::Raw(raw) => {
-            invalidate_admins(ctx, &raw);
-
             let raw_chat = raw_chat_id(&raw);
-            let state = raw_chat.and_then(|chat| {
-                let state = ctx.try_state(chat)?;
-                ctx.touch(&state);
+            let admitted = if let Some(chat) = raw_chat {
+                let Some(peer) = ctx.resolve_group(chat).await else {
+                    return;
+                };
+                let state = match ctx.admit_chat(chat, peer).await {
+                    Ok(state) => state,
+                    Err(error) => {
+                        ctx.admission_failed(chat, error);
+                        return;
+                    }
+                };
                 Some(state)
-            });
-            if raw_chat.is_some() && state.is_none() {
-                return;
-            }
+            } else {
+                None
+            };
+            invalidate_admins(ctx, &raw);
+            let state = admitted;
             let _slot = match state.as_deref() {
                 Some(state) => Some(state.slot().await),
                 None => None,
             };
+            autoconfig::on_raw(ctx, &raw).await;
             if let grammers_client::tl::enums::Update::ChannelParticipant(update) = &raw.raw {
                 betrayal::on_participant_update(ctx, update).await;
                 bots::on_participant_update(ctx, update).await;
@@ -2155,7 +2845,6 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
                 leftback::on_participant_update(ctx, update).await;
             }
             pinlock::on_raw(ctx, &raw).await;
-            autoconfig::on_raw(ctx, &raw).await;
             return;
         }
         _ => return,
@@ -2163,6 +2852,36 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
     let message = &message;
 
     if age_seconds(message) > STALE_AFTER {
+        if let Some(chat) = message
+            .peer_id()
+            .bot_api_dialog_id()
+            .filter(|chat| *chat < 0)
+        {
+            match message.peer_ref().await {
+                Ok(Some(peer)) => {
+                    if let Err(error) = ctx.admit_chat(chat, peer).await {
+                        ctx.admission_failed(chat, error);
+                    }
+                }
+                Ok(None) => ctx.persistence_failed(&format!(
+                    "stale group update {chat} had no peer reference for durable admission"
+                )),
+                Err(error) => ctx.persistence_failed(&format!(
+                    "stale group update {chat} could not resolve peer reference: {error}"
+                )),
+            }
+            if let Err(error) = captcha::resume_durable_rejoin(ctx, message).await {
+                ctx.persistence_failed(&format!(
+                    "stale join persistence for {chat} could not resume moderation: {error}"
+                ));
+            }
+            if let Err(error) = captcha::resume_interrupted_setup(ctx, message).await {
+                ctx.persistence_failed(&format!(
+                    "stale join persistence for {chat} could not reconstruct captcha setup: {error}"
+                ));
+            }
+        }
+        STALE_UPDATES.fetch_add(1, Ordering::Relaxed);
         return;
     }
 
@@ -2186,30 +2905,42 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         return;
     }
 
+    if !is_group_message(ctx, message).await {
+        return;
+    }
+
     let Some(chat) = chat_id(message) else {
         return;
     };
 
-    if ctx.live_ref(chat).is_none() {
+    let state = if let Some(state) = ctx.live_state(chat) {
+        ctx.touch(&state);
+        state
+    } else {
         let Ok(Some(peer)) = message.peer_ref().await else {
             return;
         };
 
-        if !ctx.admit_chat(chat, peer).await {
-            eprintln!("chat admission refused {chat}; shard chat capacity is full");
-            return;
-        }
+        let state = match ctx.admit_chat(chat, peer).await {
+            Ok(state) => state,
+            Err(error) => {
+                ctx.admission_failed(chat, error);
+                return;
+            }
+        };
 
         if let Some(title) = message.peer().and_then(|peer| peer.name())
             && ctx.settings.value(chat, TITLE).as_deref() != Some(title)
+            && let Err(error) = ctx.settings.try_set_value(chat, TITLE, title).await
         {
-            let _ = ctx.settings.set_value(chat, TITLE, title).await;
+            ::log::warn!("chat admission: could not store title for {chat}: {error}");
         }
-    }
+        state
+    };
 
-    let state = ctx.state(chat);
-    ctx.touch(&state);
     let _slot = state.slot().await;
+
+    autoconfig::on_message(ctx, message, &state).await;
 
     if !state.swept_bots.load(Ordering::Relaxed)
         && ctx.settings.is_locked(chat, bots::LOCK)
@@ -2217,7 +2948,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
     {
         let permit = ctx.sweep_slot().await;
         let ctx = Arc::clone(ctx);
-        tokio::spawn(async move {
+        Arc::clone(&ctx).spawn_owned(async move {
             let _permit = permit;
             bots::sweep(&ctx, chat).await;
         });
@@ -2241,7 +2972,6 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         )
     ) {
         state.bump(stats::JOINED);
-
         let _ = biolink::tripped(ctx, chat, message).await;
         if let Some(grammers_client::tl::enums::MessageAction::ChatAddUser(action)) =
             message.action()
@@ -2250,7 +2980,6 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         }
         raid::check(ctx, message, chat).await;
     }
-
     if flood::check(ctx, message).await {
         return;
     }
@@ -2279,13 +3008,13 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
 
     let _ = locks::handle(ctx, message, &view).await
         || cleaner::on_join(ctx, message).await
-        || autoconfig::on_message(ctx, message).await
         || bots::handle(ctx, message).await
         || captcha::on_join(ctx, message).await
         || welcome::on_join(ctx, message).await
         || (!bot_authored
             && (welcome::handle(ctx, message).await
                 || config::handle(ctx, message).await
+                || ephemeral::handle(ctx, message).await
                 || panel::handle(ctx, message).await
                 || restrict::handle(ctx, message, &view).await
                 || restrict::handle_custom_setup(ctx, message).await
@@ -2297,14 +3026,13 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
                  || sudo::handle(ctx, message).await
                 || promote::handle(ctx, message, &view).await
                 || stats::handle(ctx, message).await
+                || cases::handle(ctx, message).await
                 || report::handle(ctx, message).await
                 || packs::handle(ctx, message).await
                 || extras::handle(ctx, message, &view).await
-
                 || captcha::handle(ctx, message).await
                 || tune::handle(ctx, message, &view).await
                 || warns::handle(ctx, message, &view).await
-
                 || imgfilter::handle(ctx, message).await
                 || filters::handle(ctx, message).await
                 || purge::handle(ctx, message, &view).await
@@ -2319,12 +3047,115 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
                 || invite::handle(ctx, message).await
                 || vip::handle(ctx, message).await
                 || bots::allow(ctx, message).await
-
                 || restrict::handle_custom(ctx, message, &view).await))
         || (!bot_authored && answers::handle(ctx, message, &view).await);
 
     locks::service(ctx, message).await;
 }
+
+pub async fn respond(
+    ctx: &Ctx,
+    message: &Message,
+    kind: crate::response::ResponseKind,
+    content: impl Into<grammers_client::message::InputMessage>,
+) {
+    if let Err(error) = crate::response::send(
+        &ctx.client,
+        &ctx.settings,
+        message,
+        kind,
+        crate::response::IntendedAudience::RequesterOnly,
+        content.into(),
+    )
+    .await
+    {
+        ::log::warn!(
+            "response_delivery kind={} delivery=failed error={error}",
+            kind.as_str()
+        );
+    }
+}
+
+pub async fn announce(
+    ctx: &Ctx,
+    message: &Message,
+    kind: crate::response::ResponseKind,
+    content: impl Into<grammers_client::message::InputMessage>,
+) {
+    if let Err(error) = crate::response::send(
+        &ctx.client,
+        &ctx.settings,
+        message,
+        kind,
+        crate::response::IntendedAudience::WholeGroup,
+        content.into(),
+    )
+    .await
+    {
+        ::log::warn!(
+            "response_delivery kind={} delivery=failed error={error}",
+            kind.as_str()
+        );
+    }
+}
+
+pub async fn respond_shared(
+    ctx: &Ctx,
+    message: &Message,
+    kind: crate::response::ResponseKind,
+    content: impl Into<grammers_client::message::InputMessage>,
+) {
+    if let Err(error) = crate::response::send(
+        &ctx.client,
+        &ctx.settings,
+        message,
+        kind,
+        crate::response::IntendedAudience::SharedWorkflow,
+        content.into(),
+    )
+    .await
+    {
+        ::log::warn!(
+            "response_delivery kind={} delivery=failed error={error}",
+            kind.as_str()
+        );
+    }
+}
+
+pub async fn respond_if_private(
+    ctx: &Ctx,
+    message: &Message,
+    kind: crate::response::ResponseKind,
+    content: impl Into<grammers_client::message::InputMessage>,
+) {
+    if let Err(error) =
+        crate::response::send_if_private(&ctx.client, &ctx.settings, message, kind, content.into())
+            .await
+    {
+        ::log::warn!(
+            "response_delivery kind={} delivery=failed error={error}",
+            kind.as_str()
+        );
+    }
+}
+
+pub fn dispatch_key(update: &Update) -> i64 {
+    match update {
+        Update::NewMessage(message) | Update::MessageEdited(message) => {
+            message.peer_id().bot_api_dialog_id().unwrap_or(0)
+        }
+        Update::CallbackQuery(query) => {
+            let here = query.peer_id().bot_api_dialog_id().unwrap_or(0);
+            callbacks::dispatch_chat(query.data(), here)
+        }
+        Update::Raw(raw) => raw_chat_id(raw).unwrap_or(0),
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+#[allow(unsafe_code)]
+mod scalability_tests;
 
 fn bot_authored(message: &Message) -> bool {
     matches!(message.sender(), Some(Peer::User(user)) if user.is_bot())
@@ -2355,16 +3186,20 @@ fn raw_chat_id(raw: &grammers_client::update::Raw) -> Option<i64> {
     use grammers_client::tl;
 
     let peer = match &raw.raw {
+        tl::enums::Update::Channel(update) => PeerId::channel(update.channel_id),
+        tl::enums::Update::Chat(update) => PeerId::chat(update.chat_id),
+        tl::enums::Update::ChatParticipantAdd(update) => PeerId::chat(update.chat_id),
         tl::enums::Update::ChannelParticipant(update) => PeerId::channel(update.channel_id),
         tl::enums::Update::ChatParticipantAdmin(update) => PeerId::chat(update.chat_id),
         tl::enums::Update::PinnedChannelMessages(update) => PeerId::channel(update.channel_id),
-        tl::enums::Update::PinnedMessages(update) => Some(PeerId::from(update.peer.clone())),
+        tl::enums::Update::PinnedMessages(update) => PeerId::try_from(&update.peer).ok(),
         _ => return None,
     }?;
     peer.bot_api_dialog_id()
 }
 
 const STALE_AFTER: i64 = 120;
+pub static STALE_UPDATES: AtomicU64 = AtomicU64::new(0);
 
 fn age_seconds(message: &Message) -> i64 {
     let sent = message.date().as_second();
@@ -2385,6 +3220,34 @@ pub fn owner(ctx: &Ctx, chat: i64) -> Option<i64> {
 
 fn chat_id(message: &Message) -> Option<i64> {
     message.peer_id().bot_api_dialog_id()
+}
+
+fn is_group_dialog(id: PeerId, peer: Option<&grammers_client::peer::Peer>) -> bool {
+    match peer {
+        Some(grammers_client::peer::Peer::Group(group)) if group.id() == id => {
+            use grammers_client::tl::enums::Chat;
+            match &group.raw {
+                Chat::Chat(_) | Chat::Forbidden(_) => true,
+                Chat::Channel(channel) => {
+                    !channel.broadcast && (channel.megagroup || channel.gigagroup)
+                }
+                Chat::ChannelForbidden(channel) => !channel.broadcast && channel.megagroup,
+                _ => false,
+            }
+        }
+        Some(_) => false,
+        None => id.kind() == PeerKind::Chat,
+    }
+}
+
+async fn is_group_message(ctx: &Ctx, message: &Message) -> bool {
+    if message.peer().is_some() || message.peer_id().kind() != PeerKind::Channel {
+        return is_group_dialog(message.peer_id(), message.peer());
+    }
+    let Some(chat) = message.peer_id().bot_api_dialog_id() else {
+        return false;
+    };
+    ctx.resolve_group(chat).await.is_some()
 }
 
 pub fn is_bot_admin(ctx: &Ctx, chat: i64, user: i64) -> bool {
@@ -2414,7 +3277,10 @@ pub fn is_linked_post(message: &Message) -> bool {
     };
     saved_from_itself(
         message.sender_id(),
-        header.saved_from_peer.clone().map(PeerId::from),
+        header
+            .saved_from_peer
+            .as_ref()
+            .and_then(|peer| PeerId::try_from(peer).ok()),
     )
 }
 
@@ -2439,7 +3305,6 @@ pub async fn can_manage(ctx: &Ctx, message: &Message) -> bool {
     let Some(chat) = chat_id(message) else {
         return false;
     };
-
     if let Some(sender) = message.sender_id()
         && sender.kind() == PeerKind::Channel
     {
@@ -2618,8 +3483,12 @@ pub async fn joined_users(ctx: &Ctx, message: &Message) -> Vec<Joined> {
         .filter(grammers_client::tl::enums::ChannelParticipantsFilter::ChannelParticipantsRecent);
     let mut found = Vec::new();
     while let Ok(Some(participant)) = participants.next().await {
-        let user = participant.user;
-        let id = user.id().bare_id_unchecked();
+        let Some(user) = participant.user() else {
+            continue;
+        };
+        let Some(id) = user.id().bare_id() else {
+            continue;
+        };
         if !ids.contains(&id) {
             continue;
         }
@@ -2652,17 +3521,12 @@ pub async fn admin_ref(ctx: &Ctx, chat: PeerRef, user_id: i64) -> Option<(PeerRe
         if seen > ADMIN_CACHE_MAX {
             break;
         }
-        if participant.user.id().bare_id_unchecked() != user_id || !holds_the_group(&participant) {
+        if participant.id().bare_id() != Some(user_id) || !holds_the_group(&participant) {
             continue;
         }
-        let name = participant.user.full_name();
-        return participant
-            .user
-            .to_ref()
-            .await
-            .ok()
-            .flatten()
-            .map(|peer| (peer, name));
+        let user = participant.user()?;
+        let name = user.full_name();
+        return user.to_ref().await.ok().flatten().map(|peer| (peer, name));
     }
     None
 }
@@ -2687,11 +3551,21 @@ pub async fn admin_entries(ctx: &Ctx, chat: PeerRef) -> Vec<AdminEntry> {
         if found.len() >= ADMIN_CACHE_MAX {
             break;
         }
+        let Some(id) = participant
+            .id()
+            .bare_id()
+            .filter(|_| participant.id().kind() == PeerKind::User)
+        else {
+            continue;
+        };
+        let user = participant.user();
         found.push(AdminEntry {
-            id: participant.user.id().bare_id_unchecked(),
-            name: esc(&participant.user.full_name()),
-            is_creator: matches!(participant.role, grammers_client::peer::Role::Creator(_)),
-            is_bot: participant.user.is_bot(),
+            id,
+            name: user
+                .map(|user| esc(&user.full_name()))
+                .unwrap_or_else(|| id.to_string()),
+            is_creator: matches!(&participant.role, grammers_client::peer::Role::Creator(_)),
+            is_bot: user.is_some_and(|user| user.is_bot()),
         });
     }
     found
@@ -2703,7 +3577,6 @@ pub async fn admins(ctx: &Ctx, chat: PeerRef) -> (Option<(i64, String)>, Vec<Str
         .iter()
         .find(|entry| entry.is_creator)
         .map(|entry| (entry.id, entry.name.clone()));
-
     let names = entries
         .into_iter()
         .map(|entry| {
@@ -2738,7 +3611,301 @@ async fn permissions(
 
 #[cfg(test)]
 mod tests {
-    use super::{PeerId, saved_from_itself};
+    use super::{
+        BackgroundEpochGuard, Ctx, OwnedTaskCheckpoint, OwnedTasks, PasswordMailbox, PeerId,
+        PersistenceBarrier, SampleFlushGuard, saved_from_itself,
+    };
+
+    #[test]
+    fn context_inline_layout_stays_below_the_test_thread_stack() {
+        let bytes = std::mem::size_of::<Ctx>();
+        println!("Ctx inline layout: {bytes} bytes");
+        assert!(bytes < 64 * 1024, "Ctx grew to {bytes} inline bytes");
+    }
+
+    #[tokio::test]
+    async fn persistence_poison_is_sticky_and_wakes_the_supervisor_immediately() {
+        let barrier = std::sync::Arc::new(PersistenceBarrier::default());
+        let waiting = std::sync::Arc::clone(&barrier);
+        let waiter = tokio::spawn(async move { waiting.wait().await });
+        tokio::task::yield_now().await;
+        barrier.poison();
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("supervisor was not woken")
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_millis(10), barrier.wait())
+            .await
+            .expect("a supervisor that starts after poison missed the sticky failure");
+    }
+
+    #[tokio::test]
+    async fn background_panic_is_published_before_the_epoch_unlocks() {
+        let epoch = std::sync::Arc::new(tokio::sync::RwLock::new(()));
+        let panicked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_epoch = std::sync::Arc::clone(&epoch);
+        let task_panicked = std::sync::Arc::clone(&panicked);
+        let (acquired, acquired_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = BackgroundEpochGuard {
+                _epoch: task_epoch.read().await,
+                panicked: &task_panicked,
+            };
+            acquired.send(()).unwrap();
+            panic!("injected background failure");
+        });
+
+        acquired_rx.await.unwrap();
+        let writer = epoch.write().await;
+        assert!(panicked.load(std::sync::atomic::Ordering::Acquire));
+        drop(writer);
+        assert!(task.await.unwrap_err().is_panic());
+    }
+
+    #[tokio::test]
+    async fn owned_task_drain_closes_admission_and_joins_the_exact_accepted_set() {
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut owned = OwnedTasks::default();
+        let accepted = std::sync::Arc::clone(&completed);
+        assert!(owned.spawn(async move {
+            accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+
+        let mut drain = owned.begin_drain();
+        let rejected = std::sync::Arc::clone(&completed);
+        assert!(!owned.spawn(async move {
+            rejected.fetch_add(100, std::sync::atomic::Ordering::SeqCst);
+        }));
+        assert_eq!(drain.join().await, 0);
+
+        assert_eq!(completed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_owned_join_retains_the_same_tasks_for_abort() {
+        struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = Dropped(std::sync::Arc::clone(&dropped));
+        let mut owned = OwnedTasks::default();
+        assert!(owned.spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        }));
+        let mut drain = owned.begin_drain();
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(5), drain.join())
+                .await
+                .is_err()
+        );
+        assert_eq!(drain.abort().await, 1);
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn owned_task_panic_is_retained_until_shutdown_decides_cursor_safety() {
+        let mut owned = OwnedTasks::default();
+        assert!(owned.spawn(async { panic!("injected owned-task failure") }));
+        tokio::task::yield_now().await;
+
+        let mut drain = owned.begin_drain();
+        assert_eq!(drain.join().await, 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_checkpoint_join_retains_handles_until_abort_is_observed() {
+        struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = Dropped(std::sync::Arc::clone(&dropped));
+        let owned = std::sync::Arc::new(std::sync::Mutex::new(OwnedTasks::default()));
+        assert!(owned.lock().unwrap().spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        }));
+        let epoch = owned.lock().unwrap().take_epoch();
+        let mut checkpoint = OwnedTaskCheckpoint { epoch, failures: 0 };
+
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(5),
+                checkpoint.join_epochs(&owned),
+            )
+            .await
+            .is_err()
+        );
+        assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+        checkpoint.retain_epoch(&owned);
+        let mut shutdown = owned.lock().unwrap().begin_drain();
+        assert_eq!(shutdown.abort().await, 1);
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_joins_children_admitted_by_the_captured_epoch() {
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let owned = std::sync::Arc::new(std::sync::Mutex::new(OwnedTasks::default()));
+        let child_owner = std::sync::Arc::clone(&owned);
+        let child_completed = std::sync::Arc::clone(&completed);
+        assert!(owned.lock().unwrap().spawn(async move {
+            assert!(child_owner.lock().unwrap().spawn(async move {
+                child_completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }));
+        }));
+        let epoch = owned.lock().unwrap().take_epoch();
+        let mut checkpoint = OwnedTaskCheckpoint { epoch, failures: 0 };
+
+        assert_eq!(checkpoint.join_epochs(&owned).await, 0);
+        assert_eq!(completed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancelled_sample_flush_rearms_the_dirty_bit() {
+        let dirty = std::sync::atomic::AtomicBool::new(false);
+        {
+            let _flush = SampleFlushGuard {
+                dirty: &dirty,
+                complete: false,
+            };
+        }
+        assert!(dirty.load(std::sync::atomic::Ordering::Acquire));
+        dirty.store(false, std::sync::atomic::Ordering::Release);
+        {
+            let _flush = SampleFlushGuard {
+                dirty: &dirty,
+                complete: true,
+            };
+        }
+        assert!(!dirty.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn restriction_coordinators_have_stable_bounded_stripes() {
+        assert_eq!(super::RESTRICTION_WRITE_STRIPES, 4_096);
+        assert_eq!(super::GROUP_RIGHTS_STRIPES, 2_048);
+        assert_eq!(
+            super::restriction_write_stripe(-1_001, 42),
+            super::restriction_write_stripe(-1_001, 42)
+        );
+        assert_eq!(
+            super::group_rights_stripe(-1_001),
+            super::group_rights_stripe(-1_001)
+        );
+        assert!(super::restriction_write_stripe(i64::MIN, i64::MAX) < 4_096);
+        assert!(super::group_rights_stripe(i64::MIN) < 2_048);
+    }
+
+    #[tokio::test]
+    async fn password_handoff_wakes_exactly_one_waiter_without_polling() {
+        let mailbox = PasswordMailbox::default();
+        let waiting = mailbox.arm();
+
+        assert!(mailbox.give("secret".to_owned()));
+        assert_eq!(
+            mailbox
+                .wait(waiting, std::time::Duration::from_millis(10))
+                .await
+                .as_deref(),
+            Some("secret")
+        );
+        assert!(!mailbox.give("second".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn stale_password_waiter_cannot_cancel_a_new_request() {
+        let mailbox = PasswordMailbox::default();
+        let stale = mailbox.arm();
+        let current = mailbox.arm();
+
+        assert!(
+            mailbox
+                .wait(stale, std::time::Duration::from_millis(10))
+                .await
+                .is_none()
+        );
+        assert!(mailbox.give("current".to_owned()));
+        assert_eq!(
+            mailbox
+                .wait(current, std::time::Duration::from_millis(10))
+                .await
+                .as_deref(),
+            Some("current")
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_password_request_stops_accepting_secrets() {
+        let mailbox = PasswordMailbox::default();
+        let waiting = mailbox.arm();
+
+        assert!(
+            mailbox
+                .wait(waiting, std::time::Duration::from_millis(1))
+                .await
+                .is_none()
+        );
+        assert!(!mailbox.give("late".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn group_routing_distinguishes_broadcasts_from_supergroups_with_the_same_id_format() {
+        use grammers_client::{Client, SenderPool, peer::Peer, tl};
+        use grammers_session::storages::MemorySession;
+        use std::sync::Arc;
+
+        let pool = SenderPool::new(Arc::new(MemorySession::default()), 1);
+        let client = Client::new(pool.handle.clone());
+        let id = PeerId::channel(123).unwrap();
+        for (broadcast, megagroup, allowed) in [
+            (true, false, false),
+            (false, true, true),
+            (false, false, false),
+        ] {
+            let peer = Peer::try_from_raw(
+                &client,
+                tl::types::ChannelForbidden {
+                    broadcast,
+                    megagroup,
+                    monoforum: false,
+                    id: 123,
+                    access_hash: 42,
+                    title: "dialog".into(),
+                    until_date: None,
+                }
+                .into(),
+            )
+            .expect("fixture uses a valid Telegram channel identifier");
+            assert_eq!(super::is_group_dialog(id, Some(&peer)), allowed);
+            assert!(!super::is_group_dialog(
+                PeerId::channel(456).unwrap(),
+                Some(&peer)
+            ));
+        }
+        assert!(!super::is_group_dialog(id, None));
+        assert!(!super::is_group_dialog(PeerId::user(123).unwrap(), None));
+        let basic = Peer::try_from_raw(
+            &client,
+            tl::types::ChatForbidden {
+                id: 123,
+                title: "group".into(),
+            }
+            .into(),
+        )
+        .expect("fixture uses a valid Telegram chat identifier");
+        assert!(super::is_group_dialog(basic.id(), Some(&basic)));
+        assert!(super::is_group_dialog(basic.id(), None));
+    }
 
     #[test]
     fn pending_numbers_keep_input_and_target_dialogs_separate() {
@@ -2920,7 +4087,6 @@ mod tests {
         assert!(!saved_from_itself(None, Some(channel)));
         assert!(!saved_from_itself(None, None));
     }
-
     #[test]
     fn a_queue_that_refills_during_a_drain_is_not_lost() {
         use std::sync::Mutex;
@@ -2989,7 +4155,6 @@ mod tests {
         let ran = Arc::new(AtomicUsize::new(0));
 
         let (live_in, peak_in, ran_in) = (Arc::clone(&live), Arc::clone(&peak), Arc::clone(&ran));
-
         super::bounded((0..50_000).collect(), CAP, move |_| {
             let (live, peak, ran) = (
                 Arc::clone(&live_in),
@@ -3015,6 +4180,44 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn cancelling_a_bounded_campaign_leaves_no_detached_children() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let entered = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Semaphore::new(0));
+        let task = tokio::spawn(super::bounded((0..16).collect(), 4, {
+            let entered = Arc::clone(&entered);
+            let completed = Arc::clone(&completed);
+            let barrier = Arc::clone(&barrier);
+            move |_| {
+                let entered = Arc::clone(&entered);
+                let completed = Arc::clone(&completed);
+                let barrier = Arc::clone(&barrier);
+                async move {
+                    entered.fetch_add(1, Ordering::SeqCst);
+                    barrier.acquire().await.unwrap().forget();
+                    completed.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while entered.load(Ordering::SeqCst) < 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        barrier.add_permits(16);
+        tokio::task::yield_now().await;
+        assert_eq!(completed.load(Ordering::SeqCst), 0);
+        assert_eq!(entered.load(Ordering::SeqCst), 4);
+    }
+
     #[test]
     fn digits_normalise_both_digit_sets_and_borrow_otherwise() {
         use super::digits;
@@ -3029,15 +4232,12 @@ mod tests {
         assert_eq!(digits("قفل عكس"), "قفل عکس");
         assert_eq!(digits("پاكسازي ۵۰"), "پاکسازی 50");
         assert_eq!(digits("لينك"), "لینک");
-
         assert_eq!(digits("علي"), "علی");
         assert_eq!(digits("عﻟى"), "عﻟی");
-
         assert!(matches!(
             digits("كانفيگ"),
             std::borrow::Cow::Owned(ref folded) if folded == "کانفیگ"
         ));
-
         for text in ["قفل عكس", "پاكسازي ۵۰", "۱۲۳"] {
             assert_eq!(digits(text).chars().count(), text.chars().count());
         }
@@ -3112,13 +4312,26 @@ mod tests {
             sender: Some(9),
             name: "کاربر".to_owned(),
         };
-        assert!(matches!(state.claim_root(90_001, queued()), RootClaim::Mine));
-        assert!(matches!(state.claim_root(90_001, queued()), RootClaim::Waiting));
+        assert!(matches!(
+            state.claim_root(90_001, queued()),
+            RootClaim::Mine
+        ));
+        assert!(matches!(
+            state.claim_root(90_001, queued()),
+            RootClaim::Waiting
+        ));
         assert_eq!(state.root_known(90_001), None, "a claim is not a verdict");
-        assert_eq!(state.settle_root(90_001, true).len(), 2, "both queued comments");
+        assert_eq!(
+            state.settle_root(90_001, true).len(),
+            2,
+            "both queued comments"
+        );
         assert_eq!(state.root_known(90_001), Some(true));
 
-        assert!(matches!(state.claim_root(90_002, queued()), RootClaim::Mine));
+        assert!(matches!(
+            state.claim_root(90_002, queued()),
+            RootClaim::Mine
+        ));
         state.forget_root(90_002);
         assert_eq!(state.root_known(90_002), None);
     }
@@ -3138,6 +4351,40 @@ mod tests {
     }
 
     #[test]
+    fn bounded_events_preserve_every_supported_threshold_decision() {
+        use super::{
+            EVENTS_PER_SUBJECT_MAX, FLOOD_EVENTS_MAX, REMOVAL_EVENTS_MAX, record_event_at,
+        };
+        let origin = std::time::Instant::now();
+        for cap in [EVENTS_PER_SUBJECT_MAX, FLOOD_EVENTS_MAX, REMOVAL_EVENTS_MAX] {
+            let mut bounded = std::collections::VecDeque::new();
+            let mut reference = std::collections::VecDeque::new();
+            let mut elapsed = 0u64;
+            let mut seed = 42u64;
+            for index in 0..20_000 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                elapsed += if index % 2000 < 1500 {
+                    seed % 3
+                } else {
+                    seed % 500
+                };
+                let now = origin + std::time::Duration::from_millis(elapsed);
+                let window = std::time::Duration::from_millis(50 + (index / 311 % 5) * 300);
+                let count = record_event_at(&mut bounded, window, cap, now);
+                let full = record_event_at(&mut reference, window, usize::MAX, now);
+                for threshold in 1..cap {
+                    assert_eq!(
+                        count > threshold,
+                        full > threshold,
+                        "cap={cap} index={index} threshold={threshold}"
+                    );
+                }
+                assert!(bounded.len() <= cap);
+            }
+        }
+    }
+
+    #[test]
     fn fresh_cache_entries_still_obey_the_hard_cap() {
         use super::make_room;
         use std::collections::HashMap;
@@ -3154,10 +4401,8 @@ mod tests {
     #[test]
     fn dirty_take_leaves_unselected_chats_marked() {
         use super::{Dirty, DirtyList};
-        use std::collections::HashSet;
-        use std::sync::Mutex;
 
-        let list = DirtyList(Mutex::new(HashSet::new()));
+        let list = DirtyList::default();
         for chat in 0..10 {
             Dirty::mark(&list, chat);
         }
@@ -3182,9 +4427,7 @@ mod tests {
         }
 
         assert_eq!(state.take_said(7), vec![1, 2, 3, 4, 5]);
-
         assert!(state.take_said(7).is_empty());
-
         assert_eq!(state.take_said(9), vec![101, 102, 103, 104, 105]);
         assert!(state.take_said(11).is_empty(), "a member who never spoke");
 
@@ -3199,16 +4442,23 @@ mod tests {
 
     #[test]
     fn a_chat_with_queued_work_is_never_evicted() {
-        use super::{ChatState, captcha};
+        use super::ChatState;
         use std::sync::atomic::Ordering;
         use std::time::{Duration, Instant};
 
         const IDLE: Duration = Duration::from_secs(3600);
-
         let now = (IDLE.as_millis() as u64) * 3 / 2;
 
         let state = ChatState::default();
         assert!(state.evictable(IDLE, now), "quiet and empty");
+
+        let configuring = state.configure_lock.try_lock().unwrap();
+        assert!(
+            !state.evictable(IDLE, now),
+            "an activation must keep its single-flight guard"
+        );
+        drop(configuring);
+        assert!(state.evictable(IDLE, now));
 
         state.logs.lock().unwrap().push("a line".to_owned());
         assert!(!state.evictable(IDLE, now));
@@ -3221,17 +4471,6 @@ mod tests {
             .push_back((Instant::now(), 1));
         assert!(!state.evictable(IDLE, now));
         state.temp_media.lock().unwrap().clear();
-
-        state.captchas.lock().unwrap().insert(
-            7,
-            captcha::Pending {
-                answer: 0,
-                message_id: 1,
-                started: Instant::now(),
-            },
-        );
-        assert!(!state.evictable(IDLE, now));
-        state.captchas.lock().unwrap().clear();
 
         state.bump("joined");
         assert!(!state.evictable(IDLE, now));

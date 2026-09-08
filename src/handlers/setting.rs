@@ -1,4 +1,7 @@
+
 use grammers_client::message::Button;
+
+use crate::state::SettingsWriteError;
 
 use super::style::{Colour, choice, data as coloured, toggle};
 use super::{
@@ -10,34 +13,96 @@ pub struct Pick {
     pub id: &'static str,
     pub value: &'static str,
     pub label: &'static str,
-
     pub danger: bool,
 }
 
 pub enum Kind {
     Flag,
-
     Number {
         range: (u32, u32),
         presets: &'static [u32],
         per_row: usize,
         show: fn(u32) -> String,
-        read: fn(&Ctx, i64) -> u32,
+        read: Option<fn(&Ctx, i64) -> u32>,
     },
-
     Pick {
         options: &'static [Pick],
-
         default: &'static str,
     },
+}
+
+#[derive(Debug)]
+pub enum ApplyError {
+    Settings(SettingsWriteError),
+    Night(super::extras::NightUpdateError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApplyStatus {
+    Applied,
+    PendingRetry,
+    DeliveryUnknown,
+}
+
+fn delivery_status(outcome: super::rights::DeliveryOutcome) -> ApplyStatus {
+    match outcome {
+        super::rights::DeliveryOutcome::Applied => ApplyStatus::Applied,
+        super::rights::DeliveryOutcome::PendingRetry { .. }
+        | super::rights::DeliveryOutcome::Superseded => ApplyStatus::PendingRetry,
+        super::rights::DeliveryOutcome::AcceptedDeliveryUnknown { .. } => {
+            ApplyStatus::DeliveryUnknown
+        }
+    }
+}
+
+impl std::fmt::Display for ApplyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Settings(error) => error.fmt(formatter),
+            Self::Night(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ApplyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Settings(error) => Some(error),
+            Self::Night(error) => Some(error),
+        }
+    }
+}
+
+impl From<SettingsWriteError> for ApplyError {
+    fn from(error: SettingsWriteError) -> Self {
+        Self::Settings(error)
+    }
+}
+
+impl From<super::extras::NightUpdateError> for ApplyError {
+    fn from(error: super::extras::NightUpdateError) -> Self {
+        Self::Night(error)
+    }
+}
+
+impl ApplyError {
+    pub fn acceptance_unknown(&self) -> bool {
+        matches!(self, Self::Settings(error) if error.commit_outcome_unknown())
+            || matches!(self, Self::Night(error) if error.acceptance_unknown())
+    }
+
+    pub fn invalid_night_window(&self) -> bool {
+        matches!(
+            self,
+            Self::Night(super::extras::NightUpdateError::InvalidWindow)
+        )
+    }
 }
 
 pub struct Setting {
     pub id: &'static str,
     pub key: &'static str,
-
     pub label: &'static str,
-
     pub section: &'static str,
     pub kind: Kind,
 }
@@ -87,16 +152,11 @@ pub const CLOCK: (u32, u32) = (0, 1439);
 
 const NIGHT_DEFAULT: (u32, u32) = (23 * 60, 7 * 60);
 
-fn night_window(ctx: &Ctx, chat: i64) -> (u32, u32) {
-    super::extras::night(ctx, chat).unwrap_or(NIGHT_DEFAULT)
-}
-
-fn night_from(ctx: &Ctx, chat: i64) -> u32 {
-    night_window(ctx, chat).0
-}
-
-fn night_to(ctx: &Ctx, chat: i64) -> u32 {
-    night_window(ctx, chat).1
+async fn night_window(ctx: &Ctx, chat: i64) -> Result<(u32, u32), ApplyError> {
+    Ok(super::extras::night(ctx, chat)
+        .await
+        .map_err(super::extras::NightUpdateError::from)?
+        .unwrap_or(NIGHT_DEFAULT))
 }
 
 fn auto_at(ctx: &Ctx, chat: i64) -> u32 {
@@ -243,7 +303,6 @@ pub const SETTINGS: &[Setting] = &[
         section: "cq",
         kind: Kind::Flag,
     },
-
     Setting {
         id: "fl_lim",
         key: flood::LIMIT,
@@ -254,7 +313,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: flood::LIMIT_PRESETS,
             per_row: 5,
             show: plain,
-            read: flood::limit,
+            read: Some(flood::limit),
         },
     },
     Setting {
@@ -267,7 +326,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: flood::WINDOW_PRESETS,
             per_row: 5,
             show: plain,
-            read: flood::window,
+            read: Some(flood::window),
         },
     },
     Setting {
@@ -280,7 +339,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: betrayal::LIMIT_PRESETS,
             per_row: 5,
             show: plain,
-            read: betrayal::limit,
+            read: Some(betrayal::limit),
         },
     },
     Setting {
@@ -293,7 +352,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: betrayal::WINDOW_PRESETS,
             per_row: 5,
             show: plain,
-            read: betrayal::window,
+            read: Some(betrayal::window),
         },
     },
     Setting {
@@ -306,7 +365,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: warns::LIMIT_PRESETS,
             per_row: 5,
             show: plain,
-            read: warns::limit,
+            read: Some(warns::limit),
         },
     },
     Setting {
@@ -319,7 +378,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: strict::LIMIT_PRESETS,
             per_row: 5,
             show: plain,
-            read: strict::limit,
+            read: Some(strict::limit),
         },
     },
     Setting {
@@ -332,7 +391,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: strict::TIME_PRESETS,
             per_row: 2,
             show: duration,
-            read: strict::minutes,
+            read: Some(strict::minutes),
         },
     },
     Setting {
@@ -345,7 +404,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: raid::LIMIT_PRESETS,
             per_row: 5,
             show: plain,
-            read: raid::limit,
+            read: Some(raid::limit),
         },
     },
     Setting {
@@ -358,7 +417,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: raid::WINDOW_PRESETS,
             per_row: 5,
             show: plain,
-            read: raid::window,
+            read: Some(raid::window),
         },
     },
     Setting {
@@ -371,7 +430,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: raid::TIME_PRESETS,
             per_row: 2,
             show: duration,
-            read: raid::minutes,
+            read: Some(raid::minutes),
         },
     },
     Setting {
@@ -384,7 +443,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: captcha::TIMEOUT_PRESETS,
             per_row: 4,
             show: plain,
-            read: captcha::timeout,
+            read: Some(captcha::timeout),
         },
     },
     Setting {
@@ -397,7 +456,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: captcha::CHOICES_PRESETS,
             per_row: 5,
             show: plain,
-            read: captcha_choices,
+            read: Some(captcha_choices),
         },
     },
     Setting {
@@ -410,7 +469,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: notice::TTL_PRESETS,
             per_row: 5,
             show: never,
-            read: notice::ttl,
+            read: Some(notice::ttl),
         },
     },
     Setting {
@@ -423,7 +482,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: join::EVERY_PRESETS,
             per_row: 3,
             show: every,
-            read: join::prompt_every,
+            read: Some(join::prompt_every),
         },
     },
     Setting {
@@ -434,10 +493,9 @@ pub const SETTINGS: &[Setting] = &[
         kind: Kind::Number {
             range: welcome::TTL_RANGE,
             presets: welcome::TTL_PRESETS,
-
             per_row: 3,
             show: lifetime,
-            read: welcome::ttl,
+            read: Some(welcome::ttl),
         },
     },
     Setting {
@@ -450,7 +508,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: join::TTL_PRESETS,
             per_row: 3,
             show: lifetime,
-            read: join::prompt_ttl,
+            read: Some(join::prompt_ttl),
         },
     },
     Setting {
@@ -463,7 +521,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: join::ADD_PRESETS,
             per_row: 3,
             show: off,
-            read: required_adds,
+            read: Some(required_adds),
         },
     },
     Setting {
@@ -476,7 +534,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: tempmedia::MINUTES_PRESETS,
             per_row: 3,
             show: duration,
-            read: tempmedia::minutes,
+            read: Some(tempmedia::minutes),
         },
     },
     Setting {
@@ -489,7 +547,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: concepts::LIMIT_PRESETS,
             per_row: 3,
             show: plain,
-            read: concepts::limit,
+            read: Some(concepts::limit),
         },
     },
     Setting {
@@ -502,7 +560,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: trade::LIMIT_PRESETS,
             per_row: 3,
             show: plain,
-            read: trade::limit,
+            read: Some(trade::limit),
         },
     },
     Setting {
@@ -515,10 +573,9 @@ pub const SETTINGS: &[Setting] = &[
             presets: purge::AUTO_COUNT_PRESETS,
             per_row: 3,
             show: all,
-            read: purge::auto_count,
+            read: Some(purge::auto_count),
         },
     },
-
     Setting {
         id: "apt",
         key: purge::AUTO_AT,
@@ -529,7 +586,7 @@ pub const SETTINGS: &[Setting] = &[
             presets: purge::AUTO_AT_PRESETS,
             per_row: 3,
             show: clock,
-            read: auto_at,
+            read: Some(auto_at),
         },
     },
     Setting {
@@ -542,12 +599,12 @@ pub const SETTINGS: &[Setting] = &[
             presets: super::stats::REPORT_PRESETS,
             per_row: 3,
             show: clock,
-            read: report_at,
+            read: Some(report_at),
         },
     },
     Setting {
         id: "ngf",
-        key: super::extras::NIGHT,
+        key: "default_rights:night",
         label: "ساعت شروع، مثل 23:37",
         section: "ng",
         kind: Kind::Number {
@@ -555,12 +612,12 @@ pub const SETTINGS: &[Setting] = &[
             presets: &[],
             per_row: 3,
             show: clock,
-            read: night_from,
+            read: None,
         },
     },
     Setting {
         id: "ngt",
-        key: super::extras::NIGHT,
+        key: "default_rights:night",
         label: "ساعت پایان، مثل 7:05",
         section: "ng",
         kind: Kind::Number {
@@ -568,10 +625,9 @@ pub const SETTINGS: &[Setting] = &[
             presets: &[],
             per_row: 3,
             show: clock,
-            read: night_to,
+            read: None,
         },
     },
-
     Setting {
         id: "fl_act",
         key: flood::ACTION,
@@ -782,68 +838,94 @@ pub fn number(id: &str) -> Option<(&'static Setting, (u32, u32))> {
     }
 }
 
-pub async fn store(ctx: &Ctx, chat: i64, setting: &Setting, value: u32) {
+pub async fn store(
+    ctx: &Ctx,
+    chat: i64,
+    setting: &Setting,
+    value: u32,
+) -> Result<ApplyStatus, ApplyError> {
     match setting.id {
-        "ad" => join::set_required_adds(ctx, chat, u64::from(value)).await,
-
-        "apt" => purge::set_auto_at(ctx, chat, Some(value)).await,
-        "dr" => super::stats::set_report_at(ctx, chat, Some(value)).await,
-
+        "ad" => join::set_required_adds(ctx, chat, u64::from(value)).await?,
+        "apt" => purge::set_auto_at(ctx, chat, Some(value)).await?,
+        "dr" => super::stats::set_report_at(ctx, chat, Some(value)).await?,
         "ngf" => {
-            let (_, to) = night_window(ctx, chat);
-            super::extras::set_night(ctx, chat, Some((value, to))).await;
+            let (_, to) = night_window(ctx, chat).await?;
+            return Ok(delivery_status(
+                super::extras::set_night(ctx, chat, Some((value, to))).await?,
+            ));
         }
         "ngt" => {
-            let (from, _) = night_window(ctx, chat);
-            super::extras::set_night(ctx, chat, Some((from, value))).await;
+            let (from, _) = night_window(ctx, chat).await?;
+            return Ok(delivery_status(
+                super::extras::set_night(ctx, chat, Some((from, value))).await?,
+            ));
         }
         _ => {
-            let _ = ctx
-                .settings
-                .set_value(chat, setting.key, &value.to_string())
-                .await;
+            ctx.settings
+                .try_set_value(chat, setting.key, &value.to_string())
+                .await?;
         }
     }
+    Ok(ApplyStatus::Applied)
 }
 
-pub fn shown(ctx: &Ctx, chat: i64, setting: &Setting) -> String {
-    match &setting.kind {
-        Kind::Number { show, read, .. } => show(read(ctx, chat)),
-        _ => String::new(),
+pub async fn read_number(ctx: &Ctx, chat: i64, setting: &Setting) -> Result<u32, ApplyError> {
+    let Kind::Number { read, .. } = &setting.kind else {
+        return Ok(0);
+    };
+    match setting.id {
+        "ngf" => Ok(night_window(ctx, chat).await?.0),
+        "ngt" => Ok(night_window(ctx, chat).await?.1),
+        _ => Ok(read.map_or(0, |read| read(ctx, chat))),
     }
 }
 
-pub async fn apply(ctx: &Ctx, chat: i64, action: &str) -> Option<&'static str> {
+pub async fn shown(ctx: &Ctx, chat: i64, setting: &Setting) -> Result<String, ApplyError> {
+    match &setting.kind {
+        Kind::Number { show, .. } => Ok(show(read_number(ctx, chat, setting).await?)),
+        _ => Ok(String::new()),
+    }
+}
+
+pub async fn apply(
+    ctx: &Ctx,
+    chat: i64,
+    action: &str,
+) -> Result<Option<(&'static str, ApplyStatus)>, ApplyError> {
     if let Some((id, value)) = action.split_once(':')
         && let Some((setting, (min, max))) = number(id)
         && let Ok(value) = value.parse::<u32>()
     {
-        store(ctx, chat, setting, value.clamp(min, max)).await;
-        return Some(setting.section);
+        let status = store(ctx, chat, setting, value.clamp(min, max)).await?;
+        return Ok(Some((setting.section, status)));
     }
 
     for setting in SETTINGS {
         match &setting.kind {
             Kind::Flag if setting.id == action => {
                 let now_on = !ctx.settings.is_locked(chat, setting.key);
-
-                if super::locks::LOCKS.iter().any(|lock| lock.key == setting.key) {
-                    super::locks::set(ctx, chat, setting.key, now_on).await;
+                if super::locks::LOCKS
+                    .iter()
+                    .any(|lock| lock.key == setting.key)
+                {
+                    super::locks::try_set(ctx, chat, setting.key, now_on).await?;
                 } else {
-                    ctx.settings.set(chat, setting.key, now_on).await;
+                    ctx.settings.try_set(chat, setting.key, now_on).await?;
                 }
-                return Some(setting.section);
+                return Ok(Some((setting.section, ApplyStatus::Applied)));
             }
             Kind::Pick { options, .. } => {
                 if let Some(pick) = options.iter().find(|pick| pick.id == action) {
-                    ctx.settings.set_value(chat, setting.key, pick.value).await;
-                    return Some(setting.section);
+                    ctx.settings
+                        .try_set_value(chat, setting.key, pick.value)
+                        .await?;
+                    return Ok(Some((setting.section, ApplyStatus::Applied)));
                 }
             }
             _ => {}
         }
     }
-    None
+    Ok(None)
 }
 
 pub fn chosen(ctx: &Ctx, chat: i64, setting: &Setting) -> &'static str {
@@ -863,7 +945,7 @@ pub fn rows(
     setting: &Setting,
     payload: &dyn Fn(&str) -> Vec<u8>,
 ) -> Vec<Vec<Button>> {
-    match &setting.kind {
+    let rows = match &setting.kind {
         Kind::Flag => {
             let on = ctx.settings.is_locked(chat, setting.key);
             vec![vec![toggle(
@@ -880,6 +962,9 @@ pub fn rows(
             read,
             ..
         } => {
+            let Some(read) = read else {
+                return Vec::new();
+            };
             let current = read(ctx, chat);
             let mut rows = vec![vec![Button::data(setting.label, payload(setting.section))]];
             rows.extend(presets.chunks(*per_row).map(|block| {
@@ -894,7 +979,6 @@ pub fn rows(
                     })
                     .collect()
             }));
-
             rows.push(vec![Button::data(
                 format!("✎  عدد دلخواه · {}", show(current)),
                 payload(&format!("in:{}", setting.id)),
@@ -917,6 +1001,81 @@ pub fn rows(
                     .collect(),
             ]
         }
+    };
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            row.into_iter()
+                .enumerate()
+                .map(|(column, button)| {
+                    let icon = match &setting.kind {
+                        Kind::Flag => flag_icon(setting, ctx.settings.is_locked(chat, setting.key)),
+                        Kind::Number { .. } if row_index == 0 => number_icon(setting.id),
+                        Kind::Pick { options, .. } => {
+                            super::premium::icon_for(super::premium::Context {
+                                action: options[column].value,
+                                ..Default::default()
+                            })
+                        }
+                        _ => None,
+                    };
+                    super::premium::decorate(button, icon)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+pub fn flag_icon(setting: &Setting, on: bool) -> Option<super::premium::Icon> {
+    use super::premium::{Icon, protection};
+    if super::locks::LOCKS
+        .iter()
+        .any(|lock| lock.key == setting.key)
+    {
+        return Some(super::premium::lock_icon(setting.key, on));
+    }
+    Some(match setting.id {
+        "fl_on" | "bt_on" | "cp_on" | "rd_on" | "lim_on" => protection(on),
+        "strict" => {
+            if on {
+                Icon::ModerationHammer
+            } else {
+                Icon::Pause
+            }
+        }
+        "vm_on" => {
+            if on {
+                Icon::Voice
+            } else {
+                Icon::Pause
+            }
+        }
+        "tmed_on" => {
+            if on {
+                Icon::Timer
+            } else {
+                Icon::Pause
+            }
+        }
+        "nt_on" => {
+            if on {
+                Icon::Chat
+            } else {
+                Icon::Muted
+            }
+        }
+        "wp_ban" | "wp_mute" => Icon::Delete,
+        "cq_shadow" | "ad_shadow" | "tr_shadow" if on => Icon::Pause,
+        _ => return None,
+    })
+}
+
+pub fn number_icon(id: &str) -> Option<super::premium::Icon> {
+    match id {
+        "fl_win" | "bt_win" | "s_time" | "rd_win" | "rd_time" | "cp_t" | "nt_t" | "gpe" | "wct"
+        | "gpt" | "tmed_min" => Some(super::premium::Icon::Timer),
+        "apt" | "dr" | "ngf" | "ngt" => Some(super::premium::Icon::Calendar),
+        _ => None,
     }
 }
 

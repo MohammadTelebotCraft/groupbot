@@ -1,9 +1,10 @@
-use grammers_client::message::{InputMessage, Message};
+use grammers_client::message::Message;
 use grammers_client::peer::Role;
 use grammers_client::session::types::{PeerId, PeerKind, PeerRef};
 use grammers_client::tl;
 
 use super::{Ctx, esc, name_of};
+use crate::response::ResponseKind;
 
 pub const LOCK: &str = "bot";
 
@@ -41,17 +42,45 @@ pub async fn allow(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
     let Some((target, target_name)) = super::resolve(ctx, message, named).await else {
-        let _ = message
-            .reply("کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.",
+            ),
+        )
+        .await;
         return true;
     };
     let Some(target_id) = target.id.bare_id() else {
-        let _ = message.reply("کاربر پیدا نشد.").await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            super::premium::icon_text(Some(super::premium::Icon::ErrorRed), "کاربر پیدا نشد."),
+        )
+        .await;
         return true;
     };
 
-    let changed = ctx.settings.set(chat, &allow_key(target_id), adding).await;
+    let changed = match ctx
+        .settings
+        .try_set(chat, &allow_key(target_id), adding)
+        .await
+    {
+        Ok(changed) => changed,
+        Err(error) => {
+            ::log::warn!("allowed bots: write for {chat}/{target_id} failed: {error}");
+            super::respond(ctx, message, ResponseKind::CommandError, if error.commit_outcome_unknown() {
+                    "نتیجه ذخیره فهرست ربات های مجاز نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                } else {
+                    "فهرست ربات های مجاز ذخیره نشد؛ دوباره تلاش کنید."
+                }).await;
+            return true;
+        }
+    };
     let mark = if adding { "✓" } else { "✗" };
     let what = match (adding, changed) {
         (true, true) => "به رباتای مجاز اضافه شد",
@@ -59,7 +88,16 @@ pub async fn allow(ctx: &Ctx, message: &Message) -> bool {
         (false, true) => "از رباتای مجاز حذف شد",
         (false, false) => "مجاز نبود",
     };
-    let _ = message.reply(format!("{mark} {target_name} {what}.")).await;
+    super::respond(
+        ctx,
+        message,
+        ResponseKind::AdminTool,
+        super::premium::icon_text(
+            Some(super::premium::Icon::Bot),
+            format!("{mark} {target_name} {what}."),
+        ),
+    )
+    .await;
     true
 }
 
@@ -144,7 +182,7 @@ pub async fn on_participant_update(
         .client
         .send_message(
             chat_ref,
-            InputMessage::new().html(if removed_adder {
+            super::premium::html(if removed_adder {
                 format!("✗ افزودن ربات ممنوع است. {name} حذف شد و اضافه کننده اش از گروه اخراج شد.")
             } else {
                 format!("✗ افزودن ربات ممنوع است. {name} حذف شد.")
@@ -168,7 +206,12 @@ async fn remove(ctx: &Ctx, chat: i64, chat_ref: PeerRef, target: PeerRef, name: 
         super::restrict::By {
             reason: "قفل ربات",
             target_name: name,
-
+            case: Some(super::cases::CaseContext {
+                source: "automatic",
+                rule: LOCK,
+                reason: "قفل ربات",
+                evidence: None,
+            }),
             admins_too: true,
             ..Default::default()
         },
@@ -197,11 +240,9 @@ pub fn cleaner_candidate(ctx: &Ctx, message: &Message) -> bool {
     if message.peer_id().bot_api_dialog_id().is_none() {
         return false;
     }
-
     if !super::bot_authored(message) {
         return false;
     }
-
     match message.sender_id().and_then(PeerId::bare_id) {
         Some(user) => user != ctx.me_id() && !ctx.is_cleaner(user),
         None => false,
@@ -230,12 +271,11 @@ pub async fn on_cleaner_message(ctx: &Ctx, message: &Message) {
     };
 
     let locked = ctx.settings.is_locked(chat, LOCK);
-
     let spared = is_allowed(ctx, chat, user)
         || (!ctx.settings.is_locked(chat, EVEN_ADMINS) && spared_on_sight(ctx, chat, user));
 
     if locked && !spared {
-        let _ = message.delete().await;
+        let _ = message.delete_critical().await;
         let Some(chat_ref) = ctx.chat_ref(chat) else {
             eprintln!("bot lock: {chat}: saw a bot post but have no ref to ban with");
             return;
@@ -258,8 +298,7 @@ pub async fn on_cleaner_message(ctx: &Ctx, message: &Message) {
     let Some(reason) = super::locks::scan(ctx, chat, &view) else {
         return;
     };
-
-    if let Err(e) = message.delete().await {
+    if let Err(e) = message.delete_critical().await {
         eprintln!("bot lock: {chat}: could not delete a bot's message: {e}");
         return;
     }
@@ -302,16 +341,13 @@ pub async fn sweep(ctx: &Ctx, chat: i64) -> usize {
     if !ctx.settings.is_locked(chat, LOCK) {
         return 0;
     }
-
     if ctx.me_id() == 0 {
         eprintln!("bot lock: {chat}: skipping the sweep, own id still unknown");
         return 0;
     }
-
     let Some(chat_ref) = ctx.chat_ref(chat) else {
         return 0;
     };
-
     if chat_ref.id.kind() != PeerKind::Channel {
         return 0;
     }
@@ -323,17 +359,27 @@ pub async fn sweep(ctx: &Ctx, chat: i64) -> usize {
         .filter(tl::enums::ChannelParticipantsFilter::ChannelParticipantsBots);
     let mut removed = 0;
     let mut seen = 0;
-
     let mut spared: Vec<String> = Vec::new();
     loop {
         match participants.next().await {
             Ok(Some(participant)) => {
                 seen += 1;
-                let user = participant.user.id().bare_id_unchecked();
-                let is_admin = matches!(participant.role, Role::Admin(_) | Role::Creator(_));
-
+                let Some(user) = participant
+                    .id()
+                    .bare_id()
+                    .filter(|_| participant.id().kind() == PeerKind::User)
+                else {
+                    continue;
+                };
+                let Some(expanded) = participant.user() else {
+                    if spared.len() < SPARED_REPORT_MAX {
+                        spared.push(format!("{user} (missing peer data)"));
+                    }
+                    continue;
+                };
+                let is_admin = matches!(&participant.role, Role::Admin(_) | Role::Creator(_));
                 let why = spared_because(
-                    participant.user.is_bot(),
+                    expanded.is_bot(),
                     user == ctx.me_id(),
                     ctx.is_cleaner(user),
                     is_admin,
@@ -351,7 +397,7 @@ pub async fn sweep(ctx: &Ctx, chat: i64) -> usize {
                     spared.push(format!("{user} (no ref)"));
                     continue;
                 };
-                if remove(ctx, chat, chat_ref, target, &participant.user.full_name()).await {
+                if remove(ctx, chat, chat_ref, target, &expanded.full_name()).await {
                     super::cleaner::wipe_user(ctx, chat, user).await;
                     removed += 1;
                 }
@@ -378,7 +424,7 @@ async fn kick(ctx: &Ctx, chat: i64, chat_ref: PeerRef, user: i64) -> bool {
     let Some(peer) = PeerId::user(user).map(PeerId::to_ambient_ref) else {
         return false;
     };
-    match ctx.client.kick_participant(chat_ref, peer).await {
+    match super::restrict::kick_member(ctx, chat_ref, peer).await {
         Ok(()) => true,
         Err(e) => {
             eprintln!("bot lock: {chat}: could not kick adder {user}: {e}");
@@ -433,7 +479,7 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
     let adder = name_of(message);
     let removed_adder = if ctx.settings.is_locked(chat, KICK_ADDER) {
         match message.sender_ref().await {
-            Ok(Some(sender)) => match ctx.client.kick_participant(chat_ref, sender).await {
+            Ok(Some(sender)) => match super::restrict::kick_member(ctx, chat_ref, sender).await {
                 Ok(()) => true,
                 Err(e) => {
                     eprintln!("bot lock: {chat}: could not kick adder: {e}");

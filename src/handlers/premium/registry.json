@@ -1,0 +1,1177 @@
+[
+  {
+    "key": "LOCKED",
+    "custom_emoji_id": "5296369303661067030",
+    "placeholder": "🔒",
+    "fallback": "🔒",
+    "semantic_tags": [
+      "restriction",
+      "protection",
+      "filter-enabled"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "UNLOCKED",
+    "custom_emoji_id": "5258476306152038031",
+    "placeholder": "🔒️",
+    "fallback": "🔓",
+    "semantic_tags": [
+      "permission-restored",
+      "restriction-disabled"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "MUTED",
+    "custom_emoji_id": "5886328760218688328",
+    "placeholder": "🔕",
+    "fallback": "🔕",
+    "semantic_tags": [
+      "mute",
+      "notifications-disabled"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "FIRE",
+    "custom_emoji_id": "5424972470023104089",
+    "placeholder": "🔥",
+    "fallback": "🔥",
+    "semantic_tags": [
+      "severe-flood",
+      "raid-triggered"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "TIMER",
+    "custom_emoji_id": "5262540380301191210",
+    "placeholder": "⏱️",
+    "fallback": "⏱️",
+    "semantic_tags": [
+      "duration",
+      "cooldown",
+      "rate-limit"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "DOCUMENT_ACTIVITY",
+    "custom_emoji_id": "5262838597060422237",
+    "placeholder": "📃",
+    "fallback": "📃",
+    "semantic_tags": [
+      "logs",
+      "recent-actions",
+      "reports"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "TELEGRAM_SEND",
+    "custom_emoji_id": "5981194327110456280",
+    "placeholder": "🚀",
+    "fallback": "📨",
+    "semantic_tags": [
+      "send",
+      "outgoing-message",
+      "telegram"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "PIN",
+    "custom_emoji_id": "5397782960512444700",
+    "placeholder": "📌",
+    "fallback": "📌",
+    "semantic_tags": [
+      "pin",
+      "unpin",
+      "announcement"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "DIAMOND",
+    "custom_emoji_id": "5427168083074628963",
+    "placeholder": "💎",
+    "fallback": "💎",
+    "semantic_tags": [
+      "premium"
+    ],
+    "confidence": "HIGH",
+    "usage": "UNUSED_FOR_MODERATION",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_LETTERS_FILTER",
+    "custom_emoji_id": "5785027077459682187",
+    "placeholder": "🔡",
+    "fallback": "🔡",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_LETTERS_REPLY",
+    "custom_emoji_id": "5785258464527786875",
+    "placeholder": "🔡️",
+    "fallback": "🔡️",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_STAR",
+    "custom_emoji_id": "5267500801240092311",
+    "placeholder": "⭐",
+    "fallback": "⭐",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_SPARKLES",
+    "custom_emoji_id": "5816913107938712568",
+    "placeholder": "✨",
+    "fallback": "✨",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_STAR_ALT",
+    "custom_emoji_id": "5816666216038669347",
+    "placeholder": "⭐️",
+    "fallback": "⭐️",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_DOWN",
+    "custom_emoji_id": "5820903824046432799",
+    "placeholder": "⬇️",
+    "fallback": "⬇️",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "HOURGLASS",
+    "custom_emoji_id": "5825656411517886523",
+    "placeholder": "⌛️",
+    "fallback": "⌛️",
+    "semantic_tags": [
+      "waiting",
+      "pending"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "BRIEFCASE",
+    "custom_emoji_id": "5830338333892418460",
+    "placeholder": "📦",
+    "fallback": "💼",
+    "semantic_tags": [
+      "administration"
+    ],
+    "confidence": "MEDIUM",
+    "usage": "REVIEW_REQUIRED",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_DIZZY",
+    "custom_emoji_id": "5830137127559504626",
+    "placeholder": "💫",
+    "fallback": "💫",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "CALENDAR",
+    "custom_emoji_id": "5834925633842453455",
+    "placeholder": "📅",
+    "fallback": "📅",
+    "semantic_tags": [
+      "date",
+      "expiry",
+      "schedule"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_STAR_THIRD",
+    "custom_emoji_id": "5219771963551000649",
+    "placeholder": "⭐︎",
+    "fallback": "⭐︎",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "SUCCESS",
+    "custom_emoji_id": "5220049680431326552",
+    "placeholder": "✅",
+    "fallback": "✅",
+    "semantic_tags": [
+      "success",
+      "confirm",
+      "saved"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_SLIDERS",
+    "custom_emoji_id": "5924796909683217205",
+    "placeholder": "🎚",
+    "fallback": "🎚",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "CLOSE",
+    "custom_emoji_id": "5219776129669276751",
+    "placeholder": "❌",
+    "fallback": "✕",
+    "semantic_tags": [
+      "close",
+      "cancel",
+      "dismiss"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_HIDDEN",
+    "custom_emoji_id": "5220118571706755791",
+    "placeholder": "🫥",
+    "fallback": "🫥",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_ERROR",
+    "custom_emoji_id": "5328141448787276063",
+    "placeholder": "❌",
+    "fallback": "❌",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_SIGNAL_HIGH",
+    "custom_emoji_id": "5240471571318973797",
+    "placeholder": "📶",
+    "fallback": "📶",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_SIGNAL_LOW",
+    "custom_emoji_id": "5240274793097341755",
+    "placeholder": "📶",
+    "fallback": "📶",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_OFFLINE",
+    "custom_emoji_id": "5219779578528018303",
+    "placeholder": "⚫",
+    "fallback": "⚫",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_LETTERS_LANGUAGE",
+    "custom_emoji_id": "5364230512787347881",
+    "placeholder": "🔡",
+    "fallback": "🔡",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_LETTERS_USERNAME",
+    "custom_emoji_id": "5364258799441957434",
+    "placeholder": "🔡",
+    "fallback": "🔡",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_THREE",
+    "custom_emoji_id": "5379910025340802255",
+    "placeholder": "3️⃣",
+    "fallback": "3️⃣",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_LETTERS_COMMAND",
+    "custom_emoji_id": "5381889189220479438",
+    "placeholder": "🔡",
+    "fallback": "🔡",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_LETTERS_FONT",
+    "custom_emoji_id": "5381920757230098049",
+    "placeholder": "🔡",
+    "fallback": "🔡",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_LETTERS_TEXT",
+    "custom_emoji_id": "5363996991120495825",
+    "placeholder": "🔡",
+    "fallback": "🔡",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_SYMBOLS",
+    "custom_emoji_id": "5402113421418190425",
+    "placeholder": "🔣",
+    "fallback": "🔣",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_ZERO",
+    "custom_emoji_id": "5381817669425058178",
+    "placeholder": "0️⃣",
+    "fallback": "0️⃣",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_MINUS",
+    "custom_emoji_id": "5390932676653898005",
+    "placeholder": "➖",
+    "fallback": "➖",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_LETTERS_CAPTION",
+    "custom_emoji_id": "5368693434779456471",
+    "placeholder": "🔡",
+    "fallback": "🔡",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_LETTERS_VOICE",
+    "custom_emoji_id": "5368341238871248978",
+    "placeholder": "🔡",
+    "fallback": "🔡",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "LIGHTNING",
+    "custom_emoji_id": "5411590687663608498",
+    "placeholder": "⚡",
+    "fallback": "⚡",
+    "semantic_tags": [
+      "immediate",
+      "rapid-action"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_TAKEOFF",
+    "custom_emoji_id": "5411563083908797492",
+    "placeholder": "🛫",
+    "fallback": "🛫",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_STAR_ADMIN",
+    "custom_emoji_id": "5408869739982246969",
+    "placeholder": "⭐",
+    "fallback": "⭐",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "WARNING",
+    "custom_emoji_id": "5393436114306486930",
+    "placeholder": "❗️",
+    "fallback": "❗️",
+    "semantic_tags": [
+      "warn",
+      "attention",
+      "violation"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_SYMBOLS_ALT",
+    "custom_emoji_id": "5388756214861552370",
+    "placeholder": "🔣",
+    "fallback": "🔣",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_SIX",
+    "custom_emoji_id": "5388691197646625260",
+    "placeholder": "6️⃣",
+    "fallback": "6️⃣",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "MODERATION_HAMMER",
+    "custom_emoji_id": "5197371802136892976",
+    "placeholder": "⛏",
+    "fallback": "🔨",
+    "semantic_tags": [
+      "ban",
+      "kick",
+      "enforcement",
+      "punishment"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_COIN_CRYPTO",
+    "custom_emoji_id": "5379773896352355687",
+    "placeholder": "🪙",
+    "fallback": "🪙",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "UNUSED_FOR_MODERATION",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_EURO",
+    "custom_emoji_id": "5197369495739455200",
+    "placeholder": "💶",
+    "fallback": "💶",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "UNUSED_FOR_MODERATION",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_BEAR_MARKET",
+    "custom_emoji_id": "5411089297476441876",
+    "placeholder": "🐻",
+    "fallback": "🐻",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "MEMBERS",
+    "custom_emoji_id": "5332724926216428039",
+    "placeholder": "📇",
+    "fallback": "👥",
+    "semantic_tags": [
+      "members",
+      "group-management"
+    ],
+    "confidence": "MEDIUM",
+    "usage": "REVIEW_REQUIRED",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_SHOPPING",
+    "custom_emoji_id": "5278702045883292456",
+    "placeholder": "🛍",
+    "fallback": "🛍",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "UNUSED_FOR_MODERATION",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_SCALES",
+    "custom_emoji_id": "5400250414929041085",
+    "placeholder": "⚖️",
+    "fallback": "⚖️",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_IMAGE_GENERIC",
+    "custom_emoji_id": "5262517101578443800",
+    "placeholder": "🖼",
+    "fallback": "🖼",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "UNUSED_FOR_MODERATION",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_COIN_ALT",
+    "custom_emoji_id": "5264713049637409446",
+    "placeholder": "🪙",
+    "fallback": "🪙",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "UNUSED_FOR_MODERATION",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_MONEY_TRADE",
+    "custom_emoji_id": "5287231198098117669",
+    "placeholder": "💰",
+    "fallback": "💰",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "UNUSED_FOR_MODERATION",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_CALCULATOR",
+    "custom_emoji_id": "5190741648237161191",
+    "placeholder": "🧮",
+    "fallback": "🧮",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "UNUSED_FOR_MODERATION",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_TAG",
+    "custom_emoji_id": "5240228673738527951",
+    "placeholder": "🏷",
+    "fallback": "🏷",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "UNUSED_FOR_MODERATION",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_MONEY_PRICE",
+    "custom_emoji_id": "5278467510604160626",
+    "placeholder": "💰",
+    "fallback": "💰",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "UNUSED_FOR_MODERATION",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_SWAP",
+    "custom_emoji_id": "5271837459783638319",
+    "placeholder": "↔️",
+    "fallback": "↔️",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "UNUSED_FOR_MODERATION",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "PREMIUM_STAR",
+    "custom_emoji_id": "5929169225045249724",
+    "placeholder": "⭐",
+    "fallback": "⭐",
+    "semantic_tags": [
+      "premium",
+      "vip"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_GIFT",
+    "custom_emoji_id": "5931268463325612795",
+    "placeholder": "🎁",
+    "fallback": "🎁",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "UNUSED_FOR_MODERATION",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_DESKTOP",
+    "custom_emoji_id": "5929097769674346091",
+    "placeholder": "🖥",
+    "fallback": "🖥",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_STAR_SYSTEM",
+    "custom_emoji_id": "5931526298802326770",
+    "placeholder": "⭐",
+    "fallback": "⭐",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_BOOK",
+    "custom_emoji_id": "5778184941154078090",
+    "placeholder": "📖",
+    "fallback": "📖",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "CAMERA",
+    "custom_emoji_id": "6005652452169224347",
+    "placeholder": "📷",
+    "fallback": "📷",
+    "semantic_tags": [
+      "photo",
+      "camera"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "ARCHIVE_HISTORY",
+    "custom_emoji_id": "6008163345885040772",
+    "placeholder": "🗃",
+    "fallback": "🗃️",
+    "semantic_tags": [
+      "archive",
+      "historical-records"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "SPEAKER_MUTED",
+    "custom_emoji_id": "5891206318353551398",
+    "placeholder": "🔈",
+    "fallback": "🔇",
+    "semantic_tags": [
+      "audio-blocked",
+      "sound-disabled"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "CHAT",
+    "custom_emoji_id": "5891169510483823323",
+    "placeholder": "💬",
+    "fallback": "💬",
+    "semantic_tags": [
+      "message",
+      "text-filter",
+      "chat"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "SPEAKER",
+    "custom_emoji_id": "5890997763331591703",
+    "placeholder": "🔊",
+    "fallback": "🔊",
+    "semantic_tags": [
+      "audio-enabled",
+      "sound-restored"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "MUSIC",
+    "custom_emoji_id": "5890831539507302154",
+    "placeholder": "🎵",
+    "fallback": "🎵",
+    "semantic_tags": [
+      "music",
+      "audio"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "IMAGE",
+    "custom_emoji_id": "5775949822993371030",
+    "placeholder": "🖼",
+    "fallback": "🖼️",
+    "semantic_tags": [
+      "image",
+      "media",
+      "photo"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_PHONE",
+    "custom_emoji_id": "6005775159384870794",
+    "placeholder": "📲",
+    "fallback": "📲",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_IMAGE_VIDEO",
+    "custom_emoji_id": "5766879414704935108",
+    "placeholder": "🖼",
+    "fallback": "🖼",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "IMAGE_PRIVATE",
+    "custom_emoji_id": "5960888357390126718",
+    "placeholder": "🖼",
+    "fallback": "🔒",
+    "semantic_tags": [
+      "protected-media"
+    ],
+    "confidence": "MEDIUM",
+    "usage": "REVIEW_REQUIRED",
+    "source": "written-specification"
+  },
+  {
+    "key": "IMAGE_DISABLED",
+    "custom_emoji_id": "5776239565782126896",
+    "placeholder": "🖼",
+    "fallback": "🚫",
+    "semantic_tags": [
+      "image-blocked",
+      "media-restriction"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "MIC_MUTED",
+    "custom_emoji_id": "5897853622057700958",
+    "placeholder": "🎙",
+    "fallback": "🎙️",
+    "semantic_tags": [
+      "microphone-restricted",
+      "voice-blocked"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_CALL",
+    "custom_emoji_id": "5897567714674741148",
+    "placeholder": "📞",
+    "fallback": "📞",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "VOICE",
+    "custom_emoji_id": "5909015791088439934",
+    "placeholder": "🎙",
+    "fallback": "🗣️",
+    "semantic_tags": [
+      "voice-message",
+      "voice-permission"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_SPEAKING",
+    "custom_emoji_id": "6048434449605989564",
+    "placeholder": "🗣",
+    "fallback": "🗣",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "NETWORK",
+    "custom_emoji_id": "5793991000623943465",
+    "placeholder": "🛜",
+    "fallback": "🛜",
+    "semantic_tags": [
+      "connectivity",
+      "network"
+    ],
+    "confidence": "MEDIUM",
+    "usage": "REVIEW_REQUIRED",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_INFINITY",
+    "custom_emoji_id": "5908972566537572230",
+    "placeholder": "♾",
+    "fallback": "♾",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "USER",
+    "custom_emoji_id": "5778575233422200567",
+    "placeholder": "👤",
+    "fallback": "👤",
+    "semantic_tags": [
+      "user",
+      "profile",
+      "member"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "ANGRY",
+    "custom_emoji_id": "5924666978332578279",
+    "placeholder": "😡",
+    "fallback": "😡",
+    "semantic_tags": [
+      "toxicity",
+      "insult-filter",
+      "abusive-behavior"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "INVISIBLE",
+    "custom_emoji_id": "5814652112600043672",
+    "placeholder": "🫥",
+    "fallback": "🫥",
+    "semantic_tags": [
+      "hidden-mode"
+    ],
+    "confidence": "MEDIUM",
+    "usage": "REVIEW_REQUIRED",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_BEAR_ALT",
+    "custom_emoji_id": "5967800016331346187",
+    "placeholder": "🐻",
+    "fallback": "🐻",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "MASK",
+    "custom_emoji_id": "5891093751555694829",
+    "placeholder": "🎭",
+    "fallback": "🎭",
+    "semantic_tags": [
+      "identity",
+      "impersonation",
+      "anonymous-admin"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "RAW_BAT",
+    "custom_emoji_id": "5897854227648090069",
+    "placeholder": "🦇",
+    "fallback": "🦇",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "RAW_WITCH",
+    "custom_emoji_id": "5895247345708175293",
+    "placeholder": "🧙‍♀️",
+    "fallback": "🧙‍♀️",
+    "semantic_tags": [],
+    "confidence": "UNCLASSIFIED",
+    "usage": "REVIEW_REQUIRED",
+    "source": "legacy-registry-unverified"
+  },
+  {
+    "key": "PAUSE",
+    "custom_emoji_id": "5359543311897998264",
+    "placeholder": "⏸",
+    "fallback": "⏸️",
+    "semantic_tags": [
+      "paused",
+      "suspended"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "ERROR_RED",
+    "custom_emoji_id": "5819154526816444042",
+    "placeholder": "❌",
+    "fallback": "❌",
+    "semantic_tags": [
+      "error",
+      "failed",
+      "rejected"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "written-specification"
+  },
+  {
+    "key": "GROUP",
+    "custom_emoji_id": null,
+    "placeholder": "👥",
+    "fallback": "👥",
+    "semantic_tags": [
+      "group",
+      "members"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "unicode-only-no-confirmed-custom-visual"
+  },
+  {
+    "key": "HELP",
+    "custom_emoji_id": null,
+    "placeholder": "📖",
+    "fallback": "📖",
+    "semantic_tags": [
+      "help",
+      "onboarding"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "unicode-only-no-confirmed-custom-visual"
+  },
+  {
+    "key": "SETTINGS",
+    "custom_emoji_id": null,
+    "placeholder": "⚙️",
+    "fallback": "⚙️",
+    "semantic_tags": [
+      "settings",
+      "configuration"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "unicode-only-no-confirmed-custom-visual"
+  },
+  {
+    "key": "BACK",
+    "custom_emoji_id": null,
+    "placeholder": "‹",
+    "fallback": "‹",
+    "semantic_tags": [
+      "back",
+      "navigation"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "unicode-only-no-confirmed-custom-visual"
+  },
+  {
+    "key": "DELETE",
+    "custom_emoji_id": null,
+    "placeholder": "🧹",
+    "fallback": "🧹",
+    "semantic_tags": [
+      "delete",
+      "cleanup"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "unicode-only-no-confirmed-custom-visual"
+  },
+  {
+    "key": "VIDEO",
+    "custom_emoji_id": null,
+    "placeholder": "🎬",
+    "fallback": "🎬",
+    "semantic_tags": [
+      "video"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "unicode-only-no-confirmed-custom-visual"
+  },
+  {
+    "key": "FILE",
+    "custom_emoji_id": null,
+    "placeholder": "📄",
+    "fallback": "📄",
+    "semantic_tags": [
+      "file",
+      "document"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "unicode-only-no-confirmed-custom-visual"
+  },
+  {
+    "key": "WELCOME",
+    "custom_emoji_id": null,
+    "placeholder": "👋",
+    "fallback": "👋",
+    "semantic_tags": [
+      "welcome"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "unicode-only-no-confirmed-custom-visual"
+  },
+  {
+    "key": "STATS",
+    "custom_emoji_id": null,
+    "placeholder": "📊",
+    "fallback": "📊",
+    "semantic_tags": [
+      "statistics"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "unicode-only-no-confirmed-custom-visual"
+  },
+  {
+    "key": "LINK",
+    "custom_emoji_id": null,
+    "placeholder": "🔗",
+    "fallback": "🔗",
+    "semantic_tags": [
+      "link"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "unicode-only-no-confirmed-custom-visual"
+  },
+  {
+    "key": "NIGHT",
+    "custom_emoji_id": null,
+    "placeholder": "🌙",
+    "fallback": "🌙",
+    "semantic_tags": [
+      "night"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "unicode-only-no-confirmed-custom-visual"
+  },
+  {
+    "key": "BOT",
+    "custom_emoji_id": null,
+    "placeholder": "🤖",
+    "fallback": "🤖",
+    "semantic_tags": [
+      "bot",
+      "automod"
+    ],
+    "confidence": "HIGH",
+    "usage": "ACTIVE",
+    "source": "unicode-only-no-confirmed-custom-visual"
+  }
+]

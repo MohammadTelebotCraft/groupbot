@@ -1,18 +1,15 @@
-use grammers_client::message::{InputMessage, Message};
+use grammers_client::message::Message;
 use grammers_client::tl;
+
+use crate::response::ResponseKind;
+use crate::state::{DefaultRightsError, NightWindow};
 
 use super::{Ctx, esc, name_of};
 
 pub const RULES: &str = "rules";
 
-pub const NIGHT: &str = "night";
-pub const NIGHT_STATE: &str = "night_state";
-const NIGHT_PENDING_ON: &str = "pending_on";
-const NIGHT_PENDING_OFF: &str = "pending_off";
-
 pub const SHOW_RULES: &[&str] = &["قوانین", "قانون"];
 pub const SET_RULES: &[&str] = &["تنظیم قوانین", "تنظیم قانون"];
-
 pub const NOTE_CMD: &[&str] = &["یادداشت"];
 pub const NOTE_SET: &[&str] = &["تنظیم یادداشت", "ثبت یادداشت"];
 pub const NOTE_CLEAR: &[&str] = &["حذف یادداشت"];
@@ -22,13 +19,11 @@ pub const UNPIN: &[&str] = &["حذف سنجاق", "حذف پین", "برداشت
 pub const SLOW: &[&str] = &["اسلوموشن", "اسلومود", "کندی"];
 pub const NIGHT_CMD: &[&str] = &["قفل شب"];
 pub const TAG_ALL: &[&str] = &["تگ همه", "منشن همه", "فراخوان", "تگ", "منشن"];
-
 pub const TAG_STOP: &[&str] = &["توقف", "استاپ"];
 
 const TAG_SEPARATOR: &str = " ⊹ ";
 
 const TAG_PER_MESSAGE: usize = 6;
-
 const TAG_BATCH_RANGE: (usize, usize) = (1, 50);
 
 const TAG_MAX_MEMBERS: usize = 10_000;
@@ -54,77 +49,92 @@ pub fn slow_label(seconds: u32) -> String {
     }
 }
 
-pub async fn apply_slow(ctx: &Ctx, chat: i64, seconds: u32) -> Option<bool> {
+pub async fn apply_slow(
+    ctx: &Ctx,
+    chat: i64,
+    seconds: u32,
+) -> Result<Option<bool>, crate::state::SettingsWriteError> {
     let seconds = SLOW_STEPS
         .iter()
         .rev()
         .find(|step| **step <= seconds)
         .copied()
         .unwrap_or(0);
-    let done = super::cleaner::set_slow(ctx, chat, seconds).await?;
+    let Some(done) = super::cleaner::set_slow(ctx, chat, seconds).await else {
+        return Ok(None);
+    };
     if done {
         ctx.settings
-            .set_value(chat, SLOW_STATE, &seconds.to_string())
-            .await;
+            .try_set_value(chat, SLOW_STATE, &seconds.to_string())
+            .await?;
     }
-    Some(done)
+    Ok(Some(done))
 }
 
 pub fn rules(ctx: &Ctx, chat: i64) -> Option<String> {
     ctx.settings.value(chat, RULES).filter(|r| !r.is_empty())
 }
 
-pub async fn note(ctx: &Ctx, chat: i64, user: i64) -> Option<String> {
+pub async fn read_note(ctx: &Ctx, chat: i64, user: i64) -> Result<Option<String>, sqlx::Error> {
     ctx.settings
         .note(chat, user)
         .await
-        .filter(|n| !n.is_empty())
+        .map(|note| note.filter(|value| !value.is_empty()))
 }
 
-pub fn night(ctx: &Ctx, chat: i64) -> Option<(u32, u32)> {
-    let value = ctx.settings.value(chat, NIGHT)?;
-    let (from, to) = value.split_once('|')?;
-    let (from, to) = (from.parse().ok()?, to.parse().ok()?);
-
-    (from != to).then_some((from, to))
+pub async fn night(ctx: &Ctx, chat: i64) -> Result<Option<(u32, u32)>, DefaultRightsError> {
+    Ok(ctx.settings.default_rights(chat).await?.and_then(|state| {
+        state
+            .night
+            .map(|window| (u32::from(window.from), u32::from(window.to)))
+    }))
 }
 
-pub async fn set_night(ctx: &Ctx, chat: i64, window: Option<(u32, u32)>) {
-    match window {
-        Some((from, to)) => {
-            let value = format!("{}|{}", from % 1440, to % 1440);
-            let changed = ctx.settings.value(chat, NIGHT).as_deref() != Some(&value);
-            ctx.settings.set_value(chat, NIGHT, &value).await;
+#[derive(Debug)]
+pub enum NightUpdateError {
+    State(DefaultRightsError),
+    InvalidWindow,
+}
 
-            if changed {
-                let pending = match ctx.settings.value(chat, NIGHT_STATE).as_deref() {
-                    Some("on") | Some(NIGHT_PENDING_ON) => NIGHT_PENDING_ON,
-                    _ => NIGHT_PENDING_OFF,
-                };
-                ctx.settings.set_value(chat, NIGHT_STATE, pending).await;
-            }
-        }
-
-        None => {
-            ctx.settings.set(chat, NIGHT, false).await;
-            if matches!(
-                ctx.settings.value(chat, NIGHT_STATE).as_deref(),
-                Some("on") | Some(NIGHT_PENDING_ON)
-            ) {
-                if let Some(chat_ref) = ctx.chat_ref(chat) {
-                    super::locks::set_group_lock(ctx, chat_ref, false).await;
-                }
-                ctx.settings.set(chat, NIGHT_STATE, false).await;
-            }
+impl std::fmt::Display for NightUpdateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::State(error) => error.fmt(formatter),
+            Self::InvalidWindow => write!(formatter, "night window endpoints must differ"),
         }
     }
 }
 
-pub fn night_holds_group(ctx: &Ctx, chat: i64) -> bool {
-    matches!(
-        ctx.settings.value(chat, NIGHT_STATE).as_deref(),
-        Some("on") | Some(NIGHT_PENDING_ON)
-    )
+impl std::error::Error for NightUpdateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::State(error) => Some(error),
+            Self::InvalidWindow => None,
+        }
+    }
+}
+
+impl From<DefaultRightsError> for NightUpdateError {
+    fn from(error: DefaultRightsError) -> Self {
+        Self::State(error)
+    }
+}
+
+impl NightUpdateError {
+    pub fn acceptance_unknown(&self) -> bool {
+        matches!(self, Self::State(error) if error.acceptance_unknown())
+    }
+}
+
+pub async fn set_night(
+    ctx: &Ctx,
+    chat: i64,
+    window: Option<(u32, u32)>,
+) -> Result<super::rights::DeliveryOutcome, NightUpdateError> {
+    let window = window
+        .map(|(from, to)| NightWindow::new(from, to).ok_or(NightUpdateError::InvalidWindow))
+        .transpose()?;
+    Ok(super::rights::set_night(ctx, ctx.chat_ref(chat), chat, window).await?)
 }
 
 pub fn clock(minutes: u32) -> String {
@@ -142,13 +152,28 @@ pub async fn handle(
     };
 
     if SHOW_RULES.contains(&text) {
-        let _ = match rules(ctx, chat) {
+        match rules(ctx, chat) {
             Some(rules) => {
-                message
-                    .reply(InputMessage::new().html(format!("<b>قوانین گروه</b>\n\n{rules}")))
-                    .await
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::UtilityResult,
+                    super::premium::icon_html(
+                        Some(super::premium::Icon::File),
+                        format!("<b>قوانین گروه</b>\n\n{rules}"),
+                    ),
+                )
+                .await
             }
-            None => message.reply("قوانینی ثبت نشده است.").await,
+            None => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    "قوانینی ثبت نشده است.",
+                )
+                .await
+            }
         };
         return true;
     }
@@ -162,9 +187,14 @@ pub async fn handle(
         if !admin(super::limits::SET).await {
             return true;
         }
-
         state.stop_tagging();
-        let _ = message.reply("✗ تگ متوقف شد.").await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::UtilityResult,
+            super::premium::icon_text(Some(super::premium::Icon::Pause), "تگ متوقف شد."),
+        )
+        .await;
         return true;
     }
 
@@ -195,13 +225,39 @@ pub async fn handle(
             rest.to_owned()
         };
         if body.is_empty() {
-            let _ = message
-                .reply("متن قوانین را بنویسید یا روی آن ریپلای کنید.")
-                .await;
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                "متن قوانین را بنویسید یا روی آن ریپلای کنید.",
+            )
+            .await;
             return true;
         }
-        ctx.settings.set_value(chat, RULES, &body).await;
-        let _ = message.reply("✓ قوانین ذخیره شد.").await;
+        match ctx.settings.try_set_value(chat, RULES, &body).await {
+            Ok(_) => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::SettingsChanged,
+                    super::premium::icon_text(
+                        Some(super::premium::Icon::Success),
+                        "قوانین ذخیره شد.",
+                    ),
+                )
+                .await
+            }
+            Err(error) => {
+                ::log::warn!("rules: write for {chat} failed: {error}");
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    "قوانین ذخیره نشد؛ دوباره تلاش کنید.",
+                )
+                .await
+            }
+        }
         return true;
     }
 
@@ -215,10 +271,35 @@ pub async fn handle(
         let Some((target, name)) = super::resolve(ctx, message, named).await else {
             return true;
         };
-        if let Some(user) = target.id.bare_id() {
-            ctx.settings.set_note(chat, user, "").await;
+        let removed = if let Some(user) = target.id.bare_id() {
+            ctx.settings.set_note(chat, user, "").await
+        } else {
+            return true;
+        };
+        match removed {
+            Ok(()) => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::SettingsChanged,
+                    super::premium::icon_text(
+                        Some(super::premium::Icon::Delete),
+                        format!("یادداشت {name} حذف شد."),
+                    ),
+                )
+                .await
+            }
+            Err(error) => {
+                ::log::warn!("notes: delete for {chat} failed: {error}");
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    "یادداشت حذف نشد؛ دوباره تلاش کنید.",
+                )
+                .await
+            }
         }
-        let _ = message.reply(format!("✗ یادداشت {name} حذف شد.")).await;
         return true;
     }
 
@@ -227,7 +308,6 @@ pub async fn handle(
         if written.is_none() && !rest.is_empty() {
             return false;
         }
-
         let Some(named) = super::named(message, None) else {
             return false;
         };
@@ -235,38 +315,89 @@ pub async fn handle(
             return true;
         }
         let Some((target, name)) = super::resolve(ctx, message, named).await else {
-            let _ = message.reply("روی پیام کاربر ریپلای کنید.").await;
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                "روی پیام کاربر ریپلای کنید.",
+            )
+            .await;
             return true;
         };
         let Some(user) = target.id.bare_id() else {
             return true;
         };
-
         if written.is_some() && rest.is_empty() {
-            let _ = message
-                .reply("متن یادداشت را بعد از دستور بنویسید.")
-                .await;
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                "متن یادداشت را بعد از دستور بنویسید.",
+            )
+            .await;
             return true;
         }
         if rest.is_empty() {
-            let _ = match note(ctx, chat, user).await {
-                Some(note) => {
-                    message
-                        .reply(InputMessage::new().html(format!(
+            match read_note(ctx, chat, user).await {
+                Ok(Some(note)) => {
+                    super::respond(
+                        ctx,
+                        message,
+                        ResponseKind::PersonalInformation,
+                        super::premium::html(format!(
                             "<b>یادداشت {}</b>\n\n{}",
                             esc(&name),
                             esc(&note)
-                        )))
-                        .await
+                        )),
+                    )
+                    .await
                 }
-                None => message.reply("یادداشتی ثبت نشده است.").await,
-            };
+                Ok(None) => {
+                    super::respond(
+                        ctx,
+                        message,
+                        ResponseKind::PersonalInformation,
+                        "یادداشتی ثبت نشده است.",
+                    )
+                    .await
+                }
+                Err(error) => {
+                    ::log::warn!("notes: read for {chat}/{user} failed: {error}");
+                    super::respond(
+                        ctx,
+                        message,
+                        ResponseKind::CommandError,
+                        "یادداشت خوانده نشد؛ دوباره تلاش کنید.",
+                    )
+                    .await
+                }
+            }
             return true;
         }
-        ctx.settings.set_note(chat, user, rest).await;
-        let _ = message
-            .reply(format!("✓ یادداشت برای {name} ذخیره شد."))
-            .await;
+        match ctx.settings.set_note(chat, user, rest).await {
+            Ok(()) => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::SettingsChanged,
+                    super::premium::icon_text(
+                        Some(super::premium::Icon::Success),
+                        format!("یادداشت برای {name} ذخیره شد."),
+                    ),
+                )
+                .await
+            }
+            Err(error) => {
+                ::log::warn!("notes: write for {chat}/{user} failed: {error}");
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    "یادداشت ذخیره نشد؛ دوباره تلاش کنید.",
+                )
+                .await
+            }
+        }
         return true;
     }
 
@@ -308,13 +439,90 @@ async fn set_night_from(ctx: &Ctx, message: &Message, chat: i64, rest: &str) -> 
     if rest.is_empty() {
         return false;
     }
-
     if rest == "خاموش" || rest.starts_with("خاموش ") {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-        set_night(ctx, chat, None).await;
-        let _ = message.reply("✗ قفل شب خاموش شد.").await;
+        if let Err(error) = super::rights::seed(ctx, message, chat).await {
+            log::warn!("night: could not seed default rights for {chat}: {error}");
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                "اختیارات گروه خوانده نشد؛ دوباره تلاش کنید.",
+            )
+            .await;
+            return true;
+        }
+        let result = set_night(ctx, chat, None).await;
+        match result {
+            Ok(super::rights::DeliveryOutcome::Applied) => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::SettingsChanged,
+                    super::premium::icon_text(
+                        Some(super::premium::Icon::Unlocked),
+                        "قفل شب خاموش شد.",
+                    ),
+                )
+                .await
+            }
+            Ok(
+                super::rights::DeliveryOutcome::PendingRetry { .. }
+                | super::rights::DeliveryOutcome::Superseded,
+            ) => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::SettingsChanged,
+                    super::premium::icon_text(
+                        Some(super::premium::Icon::Timer),
+                        "قفل شب خاموش شد و بازکردن گروه در انتظار تلاش دوباره است.",
+                    ),
+                )
+                .await
+            }
+            Ok(super::rights::DeliveryOutcome::AcceptedDeliveryUnknown { reason }) => {
+                log::warn!("night: accepted disable for {chat} has unknown delivery: {reason}");
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::SettingsChanged,
+                    super::premium::icon_text(
+                        Some(super::premium::Icon::Timer),
+                        "قفل شب خاموش شد، اما وضعیت بازشدن گروه در تلگرام مشخص نیست.",
+                    ),
+                )
+                .await
+            }
+            Err(error) if error.acceptance_unknown() => {
+                log::warn!("night: schedule disable outcome unknown for {chat}: {error}");
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    super::premium::icon_text(
+                        Some(super::premium::Icon::Timer),
+                        "وضعیت ذخیره سازی مشخص نیست؛ پنل را دوباره بررسی کنید.",
+                    ),
+                )
+                .await
+            }
+            Err(error) => {
+                log::warn!("night: could not disable schedule for {chat}: {error}");
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    super::premium::icon_text(
+                        Some(super::premium::Icon::ErrorRed),
+                        "قفل شب خاموش نشد؛ دوباره تلاش کنید.",
+                    ),
+                )
+                .await
+            }
+        }
         return true;
     }
 
@@ -329,63 +537,184 @@ async fn set_night_from(ctx: &Ctx, message: &Message, chat: i64, rest: &str) -> 
         };
         times.push(minutes);
     }
-
     if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
+    if let Err(error) = super::rights::seed(ctx, message, chat).await {
+        log::warn!("night: could not seed default rights for {chat}: {error}");
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            "اختیارات گروه خوانده نشد؛ دوباره تلاش کنید.",
+        )
+        .await;
+        return true;
+    }
     let [from, to] = times[..] else {
-        let _ = message
-            .reply("مثال: «قفل شب 23 تا 7» یا «قفل شب 23:30 تا 7:15»")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            "مثال: «قفل شب 23 تا 7» یا «قفل شب 23:30 تا 7:15»",
+        )
+        .await;
         return true;
     };
-
     if from == to {
-        let _ = message
-            .reply("شروع و پایان یکی است. مثال: «قفل شب 23 تا 7»")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            "شروع و پایان یکی است. مثال: «قفل شب 23 تا 7»",
+        )
+        .await;
         return true;
     }
     let times = [from, to];
-    set_night(ctx, chat, Some((times[0], times[1]))).await;
-    let _ = message
-        .reply(format!(
-            "✓ قفل شب از {} تا {} (به وقت تهران).",
-            clock(times[0]),
-            clock(times[1])
-        ))
-        .await;
+    let result = set_night(ctx, chat, Some((times[0], times[1]))).await;
+    match result {
+        Ok(super::rights::DeliveryOutcome::Applied) => {
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::SettingsChanged,
+                super::premium::icon_text(
+                    Some(super::premium::Icon::Night),
+                    format!(
+                        "قفل شب از {} تا {} (به وقت تهران).",
+                        clock(times[0]),
+                        clock(times[1])
+                    ),
+                ),
+            )
+            .await
+        }
+        Ok(
+            super::rights::DeliveryOutcome::PendingRetry { .. }
+            | super::rights::DeliveryOutcome::Superseded,
+        ) => {
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::SettingsChanged,
+                super::premium::icon_text(
+                    Some(super::premium::Icon::Timer),
+                    "زمان قفل شب ذخیره شد و تحویل آن به تلگرام دوباره تلاش می شود.",
+                ),
+            )
+            .await
+        }
+        Ok(super::rights::DeliveryOutcome::AcceptedDeliveryUnknown { reason }) => {
+            log::warn!("night: accepted schedule for {chat} has unknown delivery: {reason}");
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::SettingsChanged,
+                super::premium::icon_text(
+                    Some(super::premium::Icon::Timer),
+                    "زمان قفل شب ذخیره شد، اما وضعیت تحویل آن به تلگرام مشخص نیست.",
+                ),
+            )
+            .await
+        }
+        Err(error) if error.acceptance_unknown() => {
+            log::warn!("night: schedule write outcome unknown for {chat}: {error}");
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                super::premium::icon_text(
+                    Some(super::premium::Icon::Timer),
+                    "وضعیت ذخیره سازی مشخص نیست؛ پنل را دوباره بررسی کنید.",
+                ),
+            )
+            .await
+        }
+        Err(error) => {
+            log::warn!("night: could not save schedule for {chat}: {error}");
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                super::premium::icon_text(
+                    Some(super::premium::Icon::ErrorRed),
+                    "قفل شب ذخیره نشد؛ دوباره تلاش کنید.",
+                ),
+            )
+            .await
+        }
+    }
     true
 }
 
 async fn slow_mode(ctx: &Ctx, message: &Message, chat: i64, asked: u32) -> bool {
-    let done = apply_slow(ctx, chat, asked).await;
+    let done = match apply_slow(ctx, chat, asked).await {
+        Ok(done) => done,
+        Err(error) => {
+            log::warn!("slow mode: state write for {chat} failed: {error}");
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                if error.commit_outcome_unknown() {
+                    "اسلوموشن در تلگرام تغییر کرد، اما نتیجه ثبت آن نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                } else {
+                    "اسلوموشن در تلگرام تغییر کرد، اما تنظیم آن ذخیره نشد؛ دوباره تلاش کنید."
+                },
+            )
+            .await;
+            return true;
+        }
+    };
     let now = ctx
         .settings
         .value(chat, SLOW_STATE)
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(0);
-    let _ = match (done, now) {
-        (Some(true), 0) => message.reply("✗ اسلوموشن خاموش شد.").await,
+    match (done, now) {
+        (Some(true), 0) => {
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::SettingsChanged,
+                super::premium::icon_text(Some(super::premium::Icon::Timer), "اسلوموشن خاموش شد."),
+            )
+            .await
+        }
         (Some(true), _) => {
-            message
-                .reply(format!("✓ اسلوموشن روی {} تنظیم شد.", slow_label(now)))
-                .await
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::SettingsChanged,
+                super::premium::icon_text(
+                    Some(super::premium::Icon::Timer),
+                    format!("اسلوموشن روی {} تنظیم شد.", slow_label(now)),
+                ),
+            )
+            .await
         }
         (Some(false), _) => {
-            message
-                .reply("انجام نشد. مطمئن شوید کلینر در گروه ادمین است و اجازه تغییر اطلاعات دارد.")
-                .await
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                super::premium::icon_text(
+                    Some(super::premium::Icon::ErrorRed),
+                    "انجام نشد. مطمئن شوید کلینر در گروه ادمین است و اجازه تغییر اطلاعات دارد.",
+                ),
+            )
+            .await
         }
-        (None, _) => {
-            message
-                .reply(
-                    "اسلوموشن را فقط کلینر می تواند تنظیم کند؛ ربات ها به این بخش تلگرام دسترسی ندارند.\n\
+        (None, _) => super::respond(
+            ctx,
+            message,
+            ResponseKind::PermissionDenied,
+            "اسلوموشن را فقط کلینر می تواند تنظیم کند؛ ربات ها به این بخش تلگرام دسترسی ندارند.\n\
                      «افزودن کلینر» را بفرستید.",
-                )
-                .await
-        }
-    };
+        )
+        .await,
+    }
     true
 }
 
@@ -393,7 +722,13 @@ async fn pin(ctx: &Ctx, message: &Message, chat: i64, unpin: bool, quiet: bool) 
     let (Ok(Some(replied)), Ok(Some(chat_ref))) =
         (message.get_reply().await, message.peer_ref().await)
     else {
-        let _ = message.reply("روی پیام موردنظر ریپلای کنید.").await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            "روی پیام موردنظر ریپلای کنید.",
+        )
+        .await;
         return true;
     };
     let result = ctx
@@ -406,94 +741,43 @@ async fn pin(ctx: &Ctx, message: &Message, chat: i64, unpin: bool, quiet: bool) 
             id: replied.id(),
         })
         .await;
-    let _ = match result {
-        Ok(_) if unpin => message.reply("✗ سنجاق برداشته شد.").await,
+    match result {
+        Ok(_) if unpin => {
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::ModerationConfirmation,
+                super::premium::icon_text(Some(super::premium::Icon::Pin), "سنجاق برداشته شد."),
+            )
+            .await
+        }
         Ok(_) => {
-            message
-                .reply(format!("✓ پیام سنجاق شد. توسط {}", name_of(message)))
-                .await
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::ModerationConfirmation,
+                super::premium::icon_text(
+                    Some(super::premium::Icon::Pin),
+                    format!("پیام سنجاق شد. توسط {}", name_of(message)),
+                ),
+            )
+            .await
         }
         Err(e) => {
             eprintln!("pin: {chat}: {e}");
-            message
-                .reply("انجام نشد. مطمئن شوید ربات اجازه سنجاق کردن دارد.")
-                .await
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                super::premium::icon_text(
+                    Some(super::premium::Icon::ErrorRed),
+                    "انجام نشد. مطمئن شوید ربات اجازه سنجاق کردن دارد.",
+                ),
+            )
+            .await
         }
-    };
+    }
     true
-}
-
-fn inside_window(from: u32, to: u32, now: u32) -> bool {
-    if from <= to {
-        (from..to).contains(&now)
-    } else {
-        now >= from || now < to
-    }
-}
-
-pub async fn run_night(ctx: &std::sync::Arc<Ctx>) {
-    let now = ((super::stats::local_seconds() % 86_400) / 60) as u32;
-    let minutes = super::recent_minutes(now);
-
-    let mut crossing = Vec::new();
-    for chat in ctx.settings.night_due(&minutes).await {
-        let Some((from, to)) = night(ctx, chat) else {
-            if night_holds_group(ctx, chat)
-                && let Some(chat_ref) = ctx.chat_ref(chat)
-                && super::locks::set_group_lock(ctx, chat_ref, false).await
-            {
-                ctx.settings.set(chat, NIGHT_STATE, false).await;
-            }
-            continue;
-        };
-
-        let inside = inside_window(from, to, now);
-        let state = ctx.settings.value(chat, NIGHT_STATE);
-        let pending = state.is_none()
-            || matches!(state.as_deref(), Some(NIGHT_PENDING_ON | NIGHT_PENDING_OFF));
-        let was = matches!(state.as_deref(), Some("on") | Some(NIGHT_PENDING_ON));
-        if inside == was && !pending {
-            continue;
-        }
-        if inside == was {
-            ctx.settings
-                .set_value(chat, NIGHT_STATE, if inside { "on" } else { "off" })
-                .await;
-            continue;
-        }
-        let Some(chat_ref) = ctx.chat_ref(chat) else {
-            continue;
-        };
-        crossing.push((chat, chat_ref, inside));
-    }
-
-    let owner = std::sync::Arc::clone(ctx);
-    super::bounded(
-        crossing,
-        super::FLEET_CONCURRENCY,
-        move |(chat, chat_ref, inside)| {
-            let ctx = std::sync::Arc::clone(&owner);
-            async move {
-                if super::locks::set_group_lock(&ctx, chat_ref, inside).await {
-                    ctx.settings
-                        .set_value(chat, NIGHT_STATE, if inside { "on" } else { "off" })
-                        .await;
-                    let _ = ctx
-                        .client
-                        .send_message(
-                            chat_ref,
-                            InputMessage::new().html(if inside {
-                                "<b>قفل شب</b>\n\nگروه تا صبح بسته شد."
-                            } else {
-                                "<b>قفل شب</b>\n\nگروه باز شد."
-                            }),
-                        )
-                        .await;
-                }
-            }
-        },
-    )
-    .await;
 }
 
 fn batch_size(tail: &str) -> Option<usize> {
@@ -508,11 +792,12 @@ fn mention_of(
     participant: &grammers_client::peer::Participant,
     caller: Option<i64>,
 ) -> Option<(String, usize)> {
-    let user = participant.user.id().bare_id_unchecked();
-    if participant.user.is_bot() || Some(user) == caller {
+    let expanded = participant.user()?;
+    let user = expanded.id().bare_id()?;
+    if expanded.is_bot() || Some(user) == caller {
         return None;
     }
-    let name = participant.user.full_name();
+    let name = expanded.full_name();
     let name = name.trim();
     if name.is_empty() {
         return None;
@@ -554,11 +839,8 @@ impl Drop for TagRun {
 
 enum Ending {
     Exhausted,
-
     Ceiling,
-
     Failed,
-
     Stopped,
 }
 
@@ -574,27 +856,37 @@ async fn tag_all(ctx: &std::sync::Arc<Ctx>, message: &Message, chat: i64, per_me
         .sender_id()
         .and_then(grammers_client::session::types::PeerId::bare_id);
 
-    let anchor = message.reply_to_message_id().unwrap_or_else(|| message.id());
+    let anchor = message
+        .reply_to_message_id()
+        .unwrap_or_else(|| message.id());
 
     let Some(permit) = ctx.tag_slot() else {
-        let _ = message
-            .reply("چند گروه دیگر همین حالا در حال تگ اند. کمی بعد دوباره بفرستید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::UtilityResult,
+            super::premium::icon_text(
+                Some(super::premium::Icon::Timer),
+                "چند گروه دیگر همین حالا در حال تگ اند. کمی بعد دوباره بفرستید.",
+            ),
+        )
+        .await;
         return;
     };
 
-    let state = ctx.state(chat);
+    let Some(state) = ctx.peek(chat) else {
+        return;
+    };
     let token = state.claim_tagging(message.id());
     let run = TagRun { state, token };
     let ctx = std::sync::Arc::clone(ctx);
 
-    tokio::spawn(async move {
+    std::sync::Arc::clone(&ctx).spawn_owned(async move {
         let _permit = permit;
         let mut participants = ctx.client.iter_participants(chat_ref);
         let mut batch: Vec<String> = Vec::with_capacity(per_message);
         let mut body = 0usize;
         let mut tagged = 0usize;
-
         let mut seen: std::collections::HashSet<i64> =
             std::collections::HashSet::with_capacity(per_message * 2);
         let mut ending = Ending::Exhausted;
@@ -605,7 +897,6 @@ async fn tag_all(ctx: &std::sync::Arc<Ctx>, message: &Message, chat: i64, per_me
                 break;
             }
             let next = participants.next().await;
-
             if let Err(e) = &next {
                 eprintln!("tag: {chat}: {e}");
                 ending = Ending::Failed;
@@ -613,7 +904,7 @@ async fn tag_all(ctx: &std::sync::Arc<Ctx>, message: &Message, chat: i64, per_me
             let done = matches!(next, Ok(None) | Err(_));
             let mut carried = None;
             if let Ok(Some(participant)) = next
-                && seen.insert(participant.user.id().bare_id_unchecked())
+                && participant.id().bare_id().is_some_and(|id| seen.insert(id))
                 && let Some((mention, width)) = mention_of(&participant, caller)
             {
                 if fits(body, width) {
@@ -680,7 +971,7 @@ async fn tag_all(ctx: &std::sync::Arc<Ctx>, message: &Message, chat: i64, per_me
             .client
             .send_message(
                 chat_ref,
-                InputMessage::new().html(closing).reply_to(Some(anchor)),
+                super::premium::html(closing).reply_to(Some(anchor)),
             )
             .await;
     });
@@ -693,10 +984,8 @@ async fn send_batch(
     anchor: i32,
 ) -> Result<(), grammers_client::InvocationError> {
     let one = || {
-        ctx.client.send_message(
-            chat_ref,
-            InputMessage::new().html(body).reply_to(Some(anchor)),
-        )
+        ctx.client
+            .send_message(chat_ref, super::premium::html(body).reply_to(Some(anchor)))
     };
     let Err(e) = one().await else {
         return Ok(());
@@ -713,7 +1002,6 @@ async fn send_batch(
     let Some(seconds) = rpc.value else {
         return Err(e);
     };
-
     if u64::from(seconds) > TAG_FLOOD_MAX.as_secs() {
         return Err(e);
     }
@@ -817,7 +1105,10 @@ mod tests {
 
         let third = state.claim_tagging(12);
         assert!(state.finish_tagging(third));
-        assert!(!state.tagging_now(), "a run that ends leaves nothing behind");
+        assert!(
+            !state.tagging_now(),
+            "a run that ends leaves nothing behind"
+        );
     }
 
     #[test]
@@ -854,23 +1145,5 @@ mod tests {
         }
         assert!(fitted < 50, "the ceiling must bind before the batch count");
         assert!(body <= TAG_ROOM);
-    }
-
-    #[test]
-    fn the_night_window_wraps_and_is_never_empty() {
-        assert!(inside_window(23 * 60, 7 * 60, 23 * 60 + 30));
-        assert!(inside_window(23 * 60, 7 * 60, 2 * 60));
-        assert!(!inside_window(23 * 60, 7 * 60, 12 * 60));
-        assert!(!inside_window(23 * 60, 7 * 60, 7 * 60));
-
-        assert!(inside_window(9 * 60, 17 * 60, 12 * 60));
-        assert!(!inside_window(9 * 60, 17 * 60, 8 * 60));
-
-        for now in [0, 23 * 60, 23 * 60 + 1, 12 * 60] {
-            assert!(
-                !inside_window(23 * 60, 23 * 60, now),
-                "an empty window can never be inside, which is why it must not be stored"
-            );
-        }
     }
 }

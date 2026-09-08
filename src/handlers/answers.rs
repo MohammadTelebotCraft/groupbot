@@ -1,4 +1,4 @@
-use grammers_client::message::{InputMessage, Message};
+use grammers_client::message::Message;
 
 use super::{Ctx, can_manage, esc, welcome};
 
@@ -70,7 +70,6 @@ async fn answer(ctx: &Ctx, message: &Message, chat: i64, view: &super::locks::Vi
     if ctx.settings.indexed_empty(chat, PREFIX) {
         return false;
     }
-
     let trigger = view.lower().trim();
     let Some(stored) = ctx.settings.value(chat, &key(trigger)) else {
         return false;
@@ -99,7 +98,11 @@ async fn answer(ctx: &Ctx, message: &Message, chat: i64, view: &super::locks::Vi
         && let Some(decoded) = welcome::decode_media(media)
     {
         let Err(e) = message
-            .reply(InputMessage::new().html(body).media(decoded))
+            .reply(
+                grammers_client::message::InputMessage::new()
+                    .html(body)
+                    .media(decoded),
+            )
             .await
         else {
             return true;
@@ -108,16 +111,21 @@ async fn answer(ctx: &Ctx, message: &Message, chat: i64, view: &super::locks::Vi
             eprintln!("answers: {chat}: {e}");
             return true;
         }
-
         eprintln!("answers: {chat}: media for «{trigger}» expired, keeping the text");
-        ctx.settings
-            .set_value(chat, &key(trigger), &format!("{SEPARATOR}{body}"))
-            .await;
+        if let Err(error) = ctx
+            .settings
+            .try_set_value(chat, &key(trigger), &format!("{SEPARATOR}{body}"))
+            .await
+        {
+            ::log::warn!("answers: could not remove expired media for {chat}: {error}");
+        }
         if body.trim().is_empty() {
             return true;
         }
     }
-    let _ = message.reply(InputMessage::new().html(body)).await;
+    let _ = message
+        .reply(grammers_client::message::InputMessage::new().html(body))
+        .await;
     true
 }
 
@@ -135,7 +143,6 @@ async fn edit(
     if adding && !has_body(message, trigger) {
         return false;
     }
-
     let mut trigger = trigger.trim().to_lowercase();
     if trigger.is_empty() {
         if !super::phrase_carries_text(command) {
@@ -144,12 +151,14 @@ async fn edit(
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-        let _ = message
-            .reply(
-                "روی پیام پاسخ ریپلای کنید و بنویسید: «تنظیم پاسخ سلام»\n\
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::SettingsView,
+            "روی پیام پاسخ ریپلای کنید و بنویسید: «تنظیم پاسخ سلام»\n\
                  برای حذف: «حذف پاسخ سلام»",
-            )
-            .await;
+        )
+        .await;
         return true;
     }
     if !super::limits::allows(ctx, message, super::limits::SET).await {
@@ -158,21 +167,45 @@ async fn edit(
 
     if !adding {
         if trigger.chars().count() > MAX_TRIGGER_CHARS {
-            let _ = message
-                .reply(format!(
-                    "تریگر پاسخ باید حداکثر {MAX_TRIGGER_CHARS} نویسه باشد."
-                ))
-                .await;
+            super::respond(
+                ctx,
+                message,
+                crate::response::ResponseKind::CommandError,
+                format!("تریگر پاسخ باید حداکثر {MAX_TRIGGER_CHARS} نویسه باشد."),
+            )
+            .await;
             return true;
         }
-        let existed = ctx.settings.set(chat, &key(&trigger), false).await;
-        let _ = message
-            .reply(if existed {
-                format!("✗ پاسخ «{trigger}» حذف شد.")
-            } else {
-                format!("«{trigger}» در لیست نبود.")
-            })
-            .await;
+        match ctx.settings.try_set(chat, &key(&trigger), false).await {
+            Ok(existed) => {
+                super::respond(
+                    ctx,
+                    message,
+                    crate::response::ResponseKind::SettingsChanged,
+                    if existed {
+                        format!("✗ پاسخ «{trigger}» حذف شد.")
+                    } else {
+                        format!("«{trigger}» در لیست نبود.")
+                    },
+                )
+                .await;
+            }
+            Err(error) => {
+                ::log::warn!("answers: delete for {chat} failed: {error}");
+                let text = if error.commit_outcome_unknown() {
+                    "نتیجه حذف پاسخ نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                } else {
+                    "پاسخ حذف نشد؛ دوباره تلاش کنید."
+                };
+                super::respond(
+                    ctx,
+                    message,
+                    crate::response::ResponseKind::CommandError,
+                    text,
+                )
+                .await;
+            }
+        }
         return true;
     }
 
@@ -191,12 +224,14 @@ async fn edit(
         ),
         None => {
             let Ok(Some(replied)) = message.get_reply().await else {
-                let _ = message
-                    .reply(
-                        "روی پیام پاسخ ریپلای کنید، یا بنویسید:\n\
+                super::respond(
+                    ctx,
+                    message,
+                    crate::response::ResponseKind::CommandError,
+                    "روی پیام پاسخ ریپلای کنید، یا بنویسید:\n\
                          «تنظیم پاسخ سلام = درود بر شما»",
-                    )
-                    .await;
+                )
+                .await;
                 return true;
             };
             (
@@ -209,51 +244,96 @@ async fn edit(
         }
     };
     if trigger.chars().count() > MAX_TRIGGER_CHARS {
-        let _ = message
-            .reply(format!(
-                "تریگر پاسخ باید حداکثر {MAX_TRIGGER_CHARS} نویسه باشد."
-            ))
-            .await;
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            format!("تریگر پاسخ باید حداکثر {MAX_TRIGGER_CHARS} نویسه باشد."),
+        )
+        .await;
         return true;
     }
     if media.is_empty() && body.is_empty() {
-        let _ = message.reply("آن پیام محتوایی برای فرستادن ندارد.").await;
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            "آن پیام محتوایی برای فرستادن ندارد.",
+        )
+        .await;
         return true;
     }
 
     if body.chars().count() > MAX_BODY_CHARS {
-        let _ = message
-            .reply(format!("متن پاسخ باید حداکثر {MAX_BODY_CHARS} نویسه باشد."))
-            .await;
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            format!("متن پاسخ باید حداکثر {MAX_BODY_CHARS} نویسه باشد."),
+        )
+        .await;
         return true;
     }
     let stored = format!("{media}{SEPARATOR}{body}");
     if stored.len() > crate::state::MAX_SETTING_VALUE_BYTES {
-        let _ = message.reply("رسانه یا متن پاسخ بیش از حد بزرگ است.").await;
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            "رسانه یا متن پاسخ بیش از حد بزرگ است.",
+        )
+        .await;
         return true;
     }
     let trigger_key = key(&trigger);
     if ctx.settings.value(chat, &trigger_key).is_none() && triggers(ctx, chat).len() >= MAX_ANSWERS
     {
-        let _ = message
-            .reply(format!("لیست پاسخ ها پر است ({MAX_ANSWERS} مورد)."))
-            .await;
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            format!("لیست پاسخ ها پر است ({MAX_ANSWERS} مورد)."),
+        )
+        .await;
         return true;
     }
 
-    if !ctx.settings.set_value(chat, &trigger_key, &stored).await {
-        let _ = message
-            .reply("ذخیره پاسخ انجام نشد؛ ظرفیت تنظیمات یا پایگاه داده را بررسی کنید.")
-            .await;
+    if let Err(error) = ctx
+        .settings
+        .try_set_value(chat, &trigger_key, &stored)
+        .await
+    {
+        ::log::warn!("answers: write for {chat} failed: {error}");
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                if error.commit_outcome_unknown() {
+                    "نتیجه ذخیره پاسخ نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                } else {
+                    "ذخیره پاسخ انجام نشد؛ ظرفیت تنظیمات یا پایگاه داده را بررسی کنید."
+                },
+            ),
+        )
+        .await;
         return true;
     }
-    let _ = message
-        .reply(InputMessage::new().html(format!(
-            "✓ پاسخ «{}» ذخیره شد · مخاطب: <b>{}</b>",
-            esc(&trigger),
-            audience(ctx, chat).label()
-        )))
-        .await;
+    super::respond(
+        ctx,
+        message,
+        crate::response::ResponseKind::SettingsChanged,
+        super::premium::icon_html(
+            Some(super::premium::Icon::Chat),
+            format!(
+                "پاسخ «{}» ذخیره شد · مخاطب: <b>{}</b>",
+                esc(&trigger),
+                audience(ctx, chat).label()
+            ),
+        ),
+    )
+    .await;
     true
 }
 
