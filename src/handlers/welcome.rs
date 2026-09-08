@@ -4,6 +4,8 @@ use grammers_client::tl;
 use grammers_client::tl::{Deserializable, Serializable};
 
 use super::{Ctx, esc};
+use crate::response::ResponseKind;
+use crate::state::{SettingMutation, SettingsWriteError};
 
 pub const TEXT: &str = "welcome_text";
 
@@ -15,7 +17,6 @@ pub const TTL: &str = "welcome_ttl";
 
 const DEFAULT_TTL: u32 = 0;
 pub const TTL_RANGE: (u32, u32) = (0, 3600);
-
 pub const TTL_PRESETS: &[u32] = &[0, 10, 30, 60, 300, 900];
 
 pub const INSTALL_TTL: u32 = 10;
@@ -54,8 +55,30 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-        clear(ctx, chat).await;
-        let _ = message.reply("✗ خوشامد خاموش شد.").await;
+        match try_clear_stored(ctx, chat).await {
+            Ok(()) => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::SettingsChanged,
+                    super::premium::icon_text(
+                        Some(super::premium::Icon::Pause),
+                        "خوشامد خاموش شد.",
+                    ),
+                )
+                .await
+            }
+            Err(error) => {
+                ::log::warn!("welcome: clear for {chat} failed: {error}");
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    setting_failure_text(&error),
+                )
+                .await
+            }
+        };
         return true;
     }
 
@@ -64,9 +87,9 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             return true;
         }
         match template(ctx, chat) {
-            Some(_) => send(ctx, message, chat, None).await,
+            Some(_) => send(ctx, message, chat, None, None).await,
             None => {
-                let _ = message.reply(help()).await;
+                super::respond(ctx, message, ResponseKind::CommandError, help()).await;
             }
         }
         return true;
@@ -79,7 +102,6 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }) else {
         return false;
     };
-
     if !rest.is_empty() && !super::phrase_carries_text(command) {
         return false;
     }
@@ -92,7 +114,6 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
 
     let replied = message.get_reply().await.ok().flatten();
-
     let (body, entities) = if inline.is_empty() {
         match replied.as_ref() {
             Some(replied) => (
@@ -103,7 +124,6 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         }
     } else {
         let raw = message.text();
-
         let skipped = (raw.len() - raw.trim_start().len())
             + command.len()
             + (after.len() - after.trim_start().len());
@@ -120,52 +140,103 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         .or_else(|| replied.as_ref().and_then(|m| m.media()));
 
     if body.is_empty() && media.is_none() {
-        let _ = message.reply(help()).await;
+        super::respond(ctx, message, ResponseKind::CommandError, help()).await;
         return true;
     }
 
-    ctx.settings.set_value(chat, TEXT, &body).await;
-
     let stored_media = media.as_ref().and_then(encode_media).unwrap_or_default();
-    ctx.settings.set_value(chat, MEDIA, &stored_media).await;
-
     let stored_entities = keep(&entities);
-    let carried = if stored_entities.is_empty() {
-        ctx.settings.set(chat, ENTITIES, false).await;
-        false
+    let encoded_entities = if stored_entities.is_empty() {
+        None
     } else {
-        let hexed = hex(&stored_entities.to_bytes());
-
-        if ctx.settings.set_value(chat, ENTITIES, &hexed).await {
-            true
-        } else {
-            ctx.settings.set(chat, ENTITIES, false).await;
-            false
-        }
+        Some(hex(&stored_entities.to_bytes()))
     };
-
-    let _ = message
-        .reply(format!(
-            "✓ خوشامد ذخیره شد{}{}.",
-            if stored_media.is_empty() {
-                ""
-            } else {
-                " همراه با رسانه"
-            },
-            if carried { " با قالب بندی" } else { "" }
-        ))
+    let entity_mutation =
+        encoded_entities
+            .as_deref()
+            .map_or(SettingMutation::Delete { key: ENTITIES }, |value| {
+                SettingMutation::Put {
+                    key: ENTITIES,
+                    value,
+                }
+            });
+    if let Err(error) = ctx
+        .settings
+        .try_apply_batch(
+            chat,
+            &[
+                SettingMutation::Put {
+                    key: TEXT,
+                    value: &body,
+                },
+                SettingMutation::Put {
+                    key: MEDIA,
+                    value: &stored_media,
+                },
+                entity_mutation,
+            ],
+        )
+        .await
+    {
+        ::log::warn!("welcome: setup for {chat} failed: {error}");
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            setting_failure_text(&error),
+        )
         .await;
+        return true;
+    }
+    let carried = encoded_entities.is_some();
+
+    super::respond(
+        ctx,
+        message,
+        ResponseKind::SettingsChanged,
+        super::premium::icon_text(
+            Some(super::premium::Icon::Welcome),
+            format!(
+                "خوشامد ذخیره شد{}{}.",
+                if stored_media.is_empty() {
+                    ""
+                } else {
+                    " همراه با رسانه"
+                },
+                if carried {
+                    " با قالب بندی"
+                } else {
+                    ""
+                }
+            ),
+        ),
+    )
+    .await;
     true
 }
 
-async fn clear(ctx: &Ctx, chat: i64) {
-    ctx.settings.set(chat, TEXT, false).await;
-    ctx.settings.set(chat, MEDIA, false).await;
-    ctx.settings.set(chat, ENTITIES, false).await;
+pub async fn try_clear_stored(ctx: &Ctx, chat: i64) -> Result<(), SettingsWriteError> {
+    ctx.settings
+        .try_apply_batch(
+            chat,
+            &[
+                SettingMutation::Delete { key: TEXT },
+                SettingMutation::Delete { key: MEDIA },
+                SettingMutation::Delete { key: ENTITIES },
+            ],
+        )
+        .await?;
+    Ok(())
 }
 
-pub async fn clear_stored(ctx: &Ctx, chat: i64) {
-    clear(ctx, chat).await;
+fn setting_failure_text(error: &SettingsWriteError) -> InputMessage {
+    let message = match error {
+        SettingsWriteError::CommitUncertain(_) => {
+            "نتیجه ذخیره سازی نامشخص است؛ تا راه اندازی دوباره ربات، دوباره تلاش نکنید."
+        }
+        _ => "خوشامد ذخیره نشد؛ دوباره تلاش کنید.",
+    };
+    super::premium::icon_text(Some(super::premium::Icon::ErrorRed), message)
 }
 
 fn keep(entities: &[tl::enums::MessageEntity]) -> Vec<tl::enums::MessageEntity> {
@@ -280,14 +351,20 @@ pub async fn on_join(ctx: &Ctx, message: &Message) -> bool {
 
     let joined = super::joined_users(ctx, message).await;
     if joined.is_empty() {
-        send(ctx, message, chat, None).await;
         return true;
     }
     for person in joined {
         if person.is_bot {
             continue;
         }
-        send(ctx, message, chat, Some((person.id, person.name))).await;
+        send(
+            ctx,
+            message,
+            chat,
+            Some((person.id, person.name)),
+            Some(person.peer),
+        )
+        .await;
     }
     true
 }
@@ -299,12 +376,20 @@ fn template(ctx: &Ctx, chat: i64) -> Option<String> {
 }
 
 fn stored_entities(ctx: &Ctx, chat: i64) -> Option<Vec<tl::enums::MessageEntity>> {
-    let stored = ctx.settings.value(chat, ENTITIES).filter(|e| !e.is_empty())?;
+    let stored = ctx
+        .settings
+        .value(chat, ENTITIES)
+        .filter(|e| !e.is_empty())?;
     Vec::<tl::enums::MessageEntity>::from_bytes(&unhex(&stored)?).ok()
 }
 
-fn compose(ctx: &Ctx, message: &Message, chat: i64, text: &str, who: Option<(i64, String)>)
--> Option<InputMessage> {
+fn compose(
+    ctx: &Ctx,
+    message: &Message,
+    chat: i64,
+    text: &str,
+    who: Option<(i64, String)>,
+) -> Option<InputMessage> {
     let (id, name) = subject(message, &who);
     match stored_entities(ctx, chat) {
         Some(entities) => {
@@ -319,7 +404,13 @@ fn compose(ctx: &Ctx, message: &Message, chat: i64, text: &str, who: Option<(i64
     }
 }
 
-async fn send(ctx: &Ctx, message: &Message, chat: i64, who: Option<(i64, String)>) {
+async fn send(
+    ctx: &Ctx,
+    message: &Message,
+    chat: i64,
+    who: Option<(i64, String)>,
+    receiver: Option<grammers_client::session::types::PeerRef>,
+) {
     let Some(text) = template(ctx, chat) else {
         return;
     };
@@ -329,28 +420,55 @@ async fn send(ctx: &Ctx, message: &Message, chat: i64, who: Option<(i64, String)
         && let Some(media) = decode_media(&stored)
     {
         let input = body.clone().unwrap_or_default().media(media);
-        match message.respond(input).await {
-            Ok(sent) => {
-                expire(ctx, chat, sent.id());
+        match deliver(ctx, message, receiver, input).await {
+            Ok(Some(sent)) => {
+                expire(ctx, chat, sent);
                 return;
             }
+            Ok(None) => return,
             Err(e) => {
-                if !reference_expired(&e) {
+                if !e
+                    .downcast_ref::<grammers_client::InvocationError>()
+                    .is_some_and(reference_expired)
+                {
                     eprintln!("welcome: {chat}: {e}");
                     return;
                 }
-
                 eprintln!("welcome: {chat}: stored media expired, keeping the text only");
-                ctx.settings.set(chat, MEDIA, false).await;
+                if let Err(error) = ctx.settings.try_set(chat, MEDIA, false).await {
+                    ::log::warn!("welcome: could not remove expired media for {chat}: {error}");
+                }
             }
         }
     }
     let Some(body) = body else {
         return;
     };
-    if let Ok(sent) = message.respond(body).await {
-        expire(ctx, chat, sent.id());
+    if let Ok(Some(sent)) = deliver(ctx, message, receiver, body).await {
+        expire(ctx, chat, sent);
     }
+}
+
+async fn deliver(
+    ctx: &Ctx,
+    message: &Message,
+    receiver: Option<grammers_client::session::types::PeerRef>,
+    body: InputMessage,
+) -> Result<Option<i32>, Box<dyn std::error::Error + Send + Sync>> {
+    let Some(receiver) = receiver else {
+        return Ok(Some(message.respond(body).await?.id()));
+    };
+    Ok(crate::response::send_tracked_to_user(
+        &ctx.client,
+        &ctx.settings,
+        message,
+        receiver,
+        ResponseKind::WelcomeNotice,
+        crate::response::IntendedAudience::RequesterOnly,
+        body,
+    )
+    .await?
+    .group_message_id)
 }
 
 fn expire(ctx: &Ctx, chat: i64, sent: i32) {
@@ -439,7 +557,6 @@ fn fill_walk(
     group: &str,
 ) -> (String, Vec<tl::enums::MessageEntity>) {
     let ident = id.to_string();
-
     let tags: &[(&str, &str, bool)] = &[
         ("{نام}", name, false),
         ("{name}", name, false),
@@ -454,7 +571,6 @@ fn fill_walk(
     ];
 
     let source_len = u16len(template) as usize;
-
     let mut map = vec![0i32; source_len + 1];
     let mut out = String::with_capacity(template.len());
     let mut mentions = Vec::new();
@@ -627,17 +743,13 @@ mod tests {
         assert_eq!(back.len(), 2);
         assert_eq!(bounds(&back[0]), Some((0, 5)));
         assert_eq!(bounds(&back[1]), Some((6, 2)));
-        assert!(matches!(
-            back[1],
-            tl::enums::MessageEntity::CustomEmoji(_)
-        ));
+        assert!(matches!(back[1], tl::enums::MessageEntity::CustomEmoji(_)));
     }
 
     #[test]
     fn rebasing_drops_what_leaves_the_slice() {
         let entities = vec![bold(0, 3), bold(4, 5), emoji(6, 2, 1)];
         let moved = rebase(&entities, 4, 5);
-
         assert_eq!(moved.len(), 2);
         assert_eq!(bounds(&moved[0]), Some((0, 5)));
         assert_eq!(bounds(&moved[1]), Some((2, 2)));
@@ -675,7 +787,6 @@ mod tests {
     #[test]
     fn a_repeated_tag_shifts_each_time() {
         let carried = vec![bold(13, 1)];
-
         let (text, moved) = walk("{name}-{name}!", carried, 1, "ab");
         assert_eq!(text, "ab-ab!");
         assert_eq!(bounds(&moved[0]), Some((5, 1)));
@@ -701,10 +812,11 @@ mod tests {
         ];
         let kept = keep(&entities);
         assert_eq!(kept.len(), 2);
-        assert!(!kept.iter().any(|e| matches!(
-            e,
-            tl::enums::MessageEntity::MentionName(_)
-        )));
+        assert!(
+            !kept
+                .iter()
+                .any(|e| matches!(e, tl::enums::MessageEntity::MentionName(_)))
+        );
     }
 
     #[test]

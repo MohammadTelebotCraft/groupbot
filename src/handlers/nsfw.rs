@@ -1,12 +1,15 @@
+
 use std::io::Cursor;
+use std::io::Read;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use grammers_client::media::{Document, Downloadable, Media, PhotoSize};
-use grammers_client::message::{InputMessage, Message};
+use grammers_client::message::Message;
 use grammers_client::session::types::{PeerId, PeerRef};
 use image::AnimationDecoder;
+use sha2::{Digest, Sha256};
 use tokio::process::Command;
 
 use super::Ctx;
@@ -15,7 +18,6 @@ use super::locks::View;
 pub const LOCK: &str = "nsfw";
 
 const DEFAULT_LIMIT: u32 = 50;
-
 const LIMIT_RANGE: (u32, u32) = (10, 95);
 #[cfg(test)]
 const LIMIT_PRESETS: &[u32] = &[30, 40, 50, 60, 70, 80];
@@ -55,7 +57,6 @@ const STRONG_BRIDGE_SCORE: f32 = 0.50;
 const STRONG_BRIDGE_FLOOR: f32 = 0.75;
 
 const NEUTRAL_FLOOR: f32 = 0.97;
-
 const GRADED_CONFIDENT: f32 = 0.92;
 const CONFIDENT: f32 = 0.95;
 
@@ -77,7 +78,6 @@ const HEAD_DELETE: f32 = 0.95;
 pub struct Arbiter {
     pub explicit: f32,
     pub revealing: f32,
-
     pub head: f32,
 }
 
@@ -113,23 +113,210 @@ const RUNTIME: &[u8] = include_bytes!("../../assets/libonnxruntime.so.1.20.1");
 const DEFAULT_INFER_THREADS: usize = 2;
 const DEFAULT_INFER_SESSIONS: usize = 2;
 
+#[derive(Debug)]
+struct ModelConfig {
+    infer_threads: usize,
+    infer_sessions: usize,
+    runtime_path: Option<std::path::PathBuf>,
+    model_files: Option<std::path::PathBuf>,
+    #[cfg(feature = "cuda")]
+    use_cuda: bool,
+    #[cfg(feature = "cuda")]
+    cuda_device: i32,
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            infer_threads: DEFAULT_INFER_THREADS,
+            infer_sessions: DEFAULT_INFER_SESSIONS,
+            runtime_path: None,
+            model_files: None,
+            #[cfg(feature = "cuda")]
+            use_cuda: false,
+            #[cfg(feature = "cuda")]
+            cuda_device: 0,
+        }
+    }
+}
+
+static MODEL_CONFIG: std::sync::OnceLock<ModelConfig> = std::sync::OnceLock::new();
+static RUNTIME_STARTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+pub fn configure_from_environment() -> Result<(), String> {
+    let configured_runtime_path = configured_path("ORT_LIBRARY_PATH")?;
+    if let Some(path) = configured_runtime_path.as_deref()
+        && !path.is_file()
+    {
+        return Err(format!(
+            "ORT_LIBRARY_PATH does not point to a file: {}",
+            path.display()
+        ));
+    }
+    let model_files = configured_path("VISION_FILES")?;
+    if let Some(path) = model_files.as_deref()
+        && !path.is_dir()
+    {
+        return Err(format!(
+            "VISION_FILES does not point to a directory: {}",
+            path.display()
+        ));
+    }
+    let use_cuda = configured_bool("ORT_USE_CUDA", false)?;
+    #[cfg(not(feature = "cuda"))]
+    if use_cuda {
+        return Err("ORT_USE_CUDA requires building groupbot with the cuda feature".to_owned());
+    }
+    #[cfg(feature = "cuda")]
+    let cuda_device = configured_i32("ORT_CUDA_DEVICE", 0, 0, i32::MAX)?;
+    #[cfg(not(feature = "cuda"))]
+    configured_i32("ORT_CUDA_DEVICE", 0, 0, i32::MAX)?;
+    let config = ModelConfig {
+        infer_threads: super::configured_usize("NSFW_INFER_THREADS", DEFAULT_INFER_THREADS, 1, 64)?,
+        infer_sessions: super::configured_usize(
+            "NSFW_INFER_SESSIONS",
+            DEFAULT_INFER_SESSIONS,
+            1,
+            256,
+        )?,
+        runtime_path: configured_runtime_path,
+        model_files,
+        #[cfg(feature = "cuda")]
+        use_cuda,
+        #[cfg(feature = "cuda")]
+        cuda_device,
+    };
+    MODEL_CONFIG
+        .set(config)
+        .map_err(|_| "model configuration was initialized more than once".to_owned())?;
+    let path = runtime_path().map_err(|error| format!("ONNX Runtime path: {error}"))?;
+    initialize_runtime(&path).map_err(|error| {
+        format!(
+            "could not initialize ONNX Runtime from {}: {error}",
+            path.display()
+        )
+    })?;
+    drop(builder().map_err(|error| format!("ONNX Runtime configuration: {error}"))?);
+    RUNTIME_STARTED
+        .set(true)
+        .map_err(|_| "ONNX Runtime was initialized before model configuration".to_owned())?;
+    Ok(())
+}
+
+fn configured_path(name: &str) -> Result<Option<std::path::PathBuf>, String> {
+    match std::env::var_os(name) {
+        None => Ok(None),
+        Some(value) if value.is_empty() => Err(format!("{name} must not be empty")),
+        Some(value) => Ok(Some(std::path::PathBuf::from(value))),
+    }
+}
+
+fn configured_bool(name: &str, default: bool) -> Result<bool, String> {
+    match std::env::var(name) {
+        Ok(value) => parse_bool(name, &value),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid Unicode")),
+    }
+}
+
+fn parse_bool(name: &str, value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => Err(format!(
+            "{name} must be true, false, 1, or 0, got {value:?}"
+        )),
+    }
+}
+
+fn configured_i32(name: &str, default: i32, minimum: i32, maximum: i32) -> Result<i32, String> {
+    let value = match std::env::var(name) {
+        Ok(value) => parse_bounded_i32(name, &value, minimum, maximum)?,
+        Err(std::env::VarError::NotPresent) => default,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(format!("{name} is not valid Unicode"));
+        }
+    };
+    if !(minimum..=maximum).contains(&value) {
+        return Err(format!(
+            "{name} must be in {minimum}..={maximum}, got {value}"
+        ));
+    }
+    Ok(value)
+}
+
+fn parse_bounded_i32(name: &str, value: &str, minimum: i32, maximum: i32) -> Result<i32, String> {
+    let value = value.parse::<i32>().map_err(|_| {
+        format!("{name} must be an integer in {minimum}..={maximum}, got {value:?}")
+    })?;
+    if !(minimum..=maximum).contains(&value) {
+        return Err(format!(
+            "{name} must be in {minimum}..={maximum}, got {value}"
+        ));
+    }
+    Ok(value)
+}
+
+#[cfg(not(test))]
+fn model_config() -> &'static ModelConfig {
+    MODEL_CONFIG
+        .get()
+        .expect("main initializes immutable model configuration before handlers start")
+}
+
+#[cfg(test)]
+fn model_config() -> &'static ModelConfig {
+    MODEL_CONFIG.get_or_init(ModelConfig::default)
+}
+
 fn infer_threads() -> usize {
-    std::env::var("NSFW_INFER_THREADS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_INFER_THREADS)
-        .clamp(1, 64)
+    model_config().infer_threads
 }
 
 pub fn infer_sessions() -> usize {
-    std::env::var("NSFW_INFER_SESSIONS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_INFER_SESSIONS)
-        .clamp(1, 256)
+    model_config().infer_sessions
+}
+
+pub(super) fn model_files_dir() -> Option<&'static std::path::Path> {
+    model_config().model_files.as_deref()
 }
 
 pub type Session = std::sync::Mutex<ort::session::Session>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelError {
+    Artifact(String),
+    Runtime(String),
+    ModelContract(String),
+    Poisoned(&'static str),
+}
+
+impl ModelError {
+    pub fn artifact(what: impl Into<String>) -> Self {
+        Self::Artifact(what.into())
+    }
+
+    fn runtime(what: impl Into<String>) -> Self {
+        Self::Runtime(what.into())
+    }
+
+    pub fn contract(what: impl Into<String>) -> Self {
+        Self::ModelContract(what.into())
+    }
+}
+
+impl std::fmt::Display for ModelError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Artifact(detail) => write!(formatter, "model artifact: {detail}"),
+            Self::Runtime(detail) => write!(formatter, "model runtime: {detail}"),
+            Self::ModelContract(detail) => write!(formatter, "model contract: {detail}"),
+            Self::Poisoned(what) => write!(formatter, "model mutex poisoned: {what}"),
+        }
+    }
+}
+
+impl std::error::Error for ModelError {}
 
 pub struct SessionPool {
     sessions: Box<[Session]>,
@@ -143,63 +330,129 @@ impl SessionPool {
     }
 }
 
-fn runtime_path() -> Option<std::path::PathBuf> {
-    if let Ok(path) = std::env::var("ORT_LIBRARY_PATH") {
-        let path = std::path::PathBuf::from(path);
-        if path.is_file() {
-            return Some(path);
-        }
-        eprintln!(
-            "nsfw: ORT_LIBRARY_PATH does not point to a runtime: {}",
-            path.display()
-        );
+static RUNTIME_STAGING_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn file_matches(path: &std::path::Path, expected: &[u8]) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    let Ok(expected_len) = u64::try_from(expected.len()) else {
+        return false;
+    };
+    if metadata.len() != expected_len {
+        return false;
     }
-    let mut path = std::env::current_exe().ok()?;
-    path.pop();
-    path.push("libonnxruntime.so.1.20.1");
-    let present = std::fs::metadata(&path).is_ok_and(|meta| meta.len() as usize == RUNTIME.len());
-    if !present {
-        let staging = path.with_extension("so.partial");
-        std::fs::write(&staging, RUNTIME).ok()?;
-        std::fs::rename(&staging, &path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => return false,
+        };
+        hash.update(&buffer[..read]);
     }
-    Some(path)
+    hash.finalize() == Sha256::digest(expected)
 }
 
-fn builder() -> Option<ort::session::builder::SessionBuilder> {
-    let mut builder = ort::session::Session::builder().ok()?;
-    builder = builder.with_intra_threads(infer_threads()).ok()?;
+fn publish_embedded(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    if file_matches(path, bytes) {
+        return Ok(());
+    }
+    let sequence = RUNTIME_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let staging = path.with_extension(format!("so.{}.{sequence}.partial", std::process::id()));
+    std::fs::write(&staging, bytes).map_err(|error| {
+        format!(
+            "could not stage ONNX Runtime at {}: {error}",
+            staging.display()
+        )
+    })?;
+    if let Err(publish_error) = std::fs::rename(&staging, path) {
+        if !file_matches(path, bytes) {
+            let _cleanup_result = std::fs::remove_file(&staging);
+            return Err(format!(
+                "could not publish ONNX Runtime from {} to {}: {publish_error}",
+                staging.display(),
+                path.display()
+            ));
+        }
+        if let Err(error) = std::fs::remove_file(&staging)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!(
+                "nsfw: could not remove losing runtime staging file {}: {error}",
+                staging.display()
+            );
+        }
+    }
+    if !file_matches(path, bytes) {
+        return Err(format!(
+            "published ONNX Runtime at {} failed integrity verification",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn embedded_runtime_filename(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("libonnxruntime.so.1.20.1-{digest:x}")
+}
+
+fn runtime_path() -> Result<std::path::PathBuf, String> {
+    if let Some(path) = model_config().runtime_path.as_ref() {
+        return Ok(path.clone());
+    }
+    let mut path = std::env::current_exe()
+        .map_err(|error| format!("could not locate the running executable: {error}"))?;
+    path.pop();
+    path.push(embedded_runtime_filename(RUNTIME));
+    publish_embedded(&path, RUNTIME)?;
+    Ok(path)
+}
+
+fn initialize_runtime(path: &std::path::Path) -> Result<(), String> {
+    let environment = ort::init_from(path).map_err(|error| error.to_string())?;
+    if environment.commit() {
+        Ok(())
+    } else {
+        Err("another ONNX Runtime environment was already committed".to_owned())
+    }
+}
+
+fn builder() -> Result<ort::session::builder::SessionBuilder, String> {
+    let mut builder = ort::session::Session::builder().map_err(|error| error.to_string())?;
+    builder = builder
+        .with_intra_threads(infer_threads())
+        .map_err(|error| error.to_string())?;
     #[cfg(feature = "cuda")]
-    if std::env::var("ORT_USE_CUDA").is_ok_and(|value| value == "1" || value == "true") {
-        let device = std::env::var("ORT_CUDA_DEVICE")
-            .ok()
-            .and_then(|value| value.parse::<i32>().ok())
-            .unwrap_or(0);
+    if model_config().use_cuda {
         builder = builder
             .with_execution_providers([ort::ep::CUDA::default()
-                .with_device_id(device)
+                .with_device_id(model_config().cuda_device)
                 .build()
                 .error_on_failure()])
-            .ok()?;
+            .map_err(|error| error.to_string())?;
     }
-    Some(builder)
+    Ok(builder)
 }
 
 fn started() -> bool {
-    static STARTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *STARTED.get_or_init(|| match runtime_path() {
-        Some(path) => match ort::init_from(&path) {
-            Ok(environment) => {
-                environment.commit();
-                true
-            }
+    *RUNTIME_STARTED.get_or_init(|| match runtime_path() {
+        Ok(path) => match initialize_runtime(&path) {
+            Ok(()) => true,
             Err(e) => {
                 eprintln!("nsfw: the runtime would not start, the lock is inert: {e}");
                 false
             }
         },
-        None => {
-            eprintln!("nsfw: could not place the runtime beside the binary, the lock is inert");
+        Err(error) => {
+            eprintln!("nsfw: {error}; model-backed moderation is inert");
             false
         }
     })
@@ -210,7 +463,7 @@ pub fn open_path(path: &std::path::Path, what: &str) -> Option<Session> {
         return None;
     }
     let built = || -> Result<ort::session::Session, String> {
-        let mut builder = builder().ok_or_else(|| "session builder failed".to_owned())?;
+        let mut builder = builder()?;
         builder.commit_from_file(path).map_err(|e| e.to_string())
     };
     match built() {
@@ -231,7 +484,13 @@ pub fn open_path_pool(path: &std::path::Path, what: &str, count: usize) -> Optio
     }
     let mut sessions = Vec::with_capacity(count);
     for _ in 0..count {
-        let mut builder = builder()?;
+        let mut builder = match builder() {
+            Ok(builder) => builder,
+            Err(error) => {
+                eprintln!("nsfw: the {what} pool builder failed: {error}");
+                return None;
+            }
+        };
         match builder.commit_from_file(path) {
             Ok(session) => sessions.push(std::sync::Mutex::new(session)),
             Err(e) => {
@@ -255,7 +514,13 @@ pub fn open_pool(bytes: &[u8], what: &str, count: usize) -> Option<SessionPool> 
     }
     let mut sessions = Vec::with_capacity(count);
     for _ in 0..count {
-        let mut builder = builder()?;
+        let mut builder = match builder() {
+            Ok(builder) => builder,
+            Err(error) => {
+                eprintln!("nsfw: the {what} pool builder failed: {error}");
+                return None;
+            }
+        };
         match builder.commit_from_memory(bytes) {
             Ok(session) => sessions.push(std::sync::Mutex::new(session)),
             Err(e) => {
@@ -291,31 +556,71 @@ pub fn capacity_probe() -> usize {
         .count()
 }
 
-pub fn run(session: &Session, shape: Vec<i64>, pixels: Vec<f32>) -> Option<Vec<f32>> {
+pub fn run(session: &Session, shape: Vec<i64>, pixels: Vec<f32>) -> Result<Vec<f32>, ModelError> {
     run_shaped(session, shape, pixels).map(|(_, values)| values)
 }
 
-pub fn run_embedding(session: &Session, shape: Vec<i64>, pixels: Vec<f32>) -> Option<Vec<f32>> {
-    let input = ort::value::Value::from_array((shape, pixels)).ok()?;
-    let mut session = session.lock().ok()?;
-    let output = session.run(ort::inputs![input]).ok()?;
-    output.into_iter().find_map(|(_, value)| {
-        let (_, values) = value.try_extract_tensor::<f32>().ok()?;
-        (values.len() == super::vision::DIM).then(|| values.to_vec())
-    })
+pub fn run_embedding(
+    session: &Session,
+    shape: Vec<i64>,
+    pixels: Vec<f32>,
+) -> Result<Vec<f32>, ModelError> {
+    let input = ort::value::Value::from_array((shape, pixels))
+        .map_err(|error| ModelError::contract(format!("embedding input tensor: {error}")))?;
+    let mut session = session
+        .lock()
+        .map_err(|_| ModelError::Poisoned("embedding session"))?;
+    let output = session
+        .run(ort::inputs![input])
+        .map_err(|error| ModelError::runtime(format!("embedding forward pass: {error}")))?;
+    for (_, value) in output {
+        let Ok((shape, values)) = value.try_extract_tensor::<f32>() else {
+            continue;
+        };
+        let vector_shape =
+            shape[..] == [super::vision::DIM as i64] || shape[..] == [1, super::vision::DIM as i64];
+        if !vector_shape || values.len() != super::vision::DIM {
+            continue;
+        }
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(ModelError::contract(
+                "embedding output contains a non-finite value",
+            ));
+        }
+        return Ok(values.to_vec());
+    }
+    Err(ModelError::contract(format!(
+        "embedding graph exposed no f32 vector shaped [{0}] or [1, {0}]",
+        super::vision::DIM
+    )))
 }
 
 pub fn run_shaped(
     session: &Session,
     shape: Vec<i64>,
     pixels: Vec<f32>,
-) -> Option<(Vec<i64>, Vec<f32>)> {
-    let input = ort::value::Value::from_array((shape, pixels)).ok()?;
-    let mut session = session.lock().ok()?;
-    let output = session.run(ort::inputs![input]).ok()?;
-    let (_, value) = output.into_iter().next()?;
-    let (shape, values) = value.try_extract_tensor::<f32>().ok()?;
-    Some((shape.to_vec(), values.to_vec()))
+) -> Result<(Vec<i64>, Vec<f32>), ModelError> {
+    let input = ort::value::Value::from_array((shape, pixels))
+        .map_err(|error| ModelError::contract(format!("input tensor: {error}")))?;
+    let mut session = session
+        .lock()
+        .map_err(|_| ModelError::Poisoned("inference session"))?;
+    let output = session
+        .run(ort::inputs![input])
+        .map_err(|error| ModelError::runtime(format!("forward pass: {error}")))?;
+    let (_, value) = output
+        .into_iter()
+        .next()
+        .ok_or_else(|| ModelError::contract("graph exposed no output tensor"))?;
+    let (shape, values) = value
+        .try_extract_tensor::<f32>()
+        .map_err(|error| ModelError::contract(format!("output is not an f32 tensor: {error}")))?;
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(ModelError::contract(
+            "output tensor contains a non-finite value",
+        ));
+    }
+    Ok((shape.to_vec(), values.to_vec()))
 }
 
 pub fn pixels_by(
@@ -338,36 +643,34 @@ pub fn pixels_of(view: &image::RgbImage, side: usize, scale: fn(u8) -> f32) -> V
     pixels_by(view, side, |_, value| scale(value))
 }
 
-#[allow(dead_code)]
-pub fn limit(_ctx: &Ctx, _chat: i64) -> u32 {
-    DEFAULT_LIMIT
-}
-
-fn probabilities(logits: &[f32]) -> Vec<f32> {
+fn probabilities(logits: &[f32]) -> Result<Vec<f32>, ModelError> {
     if logits.is_empty() || logits.iter().any(|logit| !logit.is_finite()) {
-        return vec![0.0; logits.len()];
+        return Err(ModelError::contract("logits are empty or non-finite"));
     }
     let top = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let exp: Vec<f32> = logits.iter().map(|x| (x - top).exp()).collect();
     let sum: f32 = exp.iter().sum();
-    if sum <= 0.0 {
-        return vec![0.0; logits.len()];
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err(ModelError::contract("softmax denominator is invalid"));
     }
-    exp.into_iter().map(|x| x / sum).collect()
+    Ok(exp.into_iter().map(|x| x / sum).collect())
 }
 
-fn nsfw_of(logits: &[f32]) -> f32 {
-    probabilities(logits).first().copied().unwrap_or(0.0)
+fn nsfw_of(logits: &[f32]) -> Result<f32, ModelError> {
+    probabilities(logits)?
+        .first()
+        .copied()
+        .ok_or_else(|| ModelError::contract("classifier returned no classes"))
 }
 
-fn breakdown(labels: &[&str], logits: &[f32]) -> String {
-    let p = probabilities(logits);
-    labels
+fn breakdown(labels: &[&str], logits: &[f32]) -> Result<String, ModelError> {
+    let p = probabilities(logits)?;
+    Ok(labels
         .iter()
         .zip(&p)
         .map(|(label, value)| format!("{label} {value:.2}"))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" "))
 }
 
 pub fn fit(image: &image::RgbImage, resize: usize, side: usize) -> image::RgbImage {
@@ -426,7 +729,6 @@ fn sharpness(image: &image::RgbImage) -> f32 {
         .collect();
 
     let (width, height) = (width as usize, height as usize);
-
     let (mut sum, mut squares) = (0f64, 0f64);
     for y in 1..height - 1 {
         for x in 1..width - 1 {
@@ -448,51 +750,69 @@ fn frail_of(detail: u32, sharpness: f32) -> bool {
 
 pub struct Look {
     pub score: f32,
-
     pub peak: f32,
-
     pub frail: bool,
     pub note: String,
+    pub complete: bool,
 }
 
-fn judge(session: &Session, view: &image::RgbImage) -> Option<f32> {
+fn judge(session: &Session, view: &image::RgbImage) -> Result<(f32, bool), ModelError> {
     let shape = || vec![1, 3, SIDE as i64, SIDE as i64];
     let scale = |value: u8| f32::from(value) / 127.5 - 1.0;
 
     let logits = run(session, shape(), pixels_of(view, SIDE, scale))?;
     if logits.len() != CLASSES.len() {
-        return None;
+        return Err(ModelError::contract(format!(
+            "NSFW classifier returned {} classes, expected {}",
+            logits.len(),
+            CLASSES.len()
+        )));
     }
-    let first = nsfw_of(&logits);
+    let first = nsfw_of(&logits)?;
     if !undecided(first) {
-        return Some(first);
+        return Ok((first, true));
     }
     let mirror = image::imageops::flip_horizontal(view);
-
-    let Some(logits) = run(session, shape(), pixels_of(&mirror, SIDE, scale)) else {
-        return Some(first);
+    let logits = match run(session, shape(), pixels_of(&mirror, SIDE, scale)) {
+        Ok(logits) => logits,
+        Err(error) => {
+            log::warn!("nsfw: mirrored second pass failed; retaining first score: {error}");
+            return Ok((first, false));
+        }
     };
     if logits.len() != CLASSES.len() {
-        return Some(first);
+        log::warn!(
+            "nsfw: mirrored second pass returned {} classes, expected {}; retaining first score",
+            logits.len(),
+            CLASSES.len()
+        );
+        return Ok((first, false));
     }
-    Some((first + nsfw_of(&logits)) / 2.0)
+    Ok(((first + nsfw_of(&logits)?) / 2.0, true))
 }
 
-fn look(image: &image::RgbImage) -> Option<Look> {
-    let pool = model()?;
-    pool.with(|session| look_with(session, image))
+fn look(image: &image::RgbImage) -> Result<Option<Look>, ModelError> {
+    let Some(pool) = model() else {
+        return Ok(None);
+    };
+    pool.with(|session| look_with(session, image)).map(Some)
 }
 
-fn look_with(session: &Session, image: &image::RgbImage) -> Option<Look> {
+fn look_with(session: &Session, image: &image::RgbImage) -> Result<Look, ModelError> {
     let detail = image.width().min(image.height());
     let sharpness = sharpness(image);
     let frail = frail_of(detail, sharpness);
 
     let mut scores: Vec<f32> = Vec::new();
+    let mut complete = true;
     for view in views(image, RESIZE, SIDE) {
-        scores.push(judge(session, &view)?);
+        let (score, full) = judge(session, &view)?;
+        scores.push(score);
+        complete &= full;
     }
-    let (&whole, ends) = scores.split_first()?;
+    let (&whole, ends) = scores
+        .split_first()
+        .ok_or_else(|| ModelError::contract("NSFW view set is empty"))?;
     let note = format!(
         "views {} detail {detail} sharp {sharpness:.0}{}",
         scores
@@ -502,11 +822,12 @@ fn look_with(session: &Session, image: &image::RgbImage) -> Option<Look> {
             .join("/"),
         if frail { " frail" } else { "" }
     );
-    Some(Look {
+    Ok(Look {
         score: verdict_of(whole, ends, frail),
         peak: scores.iter().copied().fold(whole, f32::max),
         frail,
         note,
+        complete,
     })
 }
 
@@ -521,9 +842,7 @@ fn explicit_of(hard: f32, sexy: f32) -> bool {
 
 pub struct Grade {
     pub hard: f32,
-
     pub sexy: f32,
-
     pub neutral: f32,
     pub classes: String,
 }
@@ -558,12 +877,14 @@ fn fold(seen: Option<Grade>, p: &[f32], classes: String) -> Grade {
     }
 }
 
-fn grade(image: &image::RgbImage) -> Option<Grade> {
-    let pool = grader()?;
-    pool.with(|session| grade_with(session, image))
+fn grade(image: &image::RgbImage) -> Result<Option<Grade>, ModelError> {
+    let Some(pool) = grader() else {
+        return Ok(None);
+    };
+    pool.with(|session| grade_with(session, image)).map(Some)
 }
 
-fn grade_with(session: &Session, image: &image::RgbImage) -> Option<Grade> {
+fn grade_with(session: &Session, image: &image::RgbImage) -> Result<Grade, ModelError> {
     let mut seen: Option<Grade> = None;
     let mut notes: Vec<String> = Vec::new();
     for view in views(image, GRADE_RESIZE, GRADE_SIDE) {
@@ -574,10 +895,14 @@ fn grade_with(session: &Session, image: &image::RgbImage) -> Option<Grade> {
             pixels,
         )?;
         if logits.len() != GRADE_CLASSES.len() {
-            return None;
+            return Err(ModelError::contract(format!(
+                "NSFW grader returned {} classes, expected {}",
+                logits.len(),
+                GRADE_CLASSES.len()
+            )));
         }
-        let p = probabilities(&logits);
-        notes.push(breakdown(&GRADE_CLASSES, &logits));
+        let p = probabilities(&logits)?;
+        notes.push(breakdown(&GRADE_CLASSES, &logits)?);
         let folded = fold(seen, &p, String::new());
         let done = folded.corroborates();
         seen = Some(folded);
@@ -589,6 +914,7 @@ fn grade_with(session: &Session, image: &image::RgbImage) -> Option<Grade> {
         classes: notes.join(" · "),
         ..grade
     })
+    .ok_or_else(|| ModelError::contract("NSFW grader view set is empty"))
 }
 
 fn innocent(grade: &Grade, score: f32) -> bool {
@@ -726,14 +1052,61 @@ fn decode_gif_frames(bytes: Vec<u8>) -> Option<Vec<image::RgbImage>> {
 }
 
 async fn animated_command(program: &str, args: &[String]) -> Option<std::process::Output> {
-    let output = Command::new(program)
+    let limit = if program == "ffprobe" {
+        64 * 1024
+    } else {
+        MAX_ANIMATED_FRAMES * MAX_ANIMATED_SIDE as usize * MAX_ANIMATED_SIDE as usize * 3
+    };
+    animated_command_limited(program, args, limit, std::time::Duration::from_secs(30)).await
+}
+
+async fn animated_command_limited(
+    program: &str,
+    args: &[String],
+    limit: usize,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    use tokio::io::AsyncReadExt;
+    let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .await
+        .kill_on_drop(true)
+        .spawn()
         .ok()?;
+    let stdout = child.stdout.take()?;
+    let stderr = child.stderr.take()?;
+    let result = tokio::time::timeout(timeout, async {
+        let read = |pipe: Box<dyn tokio::io::AsyncRead + Send + Unpin>, cap: usize| async move {
+            let mut bytes = Vec::new();
+            pipe.take(cap as u64 + 1).read_to_end(&mut bytes).await?;
+            if bytes.len() > cap {
+                return Err(std::io::Error::other("decoder output limit exceeded"));
+            }
+            Ok::<_, std::io::Error>(bytes)
+        };
+        let (stdout, stderr) = tokio::try_join!(
+            read(Box::new(stdout), limit),
+            read(Box::new(stderr), 64 * 1024)
+        )?;
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    })
+    .await;
+    let output = match result {
+        Ok(Ok(output)) => output,
+        _ => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            log::warn!("nsfw: decoder timed out or exceeded its output budget");
+            return None;
+        }
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::info!(
@@ -851,12 +1224,14 @@ fn score_animated_frames(
     needs_nsfw: bool,
     needs_general: bool,
     filter_specs: Vec<(Vec<f32>, f32)>,
-) -> Option<AnimatedSelection> {
+) -> Result<Option<AnimatedSelection>, ModelError> {
     struct Lane {
         best_nsfw: Option<(usize, image::RgbImage, Look)>,
         best_general: Option<(usize, image::RgbImage, f32)>,
         margins: Option<[f32; super::CONCEPT_SLOTS]>,
         custom_margins: Option<Vec<f32>>,
+        general_observed: bool,
+        error: Option<ModelError>,
     }
     let total = frames.len();
     let lanes = infer_sessions().clamp(1, total.max(1));
@@ -874,14 +1249,33 @@ fn score_animated_frames(
                         best_nsfw: None,
                         best_general: None,
                         margins: needs_general.then_some([f32::MIN; super::CONCEPT_SLOTS]),
-                        custom_margins: needs_general
-                            .then(|| vec![f32::MIN; filter_specs.len()]),
+                        custom_margins: needs_general.then(|| vec![f32::MIN; filter_specs.len()]),
+                        general_observed: false,
+                        error: None,
                     };
                     for (index, frame) in shard {
-                        let look = needs_nsfw.then(|| look(&frame)).flatten();
-                        let embedding = needs_general
-                            .then(|| super::vision::embed_of(&frame))
-                            .flatten();
+                        let look = if needs_nsfw {
+                            match look(&frame) {
+                                Ok(look) => look,
+                                Err(error) => {
+                                    lane.error = Some(error);
+                                    break;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        let embedding = if needs_general {
+                            match super::vision::embed_of(&frame) {
+                                Ok(embedding) => embedding,
+                                Err(error) => {
+                                    lane.error = Some(error);
+                                    break;
+                                }
+                            }
+                        } else {
+                            None
+                        };
 
                         if let Some(look) = look {
                             let better = lane.best_nsfw.as_ref().is_none_or(|(at, _, current)| {
@@ -897,6 +1291,7 @@ fn score_animated_frames(
                         }
 
                         if let Some(embedding) = embedding {
+                            lane.general_observed = true;
                             let all = super::concepts::margins_from(&embedding);
                             let mut relevance = f32::MIN;
                             if let Some(maxima) = lane.margins.as_mut() {
@@ -906,20 +1301,16 @@ fn score_animated_frames(
                                 }
                             }
                             if let Some(maxima) = lane.custom_margins.as_mut() {
-                                for (maximum, (vector, cut)) in
-                                    maxima.iter_mut().zip(filter_specs)
+                                for (maximum, (vector, cut)) in maxima.iter_mut().zip(filter_specs)
                                 {
                                     let value = super::imgfilter::margin(&embedding, vector);
                                     *maximum = maximum.max(value);
                                     relevance = relevance.max(value - *cut);
                                 }
                             }
-                            let better = lane
-                                .best_general
-                                .as_ref()
-                                .is_none_or(|(at, _, current)| {
-                                    relevance > *current
-                                        || (relevance == *current && index < *at)
+                            let better =
+                                lane.best_general.as_ref().is_none_or(|(at, _, current)| {
+                                    relevance > *current || (relevance == *current && index < *at)
                                 });
                             if better {
                                 lane.best_general = Some((index, frame, relevance));
@@ -940,14 +1331,17 @@ fn score_animated_frames(
     let mut best_general: Option<(usize, image::RgbImage, f32)> = None;
     let mut margins = needs_general.then_some([f32::MIN; super::CONCEPT_SLOTS]);
     let mut custom_margins = needs_general.then(|| vec![f32::MIN; filter_specs.len()]);
+    let mut general_observed = false;
     for lane in partials {
+        if let Some(error) = lane.error {
+            return Err(error);
+        }
+        general_observed |= lane.general_observed;
         if let Some((index, image, look)) = lane.best_nsfw {
             let better = best_nsfw.as_ref().is_none_or(|(at, _, current)| {
                 look.score > current.score
                     || (look.score == current.score && look.peak > current.peak)
-                    || (look.score == current.score
-                        && look.peak == current.peak
-                        && index < *at)
+                    || (look.score == current.score && look.peak == current.peak && index < *at)
             });
             if better {
                 best_nsfw = Some((index, image, look));
@@ -974,19 +1368,27 @@ fn score_animated_frames(
     }
 
     let (image, look) = if needs_nsfw {
-        let (index, image, mut look) = best_nsfw?;
+        let Some((index, image, mut look)) = best_nsfw else {
+            return Ok(None);
+        };
         look.note = format!("animated frame {}/{} {}", index + 1, total, look.note);
         (image, Some(look))
     } else {
-        let (_, image, _) = best_general?;
+        let Some((_, image, _)) = best_general else {
+            return Ok(None);
+        };
         (image, None)
     };
-    Some(AnimatedSelection {
+    if !general_observed {
+        margins = None;
+        custom_margins = None;
+    }
+    Ok(Some(AnimatedSelection {
         image,
         look,
         margins,
         custom_margins,
-    })
+    }))
 }
 
 fn thumbs(media: &Media) -> Vec<PhotoSize> {
@@ -1001,7 +1403,6 @@ fn thumbs(media: &Media) -> Vec<PhotoSize> {
             sizes
         }
         Media::Sticker(sticker) => sticker.document.thumbs(),
-
         Media::WebPage(page) => webpage_photo(page).map_or_else(Vec::new, |photo| photo.thumbs()),
         _ => Vec::new(),
     }
@@ -1022,7 +1423,6 @@ fn why_skipped(media: &Media) -> String {
         sizes.len(),
         sizes.iter().all(|size| matches!(size, PhotoSize::Path(_))),
     );
-
     let detail = match media {
         Media::Document(document) => match document.raw.document.as_ref() {
             Some(grammers_client::tl::enums::Document::Document(raw)) => format!(
@@ -1102,7 +1502,6 @@ fn dims(size: &PhotoSize) -> Option<(i32, i32)> {
         PhotoSize::Size(size) => Some((size.width, size.height)),
         PhotoSize::Cached(size) => Some((size.width, size.height)),
         PhotoSize::Progressive(size) => Some((size.width, size.height)),
-
         PhotoSize::Stripped(size) => match size.bytes.as_slice() {
             [0x01, width, height, ..] => Some((i32::from(*width), i32::from(*height))),
             _ => None,
@@ -1175,15 +1574,10 @@ pub enum Verdict {
 #[derive(Clone, Copy, Debug)]
 pub struct Judgement {
     pub score: f32,
-
     pub innocent: bool,
-
     pub explicit: bool,
-
     pub confirmed: bool,
-
     pub weak: bool,
-
     pub arbiter: Option<Arbiter>,
 }
 
@@ -1203,7 +1597,6 @@ pub async fn watch(ctx: &Arc<Ctx>, message: &Message, chat: i64, view: &View<'_>
     let Some(id) = file_id(media) else {
         return;
     };
-
     let animated_media =
         matches!(media, Media::Document(document) if is_animated_document(document));
 
@@ -1218,7 +1611,6 @@ pub async fn watch(ctx: &Arc<Ctx>, message: &Message, chat: i64, view: &View<'_>
         });
         (nsfw, super::concepts::armed_under(&settings), advert)
     });
-
     let custom = super::imgfilter::any(ctx, chat);
     if nsfw.is_none() && concepts.is_none() && advert.is_none() && !custom {
         return;
@@ -1232,7 +1624,15 @@ pub async fn watch(ctx: &Arc<Ctx>, message: &Message, chat: i64, view: &View<'_>
     let wants_text = advert.is_some() && reading.is_none();
 
     let filters = match custom {
-        true => ctx.image_filters(chat).await,
+        true => match ctx.image_filters(chat).await {
+            Ok(filters) => filters,
+            Err(error) => {
+                log::error!(
+                    "image filters: could not load policy for {chat}; suppressing moderation for this update: {error}"
+                );
+                return;
+            }
+        },
         false => no_filters(),
     };
     let custom_margins = super::imgfilter::cached_margins(ctx, id, &filters, animated_media);
@@ -1278,21 +1678,20 @@ pub async fn watch(ctx: &Arc<Ctx>, message: &Message, chat: i64, view: &View<'_>
         return;
     };
     let message_id = message.id();
-
     let kind = kind_of(media);
     let sender = message.sender_id().and_then(PeerId::bare_id);
     let name = super::name_of(message);
     let ctx = Arc::clone(ctx);
     let task_slot = ctx.nsfw_task_slot().await;
 
-    tokio::spawn(async move {
+    Arc::clone(&ctx).spawn_owned(async move {
         let _task_slot = task_slot;
-        classify(
+        classify(Classification {
             ctx,
             chat,
             chat_ref,
             message_id,
-            id,
+            media_id: id,
             ladder,
             gif_document,
             kind,
@@ -1306,7 +1705,7 @@ pub async fn watch(ctx: &Arc<Ctx>, message: &Message, chat: i64, view: &View<'_>
             custom_margins,
             sender,
             name,
-        )
+        })
         .await;
     });
 }
@@ -1329,25 +1728,35 @@ pub struct Armed {
     pub spare: bool,
 }
 
-async fn embed(ctx: &Arc<Ctx>, image: &Arc<image::RgbImage>, remember: bool) -> Option<Vec<f32>> {
+async fn embed(
+    ctx: &Arc<Ctx>,
+    image: &Arc<image::RgbImage>,
+    remember: bool,
+) -> Result<Option<Vec<f32>>, ModelError> {
     let frame = Arc::clone(image);
-    let embedding = tokio::task::spawn_blocking(move || super::vision::embed_of(&frame))
-        .await
-        .ok()
-        .flatten()?;
+    let embedding = match tokio::task::spawn_blocking(move || super::vision::embed_of(&frame)).await
+    {
+        Ok(Ok(Some(embedding))) => embedding,
+        Ok(Ok(None)) => return Ok(None),
+        Ok(Err(error)) => return Err(error),
+        Err(error) => {
+            return Err(ModelError::runtime(format!(
+                "vision embedding worker: {error}"
+            )));
+        }
+    };
     if remember {
         ctx.remember_sample(&embedding);
     }
-    Some(embedding)
+    Ok(Some(embedding))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn classify(
+struct Classification {
     ctx: Arc<Ctx>,
     chat: i64,
     chat_ref: PeerRef,
     message_id: i32,
-    id: i64,
+    media_id: i64,
     ladder: Option<Ladder>,
     gif_document: Option<Document>,
     kind: &'static str,
@@ -1361,7 +1770,29 @@ async fn classify(
     custom_margins: Option<Vec<f32>>,
     sender: Option<i64>,
     name: String,
-) {
+}
+
+async fn classify(classification: Classification) {
+    let Classification {
+        ctx,
+        chat,
+        chat_ref,
+        message_id,
+        media_id: id,
+        ladder,
+        gif_document,
+        kind,
+        nsfw,
+        concepts,
+        advert,
+        verdict,
+        margins,
+        reading,
+        filters,
+        custom_margins,
+        sender,
+        name,
+    } = classification;
     let needs_nsfw = nsfw.is_some() && verdict.is_none();
     let needs_concepts = concepts.is_some() && margins.is_none();
     let needs_custom = !filters.is_empty() && custom_margins.is_none();
@@ -1411,9 +1842,22 @@ async fn classify(
         let selection = tokio::task::spawn_blocking(move || {
             score_animated_frames(frames, needs_nsfw, needs_general, filter_specs)
         })
-        .await
-        .ok()
-        .flatten();
+        .await;
+        let selection = match selection {
+            Ok(Ok(selection)) => selection,
+            Ok(Err(error)) => {
+                log::error!(
+                    "nsfw: {chat} file {id} animated model failure: {error}; result not cached"
+                );
+                return;
+            }
+            Err(error) => {
+                log::error!(
+                    "nsfw: {chat} file {id} animated worker failure: {error}; result not cached"
+                );
+                return;
+            }
+        };
         match selection {
             Some(selection) => {
                 if let Some(all) = selection.margins {
@@ -1486,6 +1930,7 @@ async fn classify(
         || (!filters.is_empty() && custom_margins.is_none());
     let mut embedding: Option<Vec<f32>> = None;
     let mut embedded = false;
+    let mut verdict_cacheable = true;
 
     if let Some(armed) = nsfw {
         let judged = match verdict {
@@ -1495,12 +1940,22 @@ async fn classify(
                     Some(look) => look,
                     None => {
                         let frame = Arc::clone(&image);
-                        let Ok(Some(look)) =
-                            tokio::task::spawn_blocking(move || look(&frame)).await
-                        else {
-                            return;
-                        };
-                        look
+                        match tokio::task::spawn_blocking(move || look(&frame)).await {
+                            Ok(Ok(Some(look))) => look,
+                            Ok(Ok(None)) => return,
+                            Ok(Err(error)) => {
+                                log::error!(
+                                    "nsfw: {chat} file {id} classifier failed: {error}; result not cached"
+                                );
+                                return;
+                            }
+                            Err(error) => {
+                                log::error!(
+                                    "nsfw: {chat} file {id} classifier worker failed: {error}; result not cached"
+                                );
+                                return;
+                            }
+                        }
                     }
                 };
 
@@ -1512,24 +1967,54 @@ async fn classify(
                     Some(ladder) => fetch(&ctx, chat, id, ladder, ladder.start + 1).await,
                     None => None,
                 };
-
-                if let Some(sharper) = sharper
-                    && let Ok(Some((better, frame))) = tokio::task::spawn_blocking(move || {
-                        let frame = image::load_from_memory(&sharper).ok()?.to_rgb8();
-                        self::look(&frame).map(|look| (look, frame))
+                if let Some(sharper) = sharper {
+                    let better = tokio::task::spawn_blocking(move || {
+                        let frame = image::load_from_memory(&sharper)
+                            .map_err(|error| error.to_string())?
+                            .to_rgb8();
+                        self::look(&frame)
+                            .map_err(|error| error.to_string())
+                            .map(|look| look.map(|look| (look, frame)))
                     })
-                    .await
-                {
-                    look = Look {
-                        note: format!("{} escalated", better.note),
-                        ..better
-                    };
-                    image = Arc::new(frame);
+                    .await;
+                    match better {
+                        Ok(Ok(Some((better, frame)))) => {
+                            look = Look {
+                                note: format!("{} escalated", better.note),
+                                ..better
+                            };
+                            image = Arc::new(frame);
+                        }
+                        Ok(Ok(None)) => {}
+                        Ok(Err(error)) => {
+                            log::warn!(
+                                "nsfw: {chat} file {id} sharper rung failed: {error}; using the initial score without caching"
+                            );
+                            verdict_cacheable = false;
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "nsfw: {chat} file {id} sharper worker failed: {error}; using the initial score without caching"
+                            );
+                            verdict_cacheable = false;
+                        }
+                    }
+                }
+                if !look.complete {
+                    verdict_cacheable = false;
                 }
 
                 let arbiter = if look.peak >= GRADE_ABOVE {
                     if !embedded {
-                        embedding = embed(&ctx, &image, wants_embedding).await;
+                        match embed(&ctx, &image, wants_embedding).await {
+                            Ok(found) => embedding = found,
+                            Err(error) => {
+                                log::error!(
+                                    "nsfw: {chat} file {id} arbiter failed: {error}; result not cached"
+                                );
+                                verdict_cacheable = false;
+                            }
+                        }
                         embedded = true;
                     }
                     embedding.as_deref().map(arbiter_of)
@@ -1540,7 +2025,7 @@ async fn classify(
                 let (innocent, explicit, confirmed, weak) = if look.score >= GRADE_ABOVE {
                     let frame = Arc::clone(&image);
                     match tokio::task::spawn_blocking(move || grade(&frame)).await {
-                        Ok(Some(grade)) => {
+                        Ok(Ok(Some(grade))) => {
                             log::info!("nsfw: {chat} file {id} grade [{}]", grade.classes);
                             (
                                 innocent(&grade, look.score),
@@ -1549,18 +2034,35 @@ async fn classify(
                                 look.frail && !grade.corroborates(),
                             )
                         }
-
-                        _ => (false, true, look.score >= CONFIDENT, false),
+                        Ok(Ok(None)) => {
+                            log::error!(
+                                "nsfw: {chat} file {id} grader unavailable; result not cached"
+                            );
+                            verdict_cacheable = false;
+                            (false, true, look.score >= CONFIDENT, false)
+                        }
+                        Ok(Err(error)) => {
+                            log::error!(
+                                "nsfw: {chat} file {id} grader failed: {error}; result not cached"
+                            );
+                            verdict_cacheable = false;
+                            (false, true, look.score >= CONFIDENT, false)
+                        }
+                        Err(error) => {
+                            log::error!(
+                                "nsfw: {chat} file {id} grader worker failed: {error}; result not cached"
+                            );
+                            verdict_cacheable = false;
+                            (false, true, look.score >= CONFIDENT, false)
+                        }
                     }
                 } else {
                     (false, true, look.score >= CONFIDENT, false)
                 };
-
                 let score = match arbiter.is_some_and(|a| a.sure()) {
                     true => look.peak,
                     false => look.score,
                 };
-
                 let (score, explicit) = match arbiter.filter(|a| a.head_deletes()) {
                     Some(a) => (score.max(a.head), true),
                     None => (score, explicit),
@@ -1573,16 +2075,14 @@ async fn classify(
                     weak,
                     arbiter,
                 };
-                ctx.remember_verdict(id, judged, from_animation);
+                if verdict_cacheable {
+                    ctx.remember_verdict(id, judged, from_animation);
+                }
                 log::info!(
                     "nsfw: {chat} file {id} {kind} {pixels} bytes {size} think {}ms {}{}{}",
                     thinking.elapsed().as_millis(),
                     look.note,
-                    if score > look.score {
-                        " raised"
-                    } else {
-                        ""
-                    },
+                    if score > look.score { " raised" } else { "" },
                     arbiter.map_or_else(
                         || " arbiter none".to_owned(),
                         |a| format!(
@@ -1596,20 +2096,29 @@ async fn classify(
         };
         act_detached(
             &ctx,
-            chat,
-            chat_ref,
-            message_id,
-            id,
-            judged,
-            &armed,
-            sender,
-            name.clone(),
+            DetachedNsfw {
+                chat,
+                chat_ref,
+                message_id,
+                media_id: id,
+                judged,
+                armed: &armed,
+                sender,
+                name: name.clone(),
+            },
         )
         .await;
     }
 
     if wants_embedding && !embedded {
-        embedding = embed(&ctx, &image, true).await;
+        match embed(&ctx, &image, true).await {
+            Ok(found) => embedding = found,
+            Err(error) => {
+                log::error!(
+                    "nsfw: {chat} file {id} vision embedding failed: {error}; result not cached"
+                );
+            }
+        }
     }
 
     if let Some(armed) = concepts {
@@ -1623,7 +2132,17 @@ async fn classify(
         };
         if let Some(all) = all {
             super::concepts::act_detached(
-                &ctx, chat, chat_ref, message_id, id, &all, &armed, sender, &name,
+                &ctx,
+                super::concepts::Detached {
+                    chat,
+                    chat_ref,
+                    message_id,
+                    media_id: id,
+                    margins: &all,
+                    armed: &armed,
+                    sender,
+                    name: &name,
+                },
             )
             .await;
         }
@@ -1638,7 +2157,17 @@ async fn classify(
         };
         if let Some(scored) = scored {
             super::imgfilter::act_detached(
-                &ctx, chat, chat_ref, message_id, id, &filters, &scored, sender, &name,
+                &ctx,
+                super::imgfilter::Detached {
+                    chat,
+                    chat_ref,
+                    message_id,
+                    media_id: id,
+                    filters: &filters,
+                    margins: &scored,
+                    sender,
+                    name: &name,
+                },
             )
             .await;
         }
@@ -1649,11 +2178,22 @@ async fn classify(
             Some(why) => why,
             None => {
                 let frame = Arc::clone(&image);
-                let text = tokio::task::spawn_blocking(move || super::ocr::read(&frame))
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
+                let text = match tokio::task::spawn_blocking(move || super::ocr::read(&frame)).await
+                {
+                    Ok(Ok(text)) => text,
+                    Ok(Err(error)) => {
+                        log::error!(
+                            "advert: OCR failed for chat {chat} file {id}: {error}; result not cached"
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        log::error!(
+                            "advert: OCR worker failed for chat {chat} file {id}: {error}; result not cached"
+                        );
+                        return;
+                    }
+                };
                 let why = super::ocr::advertises(&text);
                 log::info!(
                     "advert[{}]: chat {chat} file {id} read {:?} → {}",
@@ -1671,7 +2211,11 @@ async fn classify(
         if !armed.live {
             return;
         }
-        match ctx.client.delete_messages(chat_ref, &[message_id]).await {
+        match ctx
+            .client
+            .delete_messages_critical(chat_ref, &[message_id])
+            .await
+        {
             Ok(0) => {
                 eprintln!("advert: delete affected nothing in {chat} msg {message_id}");
                 return;
@@ -1683,7 +2227,19 @@ async fn classify(
             }
         }
         ctx.bump(chat, super::stats::DELETED);
-        punish_and_notify(&ctx, chat, chat_ref, sender, &name, super::ocr::LOCK, why).await;
+        punish_and_notify(
+            &ctx,
+            DetachedModeration {
+                chat,
+                chat_ref,
+                message_id,
+                sender,
+                name: &name,
+                cause: super::ocr::LOCK,
+                reason: why,
+            },
+        )
+        .await;
     }
 }
 
@@ -1708,16 +2264,21 @@ async fn act_advert(
     if !armed.live {
         return;
     }
-    if let Err(e) = message.delete().await {
+    if let Err(e) = message.delete_critical().await {
         eprintln!("advert: could not delete in {chat}: {e}");
         return;
     }
     ctx.bump(chat, super::stats::DELETED);
     let chances = match super::strict::punish(ctx, message, chat, super::ocr::LOCK).await {
-        super::strict::Outcome::Announced => return,
+        super::strict::Outcome::Announced => {
+            let action = super::cases::action_key(super::strict::action_of(ctx, chat));
+            super::cases::record_delete(ctx, message, super::ocr::LOCK, why, action).await;
+            return;
+        }
         super::strict::Outcome::Chances(left) => Some(left),
         super::strict::Outcome::Nothing => None,
     };
+    super::cases::record_delete(ctx, message, super::ocr::LOCK, why, "delete").await;
     super::notice::send(ctx, message, chat, why, chances).await;
 }
 
@@ -1730,7 +2291,6 @@ pub async fn fetch(
 ) -> Option<Vec<u8>> {
     let thumb = ladder.rung(at);
     let _fetching = ctx.nsfw_fetch().await;
-
     let mut bytes = Vec::with_capacity(Downloadable::size(&thumb).unwrap_or(0));
     let mut download = ctx.client.iter_download(&thumb);
     loop {
@@ -1783,38 +2343,57 @@ async fn act(
     {
         return;
     }
-    if let Err(e) = message.delete().await {
+    if let Err(e) = message.delete_critical().await {
         eprintln!("nsfw: could not delete in {chat}: {e}");
         return;
     }
     ctx.bump(chat, super::stats::DELETED);
     let chances = match super::strict::punish(ctx, message, chat, LOCK).await {
-        super::strict::Outcome::Announced => return,
+        super::strict::Outcome::Announced => {
+            let action = super::cases::action_key(super::strict::action_of(ctx, chat));
+            super::cases::record_delete(ctx, message, LOCK, "محتوای غیراخلاقی", action).await;
+            return;
+        }
         super::strict::Outcome::Chances(left) => Some(left),
         super::strict::Outcome::Nothing => None,
     };
+    super::cases::record_delete(ctx, message, LOCK, "محتوای غیراخلاقی", "delete").await;
     super::notice::send(ctx, message, chat, "محتوای غیراخلاقی", chances).await;
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn act_detached(
-    ctx: &Arc<Ctx>,
+struct DetachedNsfw<'a> {
     chat: i64,
     chat_ref: PeerRef,
     message_id: i32,
-    id: i64,
+    media_id: i64,
     judged: Judgement,
-    armed: &Armed,
+    armed: &'a Armed,
     sender: Option<i64>,
     name: String,
-) {
-    report(chat, id, judged, armed, false);
+}
+
+async fn act_detached(ctx: &Arc<Ctx>, detached: DetachedNsfw<'_>) {
+    let DetachedNsfw {
+        chat,
+        chat_ref,
+        message_id,
+        media_id,
+        judged,
+        armed,
+        sender,
+        name,
+    } = detached;
+    report(chat, media_id, judged, armed, false);
     if verdict(judged.score, armed.limit, armed.shadow) != Verdict::Delete
-        || spared(judged, armed.spare, chat, id)
+        || spared(judged, armed.spare, chat, media_id)
     {
         return;
     }
-    match ctx.client.delete_messages(chat_ref, &[message_id]).await {
+    match ctx
+        .client
+        .delete_messages_critical(chat_ref, &[message_id])
+        .await
+    {
         Ok(0) => {
             eprintln!("nsfw: delete affected nothing in {chat} msg {message_id}");
             return;
@@ -1827,25 +2406,76 @@ async fn act_detached(
     }
     ctx.bump(chat, super::stats::DELETED);
 
-    punish_and_notify(ctx, chat, chat_ref, sender, &name, LOCK, "محتوای غیراخلاقی").await;
+    punish_and_notify(
+        ctx,
+        DetachedModeration {
+            chat,
+            chat_ref,
+            message_id,
+            sender,
+            name: &name,
+            cause: LOCK,
+            reason: "محتوای غیراخلاقی",
+        },
+    )
+    .await;
 }
 
-pub async fn punish_and_notify(
-    ctx: &Arc<Ctx>,
-    chat: i64,
-    chat_ref: PeerRef,
-    sender: Option<i64>,
-    name: &str,
-    cause: &str,
-    reason: &str,
-) {
-    let chances = match super::strict::punish_detached(ctx, chat, chat_ref, sender, name, cause)
-        .await
-    {
-        super::strict::Outcome::Announced => return,
-        super::strict::Outcome::Chances(left) => Some(left),
-        super::strict::Outcome::Nothing => None,
-    };
+pub struct DetachedModeration<'a> {
+    pub chat: i64,
+    pub chat_ref: PeerRef,
+    pub message_id: i32,
+    pub sender: Option<i64>,
+    pub name: &'a str,
+    pub cause: &'a str,
+    pub reason: &'a str,
+}
+
+pub async fn punish_and_notify(ctx: &Arc<Ctx>, action: DetachedModeration<'_>) {
+    let DetachedModeration {
+        chat,
+        chat_ref,
+        message_id,
+        sender,
+        name,
+        cause,
+        reason,
+    } = action;
+    let chances =
+        match super::strict::punish_detached(ctx, chat, chat_ref, sender, name, cause).await {
+            super::strict::Outcome::Announced => {
+                let action = super::cases::action_key(super::strict::action_of(ctx, chat));
+                super::cases::record_detached(
+                    ctx,
+                    super::cases::DetachedRecord {
+                        chat,
+                        subject: sender,
+                        subject_name: name,
+                        message: message_id,
+                        rule: cause,
+                        reason,
+                        action,
+                    },
+                )
+                .await;
+                return;
+            }
+            super::strict::Outcome::Chances(left) => Some(left),
+            super::strict::Outcome::Nothing => None,
+        };
+    super::cases::record_detached(
+        ctx,
+        super::cases::DetachedRecord {
+            chat,
+            subject: sender,
+            subject_name: name,
+            message: message_id,
+            rule: cause,
+            reason,
+            action: "delete",
+        },
+    )
+    .await;
     notify(ctx, chat, chat_ref, sender, name, reason, chances).await;
 }
 
@@ -1878,7 +2508,7 @@ pub async fn notify(
     );
     let Ok(sent) = ctx
         .client
-        .send_message(chat_ref, InputMessage::new().html(text))
+        .send_message(chat_ref, super::premium::html(text))
         .await
     else {
         return;
@@ -1952,7 +2582,80 @@ fn report(chat: i64, id: i64, judged: Judgement, armed: &Armed, cached: bool) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn decoder_children_have_deadlines_and_output_caps() {
+        let started = std::time::Instant::now();
+        assert!(
+            super::animated_command_limited(
+                "/bin/sleep",
+                &["30".into()],
+                1024,
+                std::time::Duration::from_millis(30)
+            )
+            .await
+            .is_none()
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(
+            super::animated_command_limited(
+                "/usr/bin/head",
+                &["-c".into(), "131072".into(), "/dev/zero".into()],
+                1024,
+                std::time::Duration::from_secs(2)
+            )
+            .await
+            .is_none()
+        );
+    }
     use super::*;
+
+    #[test]
+    fn operator_switches_and_device_ids_are_strict() {
+        assert!(parse_bool("ORT_USE_CUDA", " TRUE ").unwrap());
+        assert!(!parse_bool("ORT_USE_CUDA", "0").unwrap());
+        assert!(parse_bool("ORT_USE_CUDA", "enabled").is_err());
+        assert_eq!(parse_bounded_i32("ORT_CUDA_DEVICE", "3", 0, 8).unwrap(), 3);
+        assert!(parse_bounded_i32("ORT_CUDA_DEVICE", "-1", 0, 8).is_err());
+        assert!(parse_bounded_i32("ORT_CUDA_DEVICE", "gpu0", 0, 8).is_err());
+    }
+
+    #[test]
+    fn concurrent_runtime_publishers_converge_on_verified_bytes() {
+        let unique = RUNTIME_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "groupbot-onnx-publish-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("unique runtime test directory is creatable");
+        let target = directory.join("runtime.so");
+        let bytes = b"verified runtime fixture";
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let target = target.clone();
+                std::thread::spawn(move || publish_embedded(&target, bytes))
+            })
+            .collect();
+        for thread in threads {
+            thread
+                .join()
+                .expect("runtime publisher does not panic")
+                .expect("concurrent publisher accepts the verified winner");
+        }
+        assert!(file_matches(&target, bytes));
+        std::fs::remove_file(&target).expect("runtime test artifact is removable");
+        std::fs::remove_dir(&directory).expect("empty runtime test directory is removable");
+    }
+
+    #[test]
+    fn rolling_runtime_versions_never_share_a_publication_target() {
+        let first = embedded_runtime_filename(b"runtime build one");
+        let same = embedded_runtime_filename(b"runtime build one");
+        let second = embedded_runtime_filename(b"runtime build two");
+        assert_eq!(first, same);
+        assert_ne!(first, second);
+        assert!(first.starts_with("libonnxruntime.so.1.20.1-"));
+    }
 
     #[test]
     fn animated_sampling_spans_the_whole_document() {
@@ -1960,6 +2663,21 @@ mod tests {
         assert_eq!(sample_indices(4, MAX_ANIMATED_FRAMES), vec![0, 1, 2, 3]);
         assert_eq!(sample_indices(100, 4), vec![0, 33, 66, 99]);
         assert_eq!(sample_indices(100, 1), vec![0]);
+    }
+
+    #[test]
+    fn an_absent_general_model_never_becomes_cached_sentinel_margins() {
+        if super::super::vision::present() {
+            return;
+        }
+        let frame = image::RgbImage::from_fn(SIDE as u32, SIDE as u32, |x, y| {
+            image::Rgb([((x + y) % 255) as u8, (x % 255) as u8, (y % 255) as u8])
+        });
+        let selection = score_animated_frames(vec![frame], true, true, Vec::new())
+            .expect("the bundled classifier runs")
+            .expect("the NSFW frame still provides a selection");
+        assert!(selection.margins.is_none());
+        assert!(selection.custom_margins.is_none());
     }
 
     #[test]
@@ -2025,7 +2743,8 @@ mod tests {
 
     #[tokio::test]
     async fn mp4_with_a_trailing_moov_atom_still_decodes() {
-        let path = std::env::temp_dir().join(format!("groupbot-test-moov-{}.mp4", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("groupbot-test-moov-{}.mp4", std::process::id()));
         let args = [
             "-hide_banner",
             "-loglevel",
@@ -2092,7 +2811,8 @@ mod tests {
         ] {
             for spare in [false, true] {
                 for head in [HEAD_VETO, 0.41, HEAD_SURE - 0.01] {
-                    let without = allow_delete(innocent, true, spare, weak, confirmed, arbiter(explicit));
+                    let without =
+                        allow_delete(innocent, true, spare, weak, confirmed, arbiter(explicit));
                     let with = allow_delete(
                         innocent,
                         true,
@@ -2105,7 +2825,10 @@ mod tests {
                             head,
                         }),
                     );
-                    assert_eq!(with, without, "innocent {innocent} weak {weak} confirmed {confirmed} margin {explicit} head {head}");
+                    assert_eq!(
+                        with, without,
+                        "innocent {innocent} weak {weak} confirmed {confirmed} margin {explicit} head {head}"
+                    );
                 }
             }
         }
@@ -2124,7 +2847,14 @@ mod tests {
             !allow_delete(false, true, false, false, true, with_head(HEAD_VETO - 0.01)),
             "a confident first model and a sure prompt margin are still vetoed"
         );
-        assert!(allow_delete(false, true, false, false, true, with_head(HEAD_VETO)));
+        assert!(allow_delete(
+            false,
+            true,
+            false,
+            false,
+            true,
+            with_head(HEAD_VETO)
+        ));
     }
 
     #[test]
@@ -2137,20 +2867,50 @@ mod tests {
             allow_delete(false, true, false, false, true, head(HEAD_SURE)),
             "the head lifts the veto the captions could not see past"
         );
-        for (innocent, weak, confirmed) in [(true, false, true), (false, true, true), (false, false, false)] {
-            assert!(allow_delete(innocent, true, false, weak, confirmed, head(HEAD_SURE)));
+        for (innocent, weak, confirmed) in [
+            (true, false, true),
+            (false, true, true),
+            (false, false, false),
+        ] {
+            assert!(allow_delete(
+                innocent,
+                true,
+                false,
+                weak,
+                confirmed,
+                head(HEAD_SURE)
+            ));
         }
-
         assert!(!allow_delete(false, false, true, false, true, head(1.0)));
     }
 
     #[test]
     fn the_head_thresholds_are_ordered_and_strict() {
-        const { assert!(HEAD_VETO < 0.41, "the reverted head's hentai gif must not be vetoed again") };
+        const {
+            assert!(
+                HEAD_VETO < 0.41,
+                "the reverted head's hentai gif must not be vetoed again"
+            )
+        };
         const { assert!(HEAD_VETO < HEAD_SURE, "the silent band exists") };
-        const { assert!(HEAD_SURE >= 0.5, "sure is at least a coin toss in the head's own terms") };
-        const { assert!(HEAD_DELETE >= HEAD_SURE, "deleting alone is the stricter act") };
-        const { assert!(HEAD_DELETE >= 0.90, "the head acts alone only when it is nearly certain") };
+        const {
+            assert!(
+                HEAD_SURE >= 0.5,
+                "sure is at least a coin toss in the head's own terms"
+            )
+        };
+        const {
+            assert!(
+                HEAD_DELETE >= HEAD_SURE,
+                "deleting alone is the stricter act"
+            )
+        };
+        const {
+            assert!(
+                HEAD_DELETE >= 0.90,
+                "the head acts alone only when it is nearly certain"
+            )
+        };
         assert!(head(HEAD_SURE).is_some_and(|a| a.sure() && a.agrees()));
         assert!(head(HEAD_SURE - 0.01).is_some_and(|a| !a.sure() && !a.agrees()));
         assert!(head(HEAD_DELETE).is_some_and(|a| a.head_deletes()));
@@ -2163,7 +2923,6 @@ mod tests {
             !allow_delete(false, true, false, false, true, arbiter(0.005)),
             "an ordinary photograph is kept however sure the first two models are"
         );
-
         assert!(allow_delete(false, true, false, false, true, None));
 
         assert!(
@@ -2208,11 +2967,8 @@ mod tests {
     #[test]
     fn a_frail_wide_frame_reports_its_whole_and_keeps_its_peak() {
         let ends = [0.93, 0.71];
-
         assert!((verdict_of(0.10, &ends, true) - 0.10).abs() < 1e-6);
-
         assert!((verdict_of(0.40, &ends, false) - 0.93).abs() < 1e-6);
-
         assert!((verdict_of(0.10, &ends, false) - 0.10).abs() < 1e-6);
     }
 
@@ -2223,13 +2979,9 @@ mod tests {
             true => peak,
             false => careful,
         };
-
         assert!((choose(None) - careful).abs() < 1e-6);
-
         assert!((choose(arbiter(AGREE)) - careful).abs() < 1e-6);
-
         assert!((choose(arbiter(0.026)) - careful).abs() < 1e-6);
-
         assert!((choose(arbiter(RECOVER)) - peak).abs() < 1e-6);
     }
 
@@ -2237,9 +2989,7 @@ mod tests {
     fn the_skip_reason_separates_a_hole_from_a_non_picture() {
         assert_eq!(skip_reason(0, true), "telegram attached no thumbnail");
         assert_eq!(skip_reason(3, true), "only a vector outline");
-
         assert_eq!(skip_reason(0, false), "telegram attached no thumbnail");
-
         assert_eq!(skip_reason(2, false), "every thumbnail was rejected");
     }
 
@@ -2261,20 +3011,19 @@ mod tests {
     fn the_offending_class_is_the_first_one() {
         assert_eq!(CLASSES, ["nsfw", "sfw"]);
         assert!(
-            (nsfw_of(&[10.0, -10.0]) - 1.0).abs() < 0.01,
+            (nsfw_of(&[10.0, -10.0]).expect("finite logits") - 1.0).abs() < 0.01,
             "index 0 must be the offence"
         );
         assert!(
-            nsfw_of(&[-10.0, 10.0]) < 0.01,
+            nsfw_of(&[-10.0, 10.0]).expect("finite logits") < 0.01,
             "index 1 must be the safe one"
         );
 
-        assert!(nsfw_of(&[0.0, 0.0]) < 0.51);
-        assert_eq!(nsfw_of(&[]), 0.0, "an empty output fails closed");
-        assert_eq!(
-            nsfw_of(&[f32::NAN, 1.0]),
-            0.0,
-            "a non-finite output fails closed"
+        assert!(nsfw_of(&[0.0, 0.0]).expect("finite logits") < 0.51);
+        assert!(nsfw_of(&[]).is_err(), "an empty output is not a score");
+        assert!(
+            nsfw_of(&[f32::NAN, 1.0]).is_err(),
+            "a non-finite output is not a clean score"
         );
     }
 
@@ -2313,7 +3062,6 @@ mod tests {
         });
         let out = fit(&wide, RESIZE, SIDE);
         assert_eq!(out.dimensions(), (SIDE as u32, SIDE as u32));
-
         let centre = out.get_pixel(SIDE as u32 / 2, SIDE as u32 / 2).0[0];
         assert!(
             centre > 200,
@@ -2370,12 +3118,10 @@ mod tests {
             assert!(undecided(target - 0.05), "just below {preset}");
             assert!(undecided(target + 0.05), "just above {preset}");
         }
-
         assert!(!undecided(0.037), "an ordinary photo must not escalate");
         assert!(!undecided(0.067));
         assert!(!undecided(0.95), "a settled offence must not escalate");
         assert!(!undecided(1.0));
-
         assert!(GRADE_ABOVE < LIMIT_RANGE.0 as f32 / 100.0 + 0.01);
         assert!(CONFIDENT > LIMIT_RANGE.1 as f32 / 100.0 - 0.05);
     }
@@ -2393,7 +3139,6 @@ mod tests {
             escalates(0.50, false),
             "the unsure band escalates on its own"
         );
-
         assert!(!escalates(0.05, true));
     }
 
@@ -2434,7 +3179,6 @@ mod tests {
             innocent(&blank, 0.879),
             "the labelled false positive must be spared"
         );
-
         assert!(
             innocent(&blank, 0.93),
             "a neutral grader now vetoes the known 0.93 false positive"
@@ -2518,7 +3262,6 @@ mod tests {
         assert!((verdict_of(0.05, &[], false) - 0.05).abs() < 1e-6);
 
         assert!((verdict_of(0.40, &[0.99], false) - 0.99).abs() < 1e-6);
-
         assert!((verdict_of(0.29, &[0.99], false) - 0.29).abs() < 1e-6);
     }
 
@@ -2526,7 +3269,6 @@ mod tests {
     fn a_crop_of_a_frail_frame_cannot_speak_at_all() {
         assert!((verdict_of(0.35, &[0.93, 0.72], true) - 0.35).abs() < 1e-6);
         assert!((verdict_of(0.90, &[0.99], true) - 0.90).abs() < 1e-6);
-
         assert!((verdict_of(0.95, &[], true) - 0.95).abs() < 1e-6);
         assert!((verdict_of(0.04, &[0.99], true) - 0.04).abs() < 1e-6);
     }
@@ -2537,14 +3279,11 @@ mod tests {
             frail_of(180, 4_000.0),
             "an upscaled thumbnail is not something to delete on"
         );
-
         assert!(!frail_of(600, 4_000.0));
-
         assert!(
             frail_of(600, 12.0),
             "resolution is not the same thing as detail"
         );
-
         assert!(!frail_of(DETAIL_FLOOR, SHARPNESS_FLOOR));
         assert!(frail_of(DETAIL_FLOOR - 1, SHARPNESS_FLOOR));
         assert!(frail_of(DETAIL_FLOOR, SHARPNESS_FLOOR - 1.0));
@@ -2553,7 +3292,6 @@ mod tests {
     #[test]
     fn sharpness_tells_detail_from_smear() {
         let side = 128u32;
-
         let flat = image::RgbImage::from_pixel(side, side, image::Rgb([120, 120, 120]));
         assert!(
             sharpness(&flat) < 1.0,
@@ -2684,13 +3422,9 @@ mod tests {
     #[test]
     fn the_grader_spares_only_on_positive_evidence() {
         let unrecognised = [0.02, 0.05, 0.92, 0.00, 0.01];
-
         let blank = [0.00, 0.00, 1.00, 0.00, 0.00];
-
         let hardcore = [0.00, 0.00, 0.03, 0.97, 0.00];
-
         let revealing = [0.05, 0.01, 0.14, 0.10, 0.70];
-
         let unsure = [0.20, 0.05, 0.25, 0.25, 0.25];
         let explicit = |p: &[f32; 5]| explicit_of(hard_of(p), p[4]);
 
@@ -2715,7 +3449,6 @@ mod tests {
             explicit,
             confirmed: true,
             weak: false,
-
             arbiter: None,
         };
         assert!(
@@ -2770,7 +3503,7 @@ mod tests {
             })
             .expect("a forward pass");
         assert_eq!(logits.len(), GRADE_CLASSES.len());
-        let p = probabilities(&logits);
+        let p = probabilities(&logits).expect("finite logits");
         assert!((p.iter().sum::<f32>() - 1.0).abs() < 1e-3);
     }
 
@@ -2793,7 +3526,7 @@ mod tests {
                 })
                 .expect("a pass");
             assert_eq!(logits.len(), CLASSES.len());
-            probabilities(&logits)
+            probabilities(&logits).expect("finite logits")
         };
 
         let correct = judge(|value| f32::from(value) / 127.5 - 1.0);
@@ -2816,7 +3549,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "explicit inference benchmark; excluded from the correctness suite"]
     fn measures_pooled_new_image_inference() {
         let pool = model().expect("the bundled model must load");
         let view = image::RgbImage::from_fn(SIDE as u32, SIDE as u32, |x, y| {
@@ -2845,7 +3578,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "explicit 200-image capacity benchmark; excluded from the correctness suite"]
     fn measures_two_hundred_uncached_image_passes() {
         let pool = model().expect("the bundled model must load");
         let images: Vec<_> = (0..200)

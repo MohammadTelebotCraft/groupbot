@@ -1,3 +1,4 @@
+
 use grammers_client::message::Message;
 use grammers_client::session::types::PeerId;
 
@@ -51,8 +52,13 @@ pub const VIP: &Cap = &Cap {
     key: "lim_vip",
     label: "عضو ویژه",
 };
+pub const CASE: &Cap = &Cap {
+    name: "case",
+    key: "lim_case",
+    label: "پرونده ها",
+};
 
-pub const CAPS: &[&Cap] = &[BAN, MUTE, WARN, SET, CLEAN, EXEMPT, PIN, VIP];
+pub const CAPS: &[&Cap] = &[BAN, MUTE, WARN, SET, CLEAN, EXEMPT, PIN, VIP, CASE];
 
 pub fn find(name: &str) -> Option<&'static Cap> {
     CAPS.iter().copied().find(|cap| cap.name == name)
@@ -90,7 +96,7 @@ pub async fn allows(ctx: &Ctx, message: &Message, cap: &Cap) -> bool {
     if allowed(ctx, message, cap) {
         return true;
     }
-    deny(message, cap).await;
+    deny(ctx, message, cap).await;
     false
 }
 
@@ -98,12 +104,25 @@ fn refusal(cap: &Cap) -> String {
     format!("✗ دسترسی {} برای شما بسته است.", cap.label)
 }
 
-pub async fn deny(message: &Message, cap: &Cap) {
-    let _ = message.reply(refusal(cap)).await;
+pub async fn deny(ctx: &Ctx, message: &Message, cap: &Cap) {
+    super::respond(
+        ctx,
+        message,
+        crate::response::ResponseKind::PermissionDenied,
+        super::premium::icon_text(Some(super::premium::Icon::Locked), refusal(cap)),
+    )
+    .await;
 }
 
 pub async fn refuse(query: &grammers_client::update::CallbackQuery, cap: &Cap) {
-    let _ = query.answer().alert(refusal(cap)).send().await;
+    let _ = query
+        .answer()
+        .alert(super::premium::plain_label(
+            Some(super::premium::Icon::Locked),
+            refusal(cap),
+        ))
+        .send()
+        .await;
 }
 
 #[cfg(test)]

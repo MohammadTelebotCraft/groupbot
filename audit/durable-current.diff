@@ -1,0 +1,1889 @@
+diff --git a/README.md b/README.md
+index 8507991..1a0149f 100644
+--- a/README.md
++++ b/README.md
+@@ -17,6 +17,7 @@
+ 
+ </div>
+ 
++
+ ---
+ 
+ <div dir="rtl">
+@@ -726,8 +727,9 @@ python3 tools/fleet_routes.py tools/fleet.example.json \
+ رد می شوند. واحد `groupbot@<name>` هم به همین دلیل بدون این فایل اصلا اجرا نمی شود. فایل باید یک id در هر خط داشته باشد و حداکثر `MAX_SHARD_CHATS` id داشته باشد؛ تغییر
+ route یعنی ساختن فایل های جدید، انتقال durable rows، و سپس rolling restart هر دو shard.
+ 
+-برای انتقال خود ردیف های durable، `tools/shard_migrate.py` فقط شش جدول chat-scoped را می بیند:
+-`settings`، `counters`، `notes`، `tallies`، `pending_deletes` و `image_filters`. جدول های
++برای انتقال خود ردیف های durable، `tools/shard_migrate.py` فقط هفت جدول chat-scoped را می بیند:
++`settings`، `counters`، `notes`، `tallies`، `pending_deletes`، `pending_captchas` و
++`image_filters`. جدول های
+ `started_users` و `calibration` سراسری هستند و عمداً منتقل نمی شوند. DSNها را در environment بگذار؛
+ ابزار secret را روی command line یا داخل manifest نمی گیرد. پیش فرض فقط preflight خواندنی است:
+ 
+@@ -891,3 +893,180 @@ src/
+ ```
+ 
+ </div>
++
++## Semantic moderation icons
++
++`src/handlers/premium/registry.json` is the only custom-emoji ID registry. IDs are decimal
++strings in JSON and converted to `i64` only for MTProto. Each entry records its semantic key,
++Unicode fallback, original placeholder, tags, confidence, usage and provenance. The registry
++preserves 89 documents from the previous implementation and adds the red error document
++specified in the emoji task. The original message dump and screenshot were not available
++with that task; legacy-only mappings remain unclassified, and the written visual descriptions
++are the evidence for the active mappings.
++
++`premium::icon_for(Context { action, object, state, severity, scope, duration })` returns an
++optional semantic `Icon`. Rules are deterministic and language independent: mute, ban and
++warning have distinct icons; permission and anti-trade state select their allowed/blocked
++icons; severe triggered raids use fire; cooldowns use the timer. Failed, pending or paused
++operations are shown as such before selecting a completed-action icon. Unknown contexts can
++have no icon. Help topics, panel sections and Mini App permissions share these rules.
++
++```rust
++let selected = premium::icon_for(premium::Context {
++    action: "mute", object: "user", state: "active", ..Default::default()
++});
++let message = premium::icon_text(selected, "سکوت کاربر");
++let button = premium::decorate(Button::data("سکوت", b"mute_user"), selected);
++```
++
++`premium::icon_html`, `icon_text` and `badge` mark only bot-owned presentation. Ordinary
++`premium::text` is opaque. The HTML renderer converts explicit semantic badges into
++`MessageEntityCustomEmoji` entities, preserving formatting and UTF-16 offsets. It never scans
++translated labels or ordinary emoji for meaning. User-authored welcome/answer content uses
++the library's content renderer directly; captions, names, quoted evidence, filter words and
++command arguments are not rewritten.
++
++At startup one bounded, read-only `messages.getCustomEmojiDocuments` request validates the
++active documents and gets their exact `alt` strings. Missing or failed metadata falls back to
++Unicode. This distinction matters when a document's Telegram placeholder differs from its
++visual meaning, such as the send icon. Telegram requires custom entities to wrap that exact
++`alt`, as described in [Custom emojis](https://core.telegram.org/api/custom-emoji).
++
++| Surface | Rendering in this project |
++| --- | --- |
++| Direct bot messages, moderation replies, bot captions and message edits | Custom entities when enabled and metadata is available; semantic Unicode otherwise |
++| Inline callback and URL buttons | Native MTProto `KeyboardButtonStyle.icon`; Unicode label prefix when disabled or unavailable; callback bytes, URLs and colours preserved |
++| Channel moderation logs | Unicode by default; custom entities only with explicit channel eligibility enabled |
++| Callback alerts/toasts | Unicode/plain text; no entity markup |
++| Mini App | Central-registry Unicode fallbacks for matching concepts, existing SVGs for other concepts; receives semantic state keys, never document IDs |
++| Captcha choices and numeric presets | Their exact symbols/numbers, with no added decoration |
++| User-authored content and reply-keyboard command labels | Preserved without emoji substitution |
++
++The local grammers schema supports native button styles. Telegram restricts custom button
++icons to eligible bots (a purchased Fragment username or a Premium bot owner); see
++[Bot buttons](https://core.telegram.org/api/bots/buttons). Reading a document does not prove
++the bot's sending entitlement. Configure the deployment accordingly; no send attempt is
++made to probe entitlement.
++
++| Environment variable | Default | Effect |
++| --- | --- | --- |
++| `PREMIUM_EMOJI` | enabled | `0`, `false` or `off` forces Unicode for messages and buttons |
++| `PREMIUM_EMOJI_BUTTONS` | enabled | Independently disables native button icons |
++| `PREMIUM_EMOJI_CHANNELS` | disabled | `1` or `true` enables custom channel-log entities only for a bot eligible to use them there |
++
++The audit covers start/help, setup/admin and owner panels, settings, member information,
++warnings and enforcement, unmute/unban, locks, anti-trade/link/flood/raid, voice/photo/media
++permissions, filters, logs/reports/cases, scheduled operations, confirmations, errors,
++navigation, welcome/answer presentation and the Mini App. Plain instructions and unmatched
++concepts retain their appropriate Unicode/SVG/text presentation. Moderation decisions,
++database/configuration keys, commands and callback routing are unchanged.
++
++Of the 90 custom documents, 31 are active, 12 are unused for moderation and 47 require review.
++The medium-confidence visuals are `MEMBERS`, `IMAGE_PRIVATE`, `BRIEFCASE`, `NETWORK` and
++`INVISIBLE`; they are not dynamically selected for premium rendering. The unrelated money,
++shopping, gift, calculator, tag/swap and diamond assets are unused. The remaining abstract
++legacy visuals stay unclassified. The registry records every individual classification.
++
++Validation commands:
++
++```sh
++cargo test --locked handlers::premium
++cargo test --locked
++cargo clippy --all-targets --locked
++python tools/audit_premium.py
++node --check src/miniapp/assets/app.js
++node tools/test_premium_ui.cjs
++```
++
++Observed during this migration: 15 emoji tests passed; the complete non-ignored Rust run had
++305 passing tests, zero failures and 24 ignored database/external-model tests. The registry
++audit found no raw IDs outside the registry/test fixtures. The Mini App renderer test covers
++mixed Persian/English labels, permission states, fallback keys and unchanged action attributes.
++These are local construction/rendering checks. Screenshot comparison, live Telegram appearance,
++bot entitlement, sending/editing actual messages and client-specific RTL layout remain unverified.
++Deployment follow-up (2026-09-06): panel and help close actions remove their inline keyboards;
++the panel also displays a closed confirmation above its lock summary. The initial empty keyboard
++was rejected by Telegram with `REPLY_MARKUP_INVALID`. Closing now omits `reply_markup`, following
++[TDLib's edit implementation](https://github.com/tdlib/td/blob/master/td/telegram/MessagesManager.cpp)
++and its conversion of an empty inline keyboard to null. All 329 Rust
++tests passed with ignored tests enabled against an isolated local PostgreSQL database and the
++production image and text models. Clippy, UI checks and the
++locked release build passed. The binary was deployed to `groupbot-prod` with a recoverable backup,
++its running checksum was verified, and `groupbot.service` remained active with zero restarts.
++Startup validated 31 custom emoji documents and the Mini App served the new semantic registry.
++
++### Cleaner recommendations
++
++Groups with a missing or non-admin cleaner receive a Persian recommendation with an inline
++«افزودن کلینر» / «بررسی دسترسی و افزودن کلینر» button about every six hours. Each known group has
++a fixed minute within that interval; the indexed `hash` rows select only due groups, and
++bounded workers check live Telegram membership before sending. `cln_checked_slot` remembers
++completed checks across restarts. Failed membership checks or sends remain eligible in the
++three-minute delivery window. No recommendations run while the shard's cleaner is signed out.
++
++The `cln:<chat>` callback is bound to its original group and uses the same admin and `CLEAN`
++capability checks as «افزودن کلینر». Every press checks the management bot's current required
++permissions. Missing access produces an alert, a checklist, the path to Telegram's admin
++settings, and a retry button. Unknown permissions never start a join. Successful setup replaces
++the recommendation with confirmation and removes its button. The text command shares this flow;
++manual joins also share the automatic flow's concurrency limit and per-group duplicate guard.
++The durable `cln_added` flag continues to prevent automatic re-adding after deliberate removal;
++an administrator can explicitly restore the cleaner with the recommendation button.
++
++Deployed to `groupbot-prod` on 2026-09-06 at 19:29 UTC. All 335 Rust tests passed with
++ignored tests enabled against an isolated local PostgreSQL database and verified production
++models (`VISION_FILES=target/cleaner-deploy/models`); Clippy and the locked release build passed.
++The older models in local `target/release` are not the production vision exports.
++The running executable matched SHA256
++`10ccbc8372c1504abfb1153b168076ae665c814e46cde554a6daa36fa9d965bc`;
++`groupbot.service` stayed active with zero restarts, the cleaner signed in, and the reminder
++index was present. Rollback binary on production:
++`/home/ubuntu/GroupManagement/groupbot/target/release/groupbot.prev.20260906T192916Z`.
++
++### Automatic group setup recovery
++
++The first join or promotion now resolves the group's access hash from the bot's Telegram
++session before listing administrators or inviting the cleaner. Previously this path could
++fabricate a zero-hash supergroup reference, causing `CHANNEL_INVALID` and leaving setup
++incomplete even with all required admin rights.
++
++Setup handles additions, group creation, migration and permission updates before moderation.
++Known incomplete groups recover at startup, including groups with an owner whose cleaner
++has never finished joining; group activity also checks for incomplete setup
++at most once per minute. Transient failures receive bounded retries, and a per-group mutex
++prevents duplicate configuration without suppressing retries after a failed lookup. The owner
++record is written only after the default locks are saved. Existing configured groups retain
++their settings, and intentional cleaner removal still requires the explicit add button.
++That button also finishes any missing group configuration after checking admin permissions.
++Cleaner installations are serialized per account, and short Telegram join flood waits are
++honored for up to two additional retries using the same invitation. Longer waits retain the
++actionable failure card and retry button.
++
++Validation: all 341 Rust tests passed, including database and external-model tests using an
++isolated PostgreSQL database and the verified production models in `target/cleaner-deploy/models`.
++Clippy passed with `--all-targets -- -D warnings`.
++
++Deployed on 2026-09-06 at 20:15 UTC. The running executable matched SHA256
++`fd0f412968a5e5f2b0af9af80430eac9127565285a8aa24d94e8e6b101bc76aa`;
++`groupbot.service` remained active with zero restarts. Live Telegram membership checks
++confirmed that both the management bot and cleaner were administrators with all six required
++rights in the affected group. Its owner, five default locks and `cln_added` marker were present.
++The earlier recovery pass also activated four other previously unconfigured groups.
++Rollback binary on production:
++`/home/ubuntu/GroupManagement/groupbot/target/release/groupbot.prev.20260906T201506Z`.
++
++Broadcast channel exclusion: group setup, cleaner reminders and their callback handling now
++require a confirmed basic group, supergroup or gigagroup. Saved access hashes alone cannot
++identify a group. Unknown types wait for Telegram's group metadata; known broadcast channels
++are skipped at startup. New and edited channel posts are excluded from group command and
++moderation handlers before admission. The destination is checked, so linked channel posts
++and anonymous administrators inside a discussion group continue through the group flow.
++Old channel buttons answer only the presser with a group-only alert. This does not alter
++explicitly configured log channel destinations.
++
++Deployed on 2026-09-06 at 20:45 UTC after all 343 Rust tests passed (including isolated
++PostgreSQL and production-model tests), warning-free Clippy and the locked release build.
++Production startup logged all three saved broadcast channels as skipped while live group
++handling continued. The service stayed active with zero restarts and its running checksum
++matched `af34e79bf75a9731a4dc80b040dced8a6dab35568eff247edf940cefcbd03f93`.
++Rollback binary: `/home/ubuntu/GroupManagement/groupbot/target/release/groupbot.prev.20260906T204505Z`.
+diff --git a/src/handlers/stats.rs b/src/handlers/stats.rs
+index 23aaeff..4be3c39 100644
+--- a/src/handlers/stats.rs
++++ b/src/handlers/stats.rs
+@@ -1,6 +1,6 @@
+ use std::collections::HashMap;
+ 
+-use grammers_client::message::{InputMessage, Message};
++use grammers_client::message::Message;
+ use grammers_client::session::types::PeerId;
+ 
+ use super::{Ctx, esc, name_of};
+@@ -16,6 +16,16 @@ pub const REPORT_PRESETS: &[u32] = &[8 * 60, 12 * 60, 18 * 60, 21 * 60, 23 * 60,
+ 
+ pub const REPORT_DEFAULT: u32 = 21 * 60;
+ 
++/// The ladder, ascending. Two rules hold it together and both are load bearing.
++///
++/// **Ascending, with no repeated threshold.** `rank_at` walks it backwards and takes the
++/// first threshold a total has reached, and `counters.awarded` stores that threshold — so an
++/// out of order row would hand somebody a lower title than they already hold, and the
++/// `awarded >= milestone` guard would then re-award it on every flush.
++///
++/// **Every title is at most `promote::TAG_MAX` characters**, because it is written to
++/// Telegram as a custom admin rank and the API rejects a longer one. `titles_fit_telegram`
++/// is the test; a new level is one row here and nothing else.
+ pub const MILESTONES: &[(u64, &str)] = &[
+     (50, "سلام گو"),
+     (100, "نوچه چت"),
+@@ -35,12 +45,18 @@ pub const MILESTONES: &[(u64, &str)] = &[
+     (100_000, "جاودانه"),
+ ];
+ 
++/// What a member below the first milestone is called.
+ pub const NO_RANK: &str = "بی مقام";
+ 
++/// The medal each level wears in the card and the announcement. Indexed by level so it grows
++/// with `MILESTONES` instead of being a second ladder to keep in step; past its end the top
++/// medal repeats.
+ const MEDALS: &[&str] = &[
+     "🌱", "🥈", "🥉", "🏅", "🥇", "🎖", "⭐", "🌟", "💫", "🔥", "⚡", "👑", "🐉", "🌌", "💎", "🏆",
+ ];
+ 
++/// The level a total has reached: its place on the ladder (1 based), its threshold, and its
++/// title. `None` below the first milestone.
+ pub fn rank_at(total: u64) -> Option<(usize, u64, &'static str)> {
+     MILESTONES
+         .iter()
+@@ -50,6 +66,7 @@ pub fn rank_at(total: u64) -> Option<(usize, u64, &'static str)> {
+         .map(|(index, (needed, title))| (index + 1, *needed, *title))
+ }
+ 
++/// The level above the one a total has reached, if the ladder has one left.
+ pub fn next_rank(total: u64) -> Option<(u64, &'static str)> {
+     MILESTONES
+         .iter()
+@@ -65,6 +82,8 @@ fn medal(level: usize) -> &'static str {
+     MEDALS[level.min(MEDALS.len()).saturating_sub(1)]
+ }
+ 
++/// How far a total has travelled between the level it holds and the next one, as a bar and a
++/// percentage. A member at the top of the ladder is full.
+ fn progress(total: u64) -> (String, u64) {
+     const CELLS: usize = 10;
+     let floor = rank_at(total).map_or(0, |(_, needed, _)| needed);
+@@ -82,6 +101,14 @@ fn progress(total: u64) -> (String, u64) {
+     )
+ }
+ 
++/// Marks a member an earlier release promoted purely so Telegram would render their «مقام».
++///
++/// Nothing writes one any more — `promote::set_rank` titles the plain member — and
++/// `sweep_badges` deletes them as it undoes the promotions. Until a row is gone it still has to
++/// mean something: those members are in the group's admin list, and `handlers::can_manage`
++/// reads that list, so without `wears_only_a_badge` they would be immune to every lock and
++/// able to run the moderation commands. Delete this, the sweep and `Settings::badge_rows`
++/// together, once no shard reports any left.
+ pub fn badge_key(user: i64) -> String {
+     format!("badge:{user}")
+ }
+@@ -126,6 +153,10 @@ pub const REPORT_SET: &[&str] = &["تنظیم گزارش روزانه", "گزا
+ pub const REPORT_CLEAR: &[&str] = &["حذف گزارش روزانه", "خاموش گزارش روزانه"];
+ pub const INFO: &[&str] = &["اطلاعات", "پروفایل", "کاربر", "ایدی", "آیدی"];
+ 
++/// The rank card's words. All of them are ordinary Persian, so like `INFO` they only become a
++/// command once `named` says somebody was actually pointed at — by a reply, an `@username` or
++/// a numeric id. «تنظیم مقام» and «حذف مقام» belong to `promote` and are safe beside these:
++/// they start with another word, so neither is a prefix of the other.
+ pub const RANK: &[&str] = &["مقام", "رتبه", "سطح", "لول", "مدال"];
+ 
+ pub const TEHRAN_OFFSET: u64 = 3 * 3600 + 1800;
+@@ -149,8 +180,10 @@ pub const IDLE_DAYS: u64 = 14;
+ 
+ const FORGET_DAYS: u64 = 90;
+ 
++/// How many idle members a panel will list; the count above it is the real total.
+ const IDLE_SHOWN: i64 = 10;
+ 
++/// How many places a leaderboard shows.
+ const BOARD: i64 = 10;
+ 
+ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
+@@ -165,9 +198,11 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
+         };
+         let _ = message
+             .reply(
+-                InputMessage::new()
+-                    .html(section_text(ctx, chat, "sum").await)
+-                    .reply_markup(markup(ctx, chat, opener, "sum").await),
++                super::premium::icon_html(
++                    Some(super::premium::Icon::Stats),
++                    section_text(ctx, chat, "sum").await,
++                )
++                .reply_markup(markup(ctx, chat, opener, "sum").await),
+             )
+             .await;
+         return true;
+@@ -177,13 +212,17 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
+             return true;
+         }
+         set_report_at(ctx, chat, None).await;
+-        let _ = message.reply("✗ گزارش روزانه خاموش شد.").await;
++        let _ = message
++            .reply(super::premium::icon_text(
++                Some(super::premium::Icon::DocumentActivity),
++                "گزارش روزانه خاموش شد.",
++            ))
++            .await;
+         return true;
+     }
+     if let Some((command, rest)) = REPORT_SET.iter().find_map(|command| {
+         let rest = text.strip_prefix(command)?;
+-        (rest.is_empty() || rest.starts_with(char::is_whitespace))
+-            .then(|| (*command, rest.trim()))
++        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| (*command, rest.trim()))
+     }) {
+         let typed = super::digits(rest);
+         let at = match typed.split_once([':', '.']) {
+@@ -200,7 +239,11 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
+                 .filter(|h| *h < 24)
+                 .map(|h| h * 60),
+         };
+-
++        // A bare «گزارش روزانه» with a tail that is not a clock time is a sentence, not the
++        // command — «گزارش روزانه چطوره» must fall through rather than be claimed, and the
++        // gate sits below this so a refusal is no longer reachable from ordinary speech. A
++        // multi-word «تنظیم گزارش روزانه» is not typed by accident, so it keeps its answer
++        // even when the time is malformed.
+         if at.is_none() && !rest.is_empty() && !super::phrase_carries_text(command) {
+             return false;
+         }
+@@ -211,15 +254,18 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
+             Some(at) => {
+                 set_report_at(ctx, chat, Some(at)).await;
+                 message
+-                    .reply(format!(
+-                        "✓ گزارش روزانه هر روز ساعت {} در همین گروه فرستاده می شود.",
+-                        super::extras::clock(at)
++                    .reply(super::premium::icon_text(
++                        Some(super::premium::Icon::Calendar),
++                        format!(
++                            "گزارش روزانه هر روز ساعت {} در همین گروه فرستاده می شود.",
++                            super::extras::clock(at)
++                        ),
+                     ))
+                     .await
+             }
+             None => {
+                 message
+-                    .reply(InputMessage::new().html(report_status(ctx, chat)))
++                    .reply(super::premium::html(report_status(ctx, chat)))
+                     .await
+             }
+         };
+@@ -234,6 +280,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
+     false
+ }
+ 
++/// Whether the text opens with one of these command words and nothing is glued to it.
+ fn names_a_user(commands: &[&str], text: &str) -> bool {
+     commands.iter().any(|command| {
+         text == *command
+@@ -243,6 +290,7 @@ fn names_a_user(commands: &[&str], text: &str) -> bool {
+     })
+ }
+ 
++/// The argument a `commands` word carries, if any — the `@username` or id after it.
+ fn tail_of(commands: &[&str], text: &str) -> Option<String> {
+     commands
+         .iter()
+@@ -264,7 +312,10 @@ pub async fn on_callback(ctx: &Ctx, query: &grammers_client::update::CallbackQue
+     if query.sender_id().bare_id() != Some(opener) {
+         let _ = query
+             .answer()
+-            .alert("این آمار را شخص دیگری باز کرده است.")
++            .alert(super::premium::plain_label(
++                Some(super::premium::Icon::Locked),
++                "این آمار را شخص دیگری باز کرده است.",
++            ))
+             .send()
+             .await;
+         return;
+@@ -277,9 +328,11 @@ pub async fn on_callback(ctx: &Ctx, query: &grammers_client::update::CallbackQue
+         let _ = query
+             .answer()
+             .edit(
+-                InputMessage::new()
+-                    .html(section_text(ctx, chat, "idle").await)
+-                    .reply_markup(markup(ctx, chat, opener, "idle").await),
++                super::premium::icon_html(
++                    Some(super::premium::Icon::Stats),
++                    section_text(ctx, chat, "idle").await,
++                )
++                .reply_markup(markup(ctx, chat, opener, "idle").await),
+             )
+             .await;
+         return;
+@@ -288,9 +341,11 @@ pub async fn on_callback(ctx: &Ctx, query: &grammers_client::update::CallbackQue
+     let _ = query
+         .answer()
+         .edit(
+-            InputMessage::new()
+-                .html(section_text(ctx, chat, section).await)
+-                .reply_markup(markup(ctx, chat, opener, section).await),
++            super::premium::icon_html(
++                Some(super::premium::Icon::Stats),
++                section_text(ctx, chat, section).await,
++            )
++            .reply_markup(markup(ctx, chat, opener, section).await),
+         )
+         .await;
+ }
+@@ -315,7 +370,7 @@ async fn markup(
+     opener: i64,
+     current: &str,
+ ) -> grammers_client::message::ReplyMarkup {
+-    use grammers_client::message::{Button, ReplyMarkup};
++    use grammers_client::message::Button;
+ 
+     let mut rows: Vec<Vec<Button>> = Vec::new();
+     if current == "idle" {
+@@ -344,7 +399,7 @@ async fn markup(
+                 .collect(),
+         );
+     }
+-    ReplyMarkup::from_buttons(&rows)
++    super::premium::buttons(&rows)
+ }
+ 
+ const SECTIONS: &[(&str, &str)] = &[
+@@ -573,13 +628,16 @@ fn leaderboard(rows: &[Counter]) -> String {
+ 
+ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool {
+     let arg = tail_of(INFO, text);
+-
++    // «کاربر» and «آیدی» are ordinary words; without a named user this was not a command.
+     let Some(named) = super::named(message, arg.as_deref()) else {
+         return false;
+     };
+     let Some((target, name)) = super::resolve(ctx, message, named).await else {
+         let _ = message
+-            .reply("کاربر پیدا نشد. ریپلای کنید یا @username / آیدی عددی بفرستید.")
++            .reply(super::premium::icon_text(
++                Some(super::premium::Icon::ErrorRed),
++                "کاربر پیدا نشد. ریپلای کنید یا @username / آیدی عددی بفرستید.",
++            ))
+             .await;
+         return true;
+     };
+@@ -607,8 +665,10 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool
+ 
+     let mut photos = ctx.client.iter_profile_photos(target);
+     let photo_count = photos.total().await.unwrap_or(0);
+-    let mut card = InputMessage::new().html(format!(
+-        "<b>اطلاعات کاربر</b>\n\n\
++    let mut card = super::premium::icon_html(
++        Some(super::premium::Icon::User),
++        format!(
++            "<b>اطلاعات کاربر</b>\n\n\
+          نام · <a href=\"tg://user?id={user}\">{}</a>\n\
+          آیدی عددی · <code>{user}</code>\n\
+          یوزرنیم · {}\n\
+@@ -620,21 +680,22 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool
+          پیام های کل · <b>{}</b>\n\
+          رتبه امروز · <b>{place}</b>\n\
+          اعضای اضافه کرده · <b>{}</b>{}",
+-        esc(&name),
+-        esc(&username),
+-        rank_title(counts.total),
+-        match rank_at(counts.total) {
+-            Some((level, _, _)) => format!("· سطح {level}"),
+-            None => String::new(),
+-        },
+-        counts.today,
+-        counts.total,
+-        counts.adds,
+-        match note {
+-            Some(note) => format!("\n\n<b>یادداشت</b>\n{}", esc(&note)),
+-            None => String::new(),
+-        },
+-    ));
++            esc(&name),
++            esc(&username),
++            rank_title(counts.total),
++            match rank_at(counts.total) {
++                Some((level, _, _)) => format!("· سطح {level}"),
++                None => String::new(),
++            },
++            counts.today,
++            counts.total,
++            counts.adds,
++            match note {
++                Some(note) => format!("\n\n<b>یادداشت</b>\n{}", esc(&note)),
++                None => String::new(),
++            },
++        ),
++    );
+ 
+     if let Ok(Some(photo)) = photos.next().await
+         && let Some(media) =
+@@ -647,6 +708,8 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool
+     true
+ }
+ 
++/// What the bot itself considers this member — not their place on the ladder, which is
++/// `rank_at`. Both cards show it, so it is written once.
+ fn role_of(ctx: &Ctx, chat: i64, user: i64) -> &'static str {
+     if super::owner(ctx, chat) == Some(user) {
+         "مالک ربات"
+@@ -659,6 +722,12 @@ fn role_of(ctx: &Ctx, chat: i64, user: i64) -> &'static str {
+     }
+ }
+ 
++/// One member's standing on the ladder, answered where they were named.
++///
++/// Everything here comes out of the one `card` query the info card already uses, so the whole
++/// reply is a single round trip — no participant lookup, no rights read. Whether Telegram is
++/// showing the badge beside their name is read from the marker `award_rank` writes rather than
++/// asked of Telegram, for the same reason.
+ async fn rank_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool {
+     let arg = tail_of(RANK, text);
+     let Some(named) = super::named(message, arg.as_deref()) else {
+@@ -666,7 +735,10 @@ async fn rank_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool
+     };
+     let Some((target, name)) = super::resolve(ctx, message, named).await else {
+         let _ = message
+-            .reply("کاربر پیدا نشد. ریپلای کنید یا @username / آیدی عددی بفرستید.")
++            .reply(super::premium::icon_text(
++                Some(super::premium::Icon::ErrorRed),
++                "کاربر پیدا نشد. ریپلای کنید یا @username / آیدی عددی بفرستید.",
++            ))
+             .await;
+         return true;
+     };
+@@ -699,7 +771,7 @@ async fn rank_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool
+     };
+ 
+     let _ = message
+-        .reply(InputMessage::new().html(format!(
++        .reply(super::premium::html(format!(
+             "{}  <b>کارنامه مقام</b>\n\n\
+              👤  <a href=\"tg://user?id={user}\">{}</a>\n\
+              {}  مقام · <b>{title}</b>\n\
+@@ -759,48 +831,130 @@ fn kind_of(view: &super::locks::View<'_>) -> &'static str {
+     }
+ }
+ 
++/// One counter out of a chat's day. The whole day arrives in a single query, so a panel that
++/// shows all twenty four hours asks once instead of taking the settings lock — and building a
++/// key string — twenty four times.
+ fn of(tallies: &HashMap<String, u64>, counter: &str) -> u64 {
+     tallies.get(counter).copied().unwrap_or(0)
+ }
+ 
+-pub async fn flush(ctx: &std::sync::Arc<Ctx>) {
+-    let day = today();
++pub async fn flush(ctx: &std::sync::Arc<Ctx>) -> bool {
++    // A 512-chat batch is a memory bound, not a throughput quota per minute. Process
++    // a bounded number of chunks based on the dirty population at entry. Large per-chat
++    // counter backlogs can hit the row limit and remain queued for the next pass.
++    // Newly dirtied chats cannot make this pass infinite; dirty admission is FIFO.
++    let mut pending = ctx.stats_pending.lock().await;
++    let batches = ctx.stats_flush_batches() + usize::from(pending.is_some());
++    for _ in 0..batches {
++        if !flush_batch(ctx, &mut pending).await {
++            break;
++        }
++    }
++    recover_awards(ctx).await;
++    if let Err(error) = ctx.settings.prune_stats_receipts().await {
++        log::error!("stats: receipt cleanup deferred: {error}");
++    }
++    pending.is_none() && ctx.stats_flush_batches() == 0
++}
+ 
+-    let (tallies, counts) = ctx.take_stats();
++async fn flush_batch(
++    ctx: &std::sync::Arc<Ctx>,
++    pending: &mut Option<crate::state::StatsBatch>,
++) -> bool {
++    let day = today();
+ 
+-    let rows: Vec<(i64, &'static str, u64)> = tallies
+-        .into_iter()
+-        .map(|((chat, counter), added)| (chat, counter, added))
+-        .collect();
+-    if !rows.is_empty() {
+-        ctx.settings.add_tallies(&rows, day).await;
++    // One drain feeds both halves: they share a dirty list, so taking them separately would
++    // leave the second with nothing.
++    if pending.is_none() {
++        let (tallies, counts) = ctx.take_stats();
++
++        // Deltas, not totals. The database accumulates, so this no longer reads every counter back
++        // out of the mirror first — which was one lock over every chat in the process per counter,
++        // followed by a write that held the mirror's write lock a thousand rows at a time.
++        let rows: Vec<(i64, String, u64)> = tallies
++            .into_iter()
++            .map(|((chat, counter), added)| (chat, counter.to_owned(), added))
++            .collect();
++
++        let bumps: Vec<Bump> = counts
++            .into_iter()
++            .map(|((chat, user), (added, name))| Bump {
++                chat,
++                user,
++                name,
++                added,
++            })
++            .collect();
++        if bumps.is_empty() && rows.is_empty() {
++            return true;
++        }
++        *pending = Some(crate::state::StatsBatch::new(day, rows, bumps));
+     }
+-
+-    let bumps: Vec<Bump> = counts
+-        .into_iter()
+-        .map(|((chat, user), (added, name))| Bump {
+-            chat,
+-            user,
+-            name,
+-            added,
+-        })
+-        .collect();
+-    if bumps.is_empty() {
+-        return;
++    // Awarding a rank is three round trips, and the flush has sixty seconds before its next
++    // tick. Bounded and concurrent so a run of milestones cannot eat it.
++    let Some(batch) = pending.as_ref() else {
++        return true;
++    };
++    if let Err(error) = ctx.settings.stage_stats(batch).await {
++        log::error!("stats: retaining unstaged batch for retry: {error}");
++        return false;
+     }
++    if let Err(error) = ctx.settings.apply_stats(batch).await {
++        log::error!("stats: retaining durable batch for retry: {error}");
++        return false;
++    }
++    if let Err(error) = ctx.settings.finish_stats(batch).await {
++        log::error!("stats: retaining committed batch receipt for cleanup: {error}");
++        // The SQL receipt makes the leftover file harmless on restart. Complete awards
++        // now; retrying the committed batch would return no changed counters.
++    }
++    *pending = None;
++    true
++}
+ 
+-    let awards = ctx
+-        .settings
+-        .bump(bumps, day, week_of(day), month_of(day))
+-        .await;
++/// Deliver one bounded page from the SQL outbox. A failed acknowledgement deliberately leaves the
++/// lease in place: another pass may reclaim it after the lease expires, whereas deleting it would
++/// permanently lose a rank whose external result is uncertain.
++pub async fn recover_awards(ctx: &std::sync::Arc<Ctx>) {
++    const AWARDS_PER_PASS: usize = 512;
++    let awards = match ctx.settings.claim_rank_awards(AWARDS_PER_PASS).await {
++        Ok(awards) => awards,
++        Err(error) => {
++            log::error!("ranks: could not claim durable awards: {error}");
++            return;
++        }
++    };
+     let owner = std::sync::Arc::clone(ctx);
+-    super::bounded(awards, super::FLEET_CAMPAIGNS, move |bumped| {
++    super::bounded(awards, super::FLEET_CAMPAIGNS, move |delivery| {
+         let ctx = std::sync::Arc::clone(&owner);
+-        async move { award_rank(&ctx, &bumped).await }
++        async move {
++            let milestone = award_rank(&ctx, &delivery.bumped).await;
++            match ctx.settings.ack_rank_award(&delivery, milestone).await {
++                Ok(true) => {}
++                Ok(false) => {
++                    log::debug!(
++                        "ranks: a newer delivery superseded {}/{}",
++                        delivery.bumped.chat,
++                        delivery.bumped.user
++                    );
++                }
++                Err(error) => log::error!(
++                    "ranks: retaining uncertain award {}/{} for retry: {error}",
++                    delivery.bumped.chat,
++                    delivery.bumped.user
++                ),
++            }
++        }
+     })
+     .await;
+ }
+ 
++/// Forgets members who stopped talking long ago. The daily and weekly counts need no sweep
++/// — their period stamp makes a stale count read as zero and the next write overwrite it.
++///
++/// This is the one job that genuinely wants every chat, so it is also the one that has to walk
++/// them in batches: a single fleet-wide `DELETE` scans every counter row in one transaction,
++/// while a batch of chat ids is a primary-key range scan that finishes in milliseconds.
+ pub async fn prune(ctx: &Ctx) {
+     const BATCH: usize = 500;
+ 
+@@ -809,7 +963,8 @@ pub async fn prune(ctx: &Ctx) {
+     let mut dropped = 0;
+     for batch in chats.chunks(BATCH) {
+         dropped += ctx.settings.forget_idle(batch, before).await;
+-
++        // Once a day over tens of thousands of chats: hand the runtime back between batches so
++        // the update tasks sharing this thread are not held for the whole pass.
+         tokio::task::yield_now().await;
+     }
+     if dropped > 0 {
+@@ -817,16 +972,20 @@ pub async fn prune(ctx: &Ctx) {
+     }
+ }
+ 
+-async fn award_rank(ctx: &Ctx, bumped: &Bumped) {
++/// Gives a member the level their total has reached: the title beside their name in the
++/// group, and the announcement.
++///
++/// One RPC. `promote::set_rank` writes the rank straight onto the participant — a member needs
++/// no rights and no promotion to wear one — so this no longer walks the admin list to find a
++/// ref, and no longer promotes anybody. `sweep_badges` undoes the promotions made while it did.
++async fn award_rank(ctx: &Ctx, bumped: &Bumped) -> Option<u64> {
+     let (chat, user, total) = (bumped.chat, bumped.user, bumped.total);
+     if !ctx.settings.is_locked(chat, RANKS) {
+-        return;
++        return None;
+     }
+-    let Some((level, milestone, title)) = rank_at(total) else {
+-        return;
+-    };
++    let (level, milestone, title) = rank_at(total)?;
+     if bumped.awarded >= milestone {
+-        return;
++        return None;
+     }
+     let name = bumped.name.as_str();
+ 
+@@ -834,10 +993,12 @@ async fn award_rank(ctx: &Ctx, bumped: &Bumped) {
+         ctx.chat_ref(chat),
+         PeerId::user(user).map(PeerId::to_ambient_ref),
+     ) else {
+-        return;
++        return None;
+     };
+ 
+-    ctx.settings.set_awarded(chat, user, milestone).await;
++    // The level is earned by the messages, not by Telegram accepting the title. The caller
++    // records it while acknowledging the durable outbox row, whether or not Telegram accepts
++    // the attempt; otherwise a missing `manage_ranks` permission would retry forever.
+     let titled = match super::promote::set_rank(ctx, chat_ref, Some(user), target, title).await {
+         Ok(()) => true,
+         Err(e) => {
+@@ -854,11 +1015,11 @@ async fn award_rank(ctx: &Ctx, bumped: &Bumped) {
+         ),
+         None => "👑  بالاترین مقام گروه را گرفت.".to_owned(),
+     };
+-    let _ = ctx
++    if let Err(error) = ctx
+         .client
+         .send_message(
+             chat_ref,
+-            InputMessage::new().html(format!(
++            super::premium::html(format!(
+                 "{}  <b>مقام جدید</b>\n\n\
+                  <a href=\"tg://user?id={user}\">{}</a> با <b>{milestone}</b> پیام به مقام \
+                  «<b>{title}</b>» رسید.\n\n\
+@@ -876,9 +1037,22 @@ async fn award_rank(ctx: &Ctx, bumped: &Bumped) {
+                 },
+             )),
+         )
+-        .await;
++        .await
++    {
++        log::warn!("ranks: {chat}: could not announce rank for {user}: {error}");
++    }
++    Some(milestone)
+ }
+ 
++/// Undoes the promotions an earlier release made to show a «مقام», once, and puts the title
++/// back the way it should have been written in the first place.
++///
++/// That release believed a title needed an administrator, so it promoted every member who
++/// reached a milestone — `invite_users` and nothing else — and recorded it as `badge:<id>`.
++/// `messages.editChatParticipantRank` needs none of that. The rows themselves are the work
++/// list, so this shrinks to nothing the first time it runs and can be deleted with them; while
++/// any row survives, `handlers::wears_only_a_badge` is what keeps those members out of the
++/// admin set.
+ pub async fn sweep_badges(ctx: &std::sync::Arc<Ctx>) {
+     const BATCH: i64 = 256;
+     let mut inspected = 0usize;
+@@ -906,7 +1080,9 @@ pub async fn sweep_badges(ctx: &std::sync::Arc<Ctx>) {
+                     .await
+                     .map(|(peer, _)| peer)
+                     .unwrap_or(target);
+-
++                // An empty rights mask is a demotion, which is exactly what is wanted here — and it
++                // takes the title with it, so the rank is written again afterwards, this time onto
++                // the plain member.
+                 if let Err(e) = ctx.client.set_admin_rights(chat_ref, peer).await {
+                     eprintln!("ranks: {chat}: could not undo the badge of {user}: {e}");
+                     return;
+@@ -999,14 +1175,19 @@ pub async fn run_daily(ctx: &std::sync::Arc<Ctx>) {
+         due.push((chat, chat_ref));
+     }
+ 
++    // The window this fires in is three minutes wide, and each report is two queries and a send.
++    // Serialised, a few hundred chats sharing a report hour run past the window and lose the day;
++    // bounded concurrency is what keeps the tail inside it.
+     let owner = std::sync::Arc::clone(ctx);
+     super::bounded(due, super::FLEET_CONCURRENCY, move |(chat, chat_ref)| {
+         let ctx = std::sync::Arc::clone(&owner);
+         async move {
++            // Marked only once it has actually been sent. Stamping first meant a FLOOD_WAIT or
++            // any transient failure counted as done, and the group got nothing until tomorrow.
+             let body = daily_body(&ctx, chat, day).await;
+             match ctx
+                 .client
+-                .send_message(chat_ref, InputMessage::new().html(body))
++                .send_message(chat_ref, super::premium::html(body))
+                 .await
+             {
+                 Ok(_) => {
+@@ -1046,6 +1227,8 @@ pub async fn daily_body(ctx: &Ctx, chat: i64, day: u64) -> String {
+     )
+ }
+ 
++/// How many members someone has added. The join gate asks per message, so the answer is
++/// cached: only the first message after a miss reaches Postgres.
+ pub async fn adds(ctx: &Ctx, chat: i64, user: i64) -> u64 {
+     if let Some(added) = ctx.cached_adds(chat, user) {
+         return added;
+@@ -1080,6 +1263,9 @@ pub async fn count_add(ctx: &Ctx, message: &Message, added: usize) {
+ mod tests {
+     use super::*;
+ 
++    /// Every title is written to Telegram as a custom admin rank, and the API rejects one
++    /// longer than `TAG_MAX` — in characters, not bytes, which for Persian is a factor of two.
++    /// A level that fails this is awarded, announced, and then never appears beside a name.
+     #[test]
+     fn titles_fit_telegram() {
+         for (needed, title) in MILESTONES {
+@@ -1092,6 +1278,10 @@ mod tests {
+         }
+     }
+ 
++    /// `rank_at` takes the first threshold it meets walking backwards and `awarded` stores that
++    /// threshold, so an out of order ladder hands somebody a lower title than they hold and then
++    /// re-awards it on every flush. Distinct titles matter for the same reason: two levels
++    /// sharing a name is a promotion nobody can see.
+     #[test]
+     fn ladder_ascends_and_names_are_distinct() {
+         let mut previous = 0;
+@@ -1115,7 +1305,7 @@ mod tests {
+         assert_eq!(rank_title(0), NO_RANK);
+         for (level, (needed, title)) in MILESTONES.iter().enumerate() {
+             assert_eq!(rank_at(*needed), Some((level + 1, *needed, *title)));
+-
++            // One short of the next level is still this one.
+             match MILESTONES.get(level + 1) {
+                 Some((above, _)) => {
+                     assert_eq!(rank_at(above - 1), Some((level + 1, *needed, *title)));
+@@ -1126,6 +1316,9 @@ mod tests {
+         }
+     }
+ 
++    /// The bar is drawn from the percentage, so both have to stay inside their bounds for
++    /// every total — including the two the arithmetic can trip over: the top of the ladder,
++    /// where there is no next level to divide by, and the very first message.
+     #[test]
+     fn progress_stays_within_the_bar() {
+         let top = MILESTONES.last().unwrap().0;
+@@ -1137,6 +1330,8 @@ mod tests {
+         assert_eq!(progress(top).1, 100);
+     }
+ 
++    /// `medal` indexes by level and levels are 1 based, so both ends are worth pinning: level
++    /// zero is the unranked card, and a ladder longer than `MEDALS` must not panic.
+     #[test]
+     fn every_level_wears_a_medal() {
+         assert_eq!(medal(0), MEDALS[0]);
+@@ -1146,6 +1341,8 @@ mod tests {
+         assert_eq!(medal(MILESTONES.len() + 5), *MEDALS.last().unwrap());
+     }
+ 
++    /// The rank words are ordinary Persian and share a namespace with `promote`'s two phrases.
++    /// Neither list may become a prefix of the other, or «تنظیم مقام» would answer with a card.
+     #[test]
+     fn rank_words_do_not_collide_with_the_tag_commands() {
+         for command in super::super::promote::TAG
+@@ -1164,6 +1361,8 @@ mod tests {
+         assert_eq!(tail_of(RANK, "مقام"), None);
+     }
+ 
++    /// The period stamps are what let a counter roll over without a sweep, so they have to
++    /// change exactly when the period does.
+     #[test]
+     fn period_stamps_turn_over_with_their_period() {
+         assert_eq!(week_of(6), week_of(0));
+diff --git a/src/main.rs b/src/main.rs
+index 3aa91e8..a963e56 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,20 +1,20 @@
++mod dispatcher;
+ mod handlers;
+ mod miniapp;
+ mod state;
+ 
+ use std::collections::HashSet;
+ use std::env;
++use std::num::NonZeroI64;
+ use std::sync::Arc;
+ use std::sync::atomic::{AtomicU64, Ordering};
+ 
+ use grammers_client::sender::{ConnectionParams, UpdatesConfiguration};
+ use grammers_client::session::storages::SqliteSession;
+ use grammers_client::{Client, SenderPool};
+-use tokio::sync::Semaphore;
+-use tokio::task::JoinSet;
+ 
+-use handlers::Ctx;
+-use state::Settings;
++use handlers::{BotIdentity, Ctx};
++use state::{ImageFilterWrite, Settings};
+ 
+ type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+ 
+@@ -22,6 +22,54 @@ type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send +
+ struct UpdateTelemetry {
+     received: AtomicU64,
+     completed: AtomicU64,
++    active: AtomicU64,
++    queued: AtomicU64,
++    failed: AtomicU64,
++    latency: [AtomicU64; 32],
++    queue_wait: [AtomicU64; 32],
++}
++
++impl UpdateTelemetry {
++    fn complete(&self, completion: dispatcher::Completion) {
++        match completion.result {
++            Ok(()) => {
++                self.completed.fetch_add(1, Ordering::Relaxed);
++                for (histogram, value) in [
++                    (&self.latency, completion.latency),
++                    (&self.queue_wait, completion.queue_wait),
++                ] {
++                    let micros = value.as_micros().min(u32::MAX as u128) as u32;
++                    let bucket = (u32::BITS - micros.max(1).leading_zeros()).min(31) as usize;
++                    histogram[bucket].fetch_add(1, Ordering::Relaxed);
++                }
++            }
++            Err(error) => {
++                self.failed.fetch_add(1, Ordering::Relaxed);
++                log::error!("update handler failed: {error}");
++            }
++        }
++    }
++
++    // Fixed-size log2 histograms. Values are bucket upper bounds, in microseconds.
++    fn percentiles(histogram: &[AtomicU64; 32]) -> [u64; 3] {
++        let buckets: [u64; 32] =
++            std::array::from_fn(|index| histogram[index].swap(0, Ordering::Relaxed));
++        let count: u64 = buckets.iter().sum();
++        [50, 95, 99].map(|percent| {
++            if count == 0 {
++                return 0;
++            }
++            let target = (count * percent).div_ceil(100);
++            let mut cumulative = 0;
++            for (index, bucket) in buckets.iter().enumerate() {
++                cumulative += bucket;
++                if cumulative >= target {
++                    return if index == 31 { u64::MAX } else { 1u64 << index };
++                }
++            }
++            u32::MAX as u64
++        })
++    }
+ }
+ 
+ const SESSION_FILE: &str = "groupbot.session";
+@@ -31,8 +79,13 @@ const SETTINGS_FILE: &str = "groupbot.data";
+ 
+ const DEFAULT_UPDATE_CONCURRENCY: usize = 512;
+ 
++// A shard is deliberately a bounded unit. The fleet owns 500k groups by running many of these,
++// not by letting one process load the entire settings mirror and its model pools.
+ const DEFAULT_MAX_SHARD_CHATS: usize = 50_000;
+ 
++// Cleaner updates are an independent stream and must not be allowed to create one task per
++// bot message. They are rare on a healthy fleet, but a bot that loops in many groups can make
++// this stream much noisier than the bot account's own updates.
+ const DEFAULT_CLEANER_CONCURRENCY: usize = 128;
+ 
+ const NIGHT_CHECK: std::time::Duration = std::time::Duration::from_secs(60);
+@@ -40,7 +93,9 @@ const NIGHT_CHECK: std::time::Duration = std::time::Duration::from_secs(60);
+ const LOG_FLUSH: std::time::Duration = std::time::Duration::from_secs(3);
+ 
+ const TEMP_MEDIA_SWEEP: std::time::Duration = std::time::Duration::from_secs(30);
+-
++/// How often the deferred-delete heap is drained, and therefore the smallest lifetime any
++/// feature measured in seconds can actually promise. `welcome::INSTALL_TTL` is checked against
++/// it at compile time; anything shorter than this is a number the bot cannot honour.
+ pub const DEFERRED_SWEEP_SECS: u32 = 5;
+ const DEFERRED_SWEEP: std::time::Duration =
+     std::time::Duration::from_secs(DEFERRED_SWEEP_SECS as u64);
+@@ -50,10 +105,16 @@ const SAMPLE_FLUSH: std::time::Duration = std::time::Duration::from_secs(60);
+ 
+ const CHAT_SWEEP: std::time::Duration = std::time::Duration::from_secs(600);
+ 
++/// How long a chat has to be quiet before its runtime state is worth rebuilding from scratch.
++/// Comfortably past every window inside it — the admin cache expires in half this, the flood
++/// and raid windows in minutes — so a woken chat loses nothing it would still have used.
+ const CHAT_IDLE: std::time::Duration = std::time::Duration::from_secs(3600);
+ 
+ const UPDATES_CHANNEL_CAPACITY: std::num::NonZeroUsize = std::num::NonZeroUsize::new(4096).unwrap();
+ 
++/// Per-shard admission limits. They are bounded even when configured through the environment:
++/// Telegram and the database are the real ceilings, and an accidental value in `.env` must not
++/// turn a downstream stall into an unbounded task backlog.
+ fn configured_cap(name: &str, default: usize, minimum: usize, maximum: usize) -> usize {
+     env::var(name)
+         .ok()
+@@ -62,6 +123,10 @@ fn configured_cap(name: &str, default: usize, minimum: usize, maximum: usize) ->
+         .clamp(minimum, maximum)
+ }
+ 
++/// Load the completed ownership decision for one shard.  Capacity-aware routing can move a chat
++/// to its next rendezvous candidate when a shard is full, so the runtime needs the reviewed list,
++/// not just the hash seed.  A malformed, duplicated, or oversized file fails startup rather than
++/// allowing a shard to silently claim another shard's groups.
+ fn load_owned_chats(path: &str, max_chats: usize) -> Result<Arc<HashSet<i64>>> {
+     let contents = std::fs::read_to_string(path)?;
+     let mut chats = HashSet::new();
+@@ -96,6 +161,9 @@ fn load_owned_chats(path: &str, max_chats: usize) -> Result<Arc<HashSet<i64>>> {
+     Ok(Arc::new(chats))
+ }
+ 
++/// Systemd stops a shard with SIGTERM, while local operators usually use Ctrl-C. Treat both as
++/// the same cancellation path so a rolling deploy syncs Telegram state and drains admitted work
++/// instead of letting the process disappear halfway through a handler.
+ async fn shutdown_signal() {
+     #[cfg(unix)]
+     {
+@@ -114,6 +182,10 @@ async fn shutdown_signal() {
+     }
+ }
+ 
++/// Loads a shard's complete settings mirror and exercises the same multi-setting read used by
++/// the message path. This is intentionally an explicit diagnostic mode: it never starts either
++/// Telegram session, so a synthetic database can measure startup/mirror cost without touching a
++/// bot account or producing updates.
+ async fn capacity_probe() -> Result {
+     let database_url = env::var("DATABASE_URL")?;
+     let started = std::time::Instant::now();
+@@ -170,7 +242,8 @@ async fn main() -> Result {
+     if env::args().skip(1).any(|arg| arg == "--model-probe") {
+         let classifier = handlers::nsfw::capacity_probe();
+         let ocr = handlers::ocr::capacity_probe();
+-
++        // One pool, not one per feature: the concept locks, the image filters and the NSFW
++        // arbiter all read the same embedding, so this is the whole cost of all three.
+         let vision = handlers::vision::present();
+         println!(
+             "model-probe: nsfw_pools={} ocr_pools={} vision_pool={}",
+@@ -194,10 +267,22 @@ async fn main() -> Result {
+     let api_hash = env::var("TG_HASH")?;
+     let token = env::var("TG_BOT_TOKEN")?;
+ 
++    // Reject a duplicate owner before opening sessions or making Telegram requests.
++    let database_url = env::var("DATABASE_URL")?;
++    let max_shard_chats =
++        configured_cap("MAX_SHARD_CHATS", DEFAULT_MAX_SHARD_CHATS, 1_000, 500_000);
++    let settings = Arc::new(
++        Settings::connect_with_chat_limit_and_process_lock(&database_url, Some(max_shard_chats))
++            .await?,
++    );
++    let owner_monitor = tokio::spawn(Arc::clone(&settings).monitor_ownership());
++    settings.recover_stats().await?;
++
+     let session = Arc::new(SqliteSession::open(SESSION_FILE).await?);
+ 
+     let params = ConnectionParams {
+         updates_channel_capacity: UPDATES_CHANNEL_CAPACITY,
++        request_gate: Some(settings.liveness()),
+         ..Default::default()
+     };
+     let SenderPool {
+@@ -213,27 +298,31 @@ async fn main() -> Result {
+         println!("signed in");
+     }
+ 
+-    let database_url = env::var("DATABASE_URL")?;
+-    let max_shard_chats =
+-        configured_cap("MAX_SHARD_CHATS", DEFAULT_MAX_SHARD_CHATS, 1_000, 500_000);
++    handlers::premium::initialize(&client).await;
+ 
+-    let settings =
+-        Settings::connect_with_chat_limit_and_process_lock(&database_url, Some(max_shard_chats))
+-            .await?;
+-    match settings.import_file(SETTINGS_FILE).await {
++    // Keep the pool-held lock in Settings for the whole shard. A second process pointed at the
++    // same database must fail before it can open a second update stream against an independent
++    // cache, without consuming an unbudgeted connection outside DB_POOL.
++    match settings.import_file(SETTINGS_FILE).await? {
+         0 => {}
+         n => println!("imported {n} settings from {SETTINGS_FILE}"),
+     }
+     let normalized = settings
+-        .normalize_fixed_image_filters(handlers::imgfilter::FIXED_MODEL_CUT)
+-        .await;
++        .try_normalize_fixed_image_filters(handlers::imgfilter::FIXED_MODEL_CUT)
++        .await?;
+     if normalized > 0 {
+         println!(
+             "image filters: normalized {normalized} fixed cut(s) to {:.3}",
+             handlers::imgfilter::FIXED_MODEL_CUT
+         );
+     }
+-
++    // The space migration. Every stored vector — a phrase filter's direction, an example
++    // filter's prototype, the calibration reservoir — was produced by one checkpoint, and a
++    // vector from another checkpoint scored by this one is not wrong, it is noise (see
++    // `vision.rs` for the four days that cost). The flag names the checkpoint the database's
++    // vectors belong to; absent, or naming another, means every one of them is regenerated or
++    // retired before a single picture is scored. A rollback to an older binary looks for its
++    // own flag, finds it absent, and migrates back the same way.
+     let space_flag = format!("vision:{}", handlers::vision::CHECKPOINT);
+     let migrating = !settings.is_locked(0, &space_flag);
+     if migrating {
+@@ -241,58 +330,88 @@ async fn main() -> Result {
+             "vision: the database's vectors are not from {}; migrating",
+             handlers::vision::CHECKPOINT
+         );
+-        let examples = settings.example_image_filter_keys().await;
++        let examples = settings.try_example_image_filter_keys().await?;
+         for (chat, name) in &examples {
+-            settings.delete_image_filter(*chat, name).await;
++            // The row, and the mirror flag the message path reads — `imgfilter` removes both
++            // when an admin deletes one, and this is the same deletion. Remove the mirror flag
++            // first so any interrupted run remains retryable: the durable filter row keeps the
++            // chat in the next startup's migration scan.
+             settings
+-                .set(*chat, &format!("{}{name}", handlers::imgfilter::PREFIX), false)
+-                .await;
+-            println!("vision: retired example filter «{name}» in {chat}; its pictures are from the old space");
++                .try_set(
++                    *chat,
++                    &format!("{}{name}", handlers::imgfilter::PREFIX),
++                    false,
++                )
++                .await?;
++            settings.try_delete_image_filter(*chat, name).await?;
++            println!(
++                "vision: retired example filter «{name}» in {chat}; its pictures are from the old space"
++            );
+         }
+-        settings.clear_samples().await;
++        settings.try_clear_samples().await?;
+     }
+-
++    // Phrase filters are re-embedded from their names — the name *is* the phrase — so a
++    // model or prompt upgrade reaches existing filters without an admin doing anything.
++    // Every start refreshes the live fixed ones; a migration refreshes all of them.
+     let fixed_filters = if migrating {
+-        settings.phrase_image_filter_keys().await
++        settings.try_phrase_image_filter_keys().await?
+     } else {
+-        settings.fixed_image_filter_keys().await
++        settings.try_fixed_image_filter_keys().await?
+     };
+     let mut refreshed = 0usize;
+     for (chat, name) in fixed_filters {
+-        let Some(row) = settings.image_filter(chat, &name).await else {
+-            continue;
+-        };
++        let row = settings
++            .try_image_filter(chat, &name)
++            .await?
++            .ok_or_else(|| {
++                std::io::Error::other(format!(
++                    "vision migration row disappeared for {chat}/{name}"
++                ))
++            })?;
+         let phrase = name.clone();
+-        let Some(vector) = tokio::task::spawn_blocking(move || handlers::imgtext::embed(&phrase))
++        let vector = tokio::task::spawn_blocking(move || handlers::imgtext::embed(&phrase))
+             .await
+-            .ok()
+-            .flatten()
+-        else {
+-            continue;
+-        };
++            .map_err(|error| {
++                std::io::Error::other(format!("vision embedding worker failed: {error}"))
++            })?
++            .ok_or_else(|| {
++                std::io::Error::other(format!(
++                    "vision embedding unavailable while migrating {chat}/{name}"
++                ))
++            })?;
+         let (bytes, scale) = handlers::imgfilter::quantize(&vector);
+-        if settings
+-            .save_image_filter(
++        let saved = settings
++            .try_save_image_filter(
+                 chat,
+-                &name,
+-                &bytes,
+-                scale,
+-                row.cut,
+-                row.rate,
+-                row.live,
+-                row.samples,
+-                row.calibrated,
++                ImageFilterWrite {
++                    name: &name,
++                    vector: &bytes,
++                    scale,
++                    cut: row.cut,
++                    rate: row.rate,
++                    live: row.live,
++                    samples: row.samples,
++                    calibrated: row.calibrated,
++                },
+             )
+-            .await
+-        {
+-            refreshed += 1;
++            .await?;
++        if !saved {
++            return Err(std::io::Error::other(format!(
++                "vision migration could not retain {chat}/{name}: image-filter capacity reached"
++            ))
++            .into());
+         }
++        refreshed += 1;
+     }
+     if refreshed > 0 {
+         println!("image filters: refreshed {refreshed} phrase vector(s)");
+     }
+-    if migrating && settings.set(0, &space_flag, true).await {
+-        println!("vision: database vectors are now from {}", handlers::vision::CHECKPOINT);
++    if migrating {
++        settings.try_set(0, &space_flag, true).await?;
++        println!(
++            "vision: database vectors are now from {}",
++            handlers::vision::CHECKPOINT
++        );
+     }
+     let shard_chats = settings.chat_count();
+     if shard_chats > max_shard_chats {
+@@ -325,16 +444,26 @@ async fn main() -> Result {
+         )
+         .into());
+     }
++    let me = client
++        .get_me()
++        .await
++        .map_err(|error| format!("could not read the bot's own identity: {error}"))?;
++    let Some(me_id) = me.id().bare_id().and_then(NonZeroI64::new) else {
++        return Err("Telegram returned an invalid zero bot identity".into());
++    };
++    let bot_identity = BotIdentity::new(me_id, me.username().map(str::to_owned));
+     let ctx = Arc::new(Ctx::new_with_allowed_chats(
+         client.clone(),
+-        Arc::new(settings),
++        Arc::clone(&settings),
++        grammers_session::storages::erase(Arc::clone(&session)),
++        bot_identity,
+         max_shard_chats,
+         allowed_chats,
+     ));
+-    match client.get_me().await {
+-        Ok(me) => ctx.set_me_id(me.id().bare_id_unchecked()),
+-        Err(e) => eprintln!("could not read the bot's own id: {e}"),
+-    }
++    // SQL counter commits and Telegram rank updates cannot share one transaction. Drain a
++    // bounded page of the durable side-effect outbox before accepting updates; the minute
++    // flusher continues draining later pages and reclaims expired crash leases.
++    handlers::stats::recover_awards(&ctx).await;
+ 
+     let user_session = Arc::new(SqliteSession::open(USER_SESSION_FILE).await?);
+     let SenderPool {
+@@ -345,20 +474,24 @@ async fn main() -> Result {
+         Arc::clone(&user_session),
+         api_id,
+         ConnectionParams {
++            // The default is 100 and overflow is dropped in silence, which for this stream
++            // would mean losing exactly the messages it exists to catch.
+             updates_channel_capacity: UPDATES_CHANNEL_CAPACITY,
++            request_gate: Some(settings.liveness()),
+             ..Default::default()
+         },
+     );
+ 
+     let user_task = tokio::spawn(user_runner.run());
+-    let user_client = Client::new(user_handle);
+-    let mut cleaner_ready = false;
+-    let cleaner_permits = Arc::new(Semaphore::new(cleaner_concurrency));
++    let user_client = Client::new(user_handle.clone());
++    let cleaner_telemetry = Arc::new(UpdateTelemetry::default());
+     match user_client.is_authorized().await {
+         Ok(true) => match user_client.get_me().await {
+             Ok(me) => {
+-                ctx.set_cleaner_id(me.id().bare_id_unchecked());
+-                cleaner_ready = true;
++                let Some(id) = me.id().bare_id() else {
++                    return Err("Telegram returned an invalid zero cleaner identity".into());
++                };
++                ctx.set_cleaner_id(id);
+                 println!("cleaner signed in as {}", me.full_name());
+             }
+             Err(e) => eprintln!("cleaner: signed in but unreachable: {e}"),
+@@ -368,71 +501,135 @@ async fn main() -> Result {
+     }
+     ctx.set_user_client(user_client.clone());
+ 
+-    if cleaner_ready {
+-        let cleaner_ctx = Arc::clone(&ctx);
+-        let cleaner_permits = Arc::clone(&cleaner_permits);
+-        tokio::spawn(async move {
+-            let mut updates = match user_client
+-                .stream_updates(
+-                    user_updates,
+-                    UpdatesConfiguration {
+-                        catch_up: false,
+-                        drop_idle_channels: true,
+-                    },
+-                )
+-                .await
+-            {
+-                Ok(updates) => updates,
+-                Err(e) => {
+-                    eprintln!("cleaner updates: {e}");
+-                    return;
++    // A bot account is never handed another bot's message; a user account is. This stream is
++    // the only way «قفل ربات» can answer a bot that posts rather than one that joins.
++    //
++    // It carries every chat the user account is in, private ones included, so nothing is read
++    // until `cleaner_candidate` has thrown all of that away: groups only, bot-authored only,
++    // and only where the lock is on. `catch_up` stays false — true would replay every missed
++    // update in every one of those dialogs on each start.
++    //
++    // Keep the receiver alive even before authorization. `UpdatesReceiver::create` explicitly
++    // skips its initial getState call when the session has no self-user, but it still owns the
++    // sender pool's live update channel. The same client is authorized by QR login later, so this
++    // worker begins receiving without requiring a process restart.
++    let (cleaner_stop, mut cleaner_stopping) = tokio::sync::watch::channel(false);
++    let cleaner_ctx = Arc::clone(&ctx);
++    let cleaner_worker_telemetry = Arc::clone(&cleaner_telemetry);
++    let cleaner_worker = tokio::spawn(async move {
++        let mut updates = match user_client
++            .stream_updates(
++                user_updates,
++                UpdatesConfiguration {
++                    catch_up: false,
++                    drop_idle_channels: true,
++                },
++            )
++            .await
++        {
++            Ok(updates) => updates,
++            Err(e) => {
++                eprintln!("cleaner updates: {e}");
++                return;
++            }
++        };
++        let mut tasks = dispatcher::Dispatcher::<grammers_client::update::Message>::new(
++            cleaner_concurrency,
++            handlers::PER_CHAT_UPDATES,
++            UPDATES_CHANNEL_CAPACITY.get(),
++        );
++        loop {
++            while let Some(finished) = tasks.try_join_next() {
++                cleaner_worker_telemetry.complete(finished);
++            }
++            tasks.start(|message| {
++                let ctx = Arc::clone(&cleaner_ctx);
++                async move {
++                    handlers::bots::on_cleaner_message(&ctx, &message).await;
++                }
++            });
++            cleaner_worker_telemetry
++                .active
++                .store(tasks.active() as u64, Ordering::Relaxed);
++            cleaner_worker_telemetry
++                .queued
++                .store(tasks.pending() as u64, Ordering::Relaxed);
++            let update = tokio::select! {
++                _ = cleaner_stopping.changed() => break,
++                finished = tasks.join_next(), if tasks.active() > 0 => {
++                    if let Some(finished) = finished { cleaner_worker_telemetry.complete(finished); }
++                    continue;
+                 }
++                update = updates.next(), if tasks.has_room() => update,
+             };
+-            let mut tasks = JoinSet::new();
+-            loop {
+-                while let Some(finished) = tasks.try_join_next() {
+-                    if let Err(e) = finished {
+-                        eprintln!("cleaner update handler failed: {e}");
++            match update {
++                Ok(grammers_client::update::Update::NewMessage(message)) => {
++                    if !handlers::bots::cleaner_candidate(&cleaner_ctx, &message) {
++                        continue;
+                     }
++                    let key = message.peer_id().bot_api_dialog_id().unwrap_or(0);
++                    cleaner_worker_telemetry
++                        .received
++                        .fetch_add(1, Ordering::Relaxed);
++                    tasks.push(key, message);
+                 }
+-                match updates.next().await {
+-                    Ok(grammers_client::update::Update::NewMessage(message)) => {
+-                        if !handlers::bots::cleaner_candidate(&cleaner_ctx, &message) {
+-                            continue;
+-                        }
+-                        let permit = cleaner_permits
+-                            .clone()
+-                            .acquire_owned()
+-                            .await
+-                            .expect("the cleaner update semaphore is never closed");
+-                        let ctx = Arc::clone(&cleaner_ctx);
+-                        tasks.spawn(async move {
+-                            let _permit = permit;
+-                            handlers::bots::on_cleaner_message(&ctx, &message).await;
+-                        });
+-                    }
+-                    Ok(_) => {}
+-                    Err(e) => {
+-                        eprintln!("cleaner updates: {e}");
+-                        break;
+-                    }
++                Ok(_) => {}
++                Err(e) => {
++                    eprintln!("cleaner updates: {e}");
++                    break;
+                 }
+             }
+-            while let Some(finished) = tasks.join_next().await {
+-                if let Err(e) = finished {
+-                    eprintln!("cleaner update handler failed: {e}");
++        }
++        while !tasks.is_empty() {
++            tasks.start(|message| {
++                let ctx = Arc::clone(&cleaner_ctx);
++                async move {
++                    handlers::bots::on_cleaner_message(&ctx, &message).await;
+                 }
++            });
++            if let Some(finished) = tasks.join_next().await {
++                cleaner_worker_telemetry.complete(finished);
+             }
+-        });
+-    } else {
+-        drop(user_updates);
+-    }
++        }
++        if let Err(error) = updates.sync_update_state().await {
++            log::error!("cleaner state sync failed: {error}");
++        }
++    });
+ 
+     handlers::join::prime(&ctx).await;
+     handlers::tempmedia::restore(&ctx).await;
+ 
++    // Every background owner is retained here. Periodic work is cancelled and joined before
++    // the final state flush; one-shot failures are reaped in the main loop instead of becoming
++    // detached panics with no observer.
++    let mut background_tasks = tokio::task::JoinSet::new();
++    background_tasks.spawn(handlers::cases::run_retention(Arc::clone(&ctx)));
++    background_tasks.spawn(handlers::autoconfig::recover_startup(Arc::clone(&ctx)));
++
++    let pending_warn_ctx = Arc::clone(&ctx);
++    background_tasks.spawn(async move {
++        let mut tick = tokio::time::interval(NIGHT_CHECK);
++        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
++        loop {
++            tick.tick().await;
++            handlers::warns::recover_pending(&pending_warn_ctx).await;
++        }
++    });
++
++    let cleaner_recommend_ctx = Arc::clone(&ctx);
++    background_tasks.spawn(async move {
++        let mut tick = tokio::time::interval(NIGHT_CHECK);
++        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
++        loop {
++            tick.tick().await;
++            handlers::cleaner_setup::run_recommendations(&cleaner_recommend_ctx).await;
++        }
++    });
++
++    // One task each. Sharing a tick meant whichever ran long silently ate the others' turns,
++    // and two of the three await a Telegram call inside a per-chat loop.
+     let night_ctx = Arc::clone(&ctx);
+-    tokio::spawn(async move {
++    background_tasks.spawn(async move {
+         let mut tick = tokio::time::interval(NIGHT_CHECK);
+         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+         loop {
+@@ -442,7 +639,7 @@ async fn main() -> Result {
+     });
+ 
+     let timed_lock_ctx = Arc::clone(&ctx);
+-    tokio::spawn(async move {
++    background_tasks.spawn(async move {
+         let mut tick = tokio::time::interval(NIGHT_CHECK);
+         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+         loop {
+@@ -452,7 +649,7 @@ async fn main() -> Result {
+     });
+ 
+     let report_ctx = Arc::clone(&ctx);
+-    tokio::spawn(async move {
++    background_tasks.spawn(async move {
+         let mut tick = tokio::time::interval(NIGHT_CHECK);
+         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+         loop {
+@@ -462,7 +659,7 @@ async fn main() -> Result {
+     });
+ 
+     let purge_ctx = Arc::clone(&ctx);
+-    tokio::spawn(async move {
++    background_tasks.spawn(async move {
+         let mut tick = tokio::time::interval(NIGHT_CHECK);
+         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+         loop {
+@@ -471,8 +668,10 @@ async fn main() -> Result {
+         }
+     });
+ 
++    // Its own task, not the night one: that tick already has three jobs eating each other's
++    // turns, and a loop that awaits a delete per chat is exactly the kind that would.
+     let media_ctx = Arc::clone(&ctx);
+-    tokio::spawn(async move {
++    background_tasks.spawn(async move {
+         let mut tick = tokio::time::interval(TEMP_MEDIA_SWEEP);
+         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+         loop {
+@@ -482,7 +681,7 @@ async fn main() -> Result {
+     });
+ 
+     let deferred_ctx = Arc::clone(&ctx);
+-    tokio::spawn(async move {
++    background_tasks.spawn(async move {
+         let mut tick = tokio::time::interval(DEFERRED_SWEEP);
+         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+         loop {
+@@ -492,7 +691,7 @@ async fn main() -> Result {
+     });
+ 
+     let log_ctx = Arc::clone(&ctx);
+-    tokio::spawn(async move {
++    background_tasks.spawn(async move {
+         let mut tick = tokio::time::interval(LOG_FLUSH);
+         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+         loop {
+@@ -502,7 +701,7 @@ async fn main() -> Result {
+     });
+ 
+     let stats_ctx = Arc::clone(&ctx);
+-    tokio::spawn(async move {
++    background_tasks.spawn(async move {
+         let mut flushes: u32 = 1;
+         let mut tick = tokio::time::interval(STATS_FLUSH);
+         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+@@ -510,6 +709,8 @@ async fn main() -> Result {
+             tick.tick().await;
+             handlers::stats::flush(&stats_ctx).await;
+ 
++            // Once a day: the only thing left to prune is members quiet for months, and it
++            // is a sequential delete over every counter row.
+             if flushes.is_multiple_of(1440) {
+                 handlers::stats::prune(&stats_ctx).await;
+             }
+@@ -517,8 +718,10 @@ async fn main() -> Result {
+         }
+     });
+ 
++    // The chats map is swept separately: an entry per group stays only while it is active or
++    // still owns queued work, so quiet groups do not accumulate process-wide state forever.
+     let sweep_ctx = Arc::clone(&ctx);
+-    tokio::spawn(async move {
++    background_tasks.spawn(async move {
+         let mut tick = tokio::time::interval(CHAT_SWEEP);
+         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+         loop {
+@@ -530,15 +733,18 @@ async fn main() -> Result {
+         }
+     });
+ 
++    // Before the first picture can arrive, so a filter made a second after startup is
++    // calibrated against real traffic rather than against an empty reservoir.
+     ctx.load_samples().await;
+ 
+-    let permits = Arc::new(Semaphore::new(update_concurrency));
++    // One cheap line per minute when info logging is enabled. This makes queue/cap saturation
++    // visible on a shard before it becomes a memory or latency incident. Handler completions
++    // update fixed-size atomic histograms; logging itself is outside the message path.
+     let capacity_ctx = Arc::clone(&ctx);
+-    let update_capacity = Arc::clone(&permits);
+-    let cleaner_capacity = Arc::clone(&cleaner_permits);
++    let cleaner_capacity = Arc::clone(&cleaner_telemetry);
+     let update_telemetry = Arc::new(UpdateTelemetry::default());
+     let capacity_telemetry = Arc::clone(&update_telemetry);
+-    tokio::spawn(async move {
++    background_tasks.spawn(async move {
+         let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+         loop {
+@@ -546,8 +752,16 @@ async fn main() -> Result {
+             let snapshot = capacity_ctx.capacity_snapshot();
+             let updates_received = capacity_telemetry.received.swap(0, Ordering::Relaxed);
+             let updates_completed = capacity_telemetry.completed.swap(0, Ordering::Relaxed);
+-            let update_available = update_capacity.available_permits();
+-            let cleaner_available = cleaner_capacity.available_permits();
++            let latency = UpdateTelemetry::percentiles(&capacity_telemetry.latency);
++            let queue_wait = UpdateTelemetry::percentiles(&capacity_telemetry.queue_wait);
++            log::info!(
++                "dispatch: queued={} cleaner_queued={} failures={} transport_dropped_batches_total={} stale_updates_total={} latency_us_upper_p50_p95_p99={latency:?} queue_wait_us_upper_p50_p95_p99={queue_wait:?}",
++                capacity_telemetry.queued.load(Ordering::Relaxed),
++                cleaner_capacity.queued.load(Ordering::Relaxed),
++                capacity_telemetry.failed.swap(0, Ordering::Relaxed),
++                grammers_client::sender::dropped_update_batches(),
++                handlers::STALE_UPDATES.load(Ordering::Relaxed)
++            );
+             let (db_connections, db_idle) = capacity_ctx.settings.pool_stats();
+             let (counter_rows, note_rows) = capacity_ctx.settings.durable_counts().await;
+             log::info!(
+@@ -573,11 +787,11 @@ async fn main() -> Result {
+                 snapshot.filtered_voices,
+                 snapshot.outbound_active,
+                 snapshot.outbound_waiting,
+-                update_concurrency.saturating_sub(update_available),
++                capacity_telemetry.active.load(Ordering::Relaxed),
+                 update_concurrency,
+                 updates_received,
+                 updates_completed,
+-                cleaner_concurrency.saturating_sub(cleaner_available),
++                cleaner_capacity.active.load(Ordering::Relaxed),
+                 cleaner_concurrency,
+                 db_connections,
+                 db_idle,
+@@ -585,8 +799,11 @@ async fn main() -> Result {
+         }
+     });
+ 
++    // The reservoir to disk on its own tick. A minute is chosen against what is lost rather
++    // than what it costs: the write is one upsert of half a megabyte and the worst case is a
++    // minute of pictures, against a restart that used to cost every sample the fleet had.
+     let samples_ctx = Arc::clone(&ctx);
+-    tokio::spawn(async move {
++    background_tasks.spawn(async move {
+         let mut tick = tokio::time::interval(SAMPLE_FLUSH);
+         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+         loop {
+@@ -595,19 +812,32 @@ async fn main() -> Result {
+         }
+     });
+ 
++    // One shot, and it usually finds nothing: the badge promotions an earlier release made are
++    // undone and rewritten as plain member ranks. Spawned rather than awaited so a slow or
++    // rate-limited chat cannot hold up the update stream.
+     let badges_ctx = Arc::clone(&ctx);
+-    tokio::spawn(async move {
++    background_tasks.spawn(async move {
+         handlers::stats::sweep_badges(&badges_ctx).await;
+     });
+ 
++    // Off by default: `miniapp::spawn` returns immediately, without binding a port, unless
++    // `MINIAPP_LINK` is set.
+     let miniapp_ctx = Arc::clone(&ctx);
+-    tokio::spawn(async move {
++    background_tasks.spawn(async move {
+         miniapp::spawn(miniapp_ctx).await;
+     });
+ 
+     println!("running");
+-    let mut tasks = JoinSet::new();
+-
++    let mut tasks = dispatcher::Dispatcher::new(
++        update_concurrency,
++        handlers::PER_CHAT_UPDATES,
++        UPDATES_CHANNEL_CAPACITY.get(),
++    );
++    // Existing freshness policy: catch-up is disabled and idle channel cursors are forgotten.
++    // The local grammers receiver fetches differences sequentially before delivering live work,
++    // so enabling fleet-wide catch-up needs a separate recovery/admission design. These flags
++    // sacrifice downtime coverage; the 120-second NewMessage cutoff does not make that safe.
++    // Raw membership events and edits have no equivalent age filter. See audit/scalability.
+     let mut updates = client
+         .stream_updates(
+             updates,
+@@ -620,43 +850,116 @@ async fn main() -> Result {
+     let shutdown = shutdown_signal();
+     tokio::pin!(shutdown);
+     let update_telemetry = Arc::clone(&update_telemetry);
++    let mut stream_error = None;
++    let mut background_error = None;
++    let mut ownership_lost = false;
+     loop {
+         while let Some(finished) = tasks.try_join_next() {
+-            if let Err(e) = finished {
+-                eprintln!("update handler failed: {e}");
+-            }
++            update_telemetry.complete(finished);
+         }
+-
+-        let permit = tokio::select! {
+-            _ = &mut shutdown => break,
+-            permit = Arc::clone(&permits).acquire_owned() => {
+-                permit.expect("the update semaphore is never closed")
++        tasks.start(|update| {
++            let ctx = Arc::clone(&ctx);
++            async move {
++                handlers::dispatch(&ctx, update).await;
+             }
+-        };
++        });
++        update_telemetry
++            .active
++            .store(tasks.active() as u64, Ordering::Relaxed);
++        update_telemetry
++            .queued
++            .store(tasks.pending() as u64, Ordering::Relaxed);
+         tokio::select! {
+             _ = &mut shutdown => break,
+-            update = updates.next() => {
+-                let update = update?;
++            _ = settings.ownership_lost() => {
++                ownership_lost = true;
++                break;
++            },
++            finished = tasks.join_next(), if tasks.active() > 0 => {
++                if let Some(finished) = finished { update_telemetry.complete(finished); }
++            }
++            finished = background_tasks.join_next(), if !background_tasks.is_empty() => {
++                if let Some(Err(error)) = finished {
++                    log::error!("owned background task failed: {error}");
++                    background_error = Some(error);
++                    break;
++                }
++            }
++            update = updates.next(), if tasks.has_room() => {
++                let update = match update {
++                    Ok(update) => update,
++                    Err(error) => { stream_error = Some(error); break; }
++                };
+                 update_telemetry.received.fetch_add(1, Ordering::Relaxed);
+-                let ctx = Arc::clone(&ctx);
+-                let telemetry = Arc::clone(&update_telemetry);
+-                tasks.spawn(async move {
+-                    let _permit = permit;
+-                    handlers::dispatch(&ctx, update).await;
+-                    telemetry.completed.fetch_add(1, Ordering::Relaxed);
+-                });
++                tasks.push(handlers::dispatch_key(&update), update);
+             },
+         }
+     }
+ 
+-    updates.sync_update_state().await?;
++    if cleaner_stop.send(true).is_err() {
++        log::warn!("shutdown: cleaner worker had already stopped");
++    }
++    background_tasks.shutdown().await;
++    ctx.shutdown_owned().await;
++    // Both accounts keep their transport while admitted work and statistics drain.
++    // Leave systemd's remaining stop budget for closing sockets and runtime teardown.
++    let drained = tokio::time::timeout(std::time::Duration::from_secs(75), async {
++      while !tasks.is_empty() {
++        tasks.start(|update| {
++            let ctx = Arc::clone(&ctx);
++            async move { handlers::dispatch(&ctx, update).await; }
++        });
++        if let Some(finished) = tasks.join_next().await { update_telemetry.complete(finished); }
++      }
++        if let Err(error) = cleaner_worker.await {
++            log::error!("shutdown: cleaner worker failed: {error}");
++        }
++      if !handlers::stats::flush(&ctx).await {
++          log::error!("shutdown: statistics remain queued; durable batches will retry at startup, unstaged deltas remain volatile");
++      }
++      handlers::log::flush(&ctx).await;
++      ctx.flush_samples().await;
++      updates.sync_update_state().await
++    }).await;
++    match drained {
++        Ok(Ok(())) => log::info!("shutdown: admitted updates drained and state synchronized"),
++        Ok(Err(error)) => log::error!("shutdown: state synchronization failed: {error}"),
++        Err(_) => log::error!(
++            "shutdown: 75-second drain budget exhausted; unfinished volatile work remains"
++        ),
++    }
+     handle.quit();
+-    user_task.abort();
+-    let _ = pool_task.await;
+-    while let Some(finished) = tasks.join_next().await {
+-        if let Err(e) = finished {
+-            eprintln!("update handler failed: {e}");
++    user_handle.quit();
++    owner_monitor.abort();
++    match tokio::time::timeout(std::time::Duration::from_secs(5), owner_monitor).await {
++        Ok(Ok(())) => {}
++        Ok(Err(error)) if error.is_cancelled() => {}
++        Ok(Err(error)) => log::error!("shutdown: ownership monitor failed: {error}"),
++        Err(_) => log::error!("shutdown: ownership monitor did not stop in five seconds"),
++    }
++    match tokio::time::timeout(std::time::Duration::from_secs(5), async {
++        tokio::join!(pool_task, user_task)
++    })
++    .await
++    {
++        Ok((bot, user)) => {
++            if let Err(error) = bot {
++                log::error!("shutdown: bot transport task failed: {error}");
++            }
++            if let Err(error) = user {
++                log::error!("shutdown: cleaner transport task failed: {error}");
++            }
+         }
++        Err(_) => log::error!("shutdown: transport tasks did not stop in five seconds"),
++    }
++    if let Some(error) = stream_error {
++        return Err(error.into());
++    }
++    if let Some(error) = background_error {
++        return Err(format!("background task failed: {error}").into());
++    }
++    if ownership_lost {
++        return Err("database ownership lost".into());
+     }
+     Ok(())
+ }
+diff --git a/tools/shard_migrate.py b/tools/shard_migrate.py
+index 6836251..6df6847 100644
+--- a/tools/shard_migrate.py
++++ b/tools/shard_migrate.py
+@@ -64,6 +64,21 @@ CHAT_TABLES = (
+         ("chat_id", "message_id", "due_at"),
+         ("chat_id", "message_id"),
+     ),
++    TableSpec(
++        "pending_captchas",
++        (
++            "chat_id",
++            "user_id",
++            "answer",
++            "message_id",
++            "due_at",
++            "retry_at",
++            "failure_action",
++            "state",
++            "attempts",
++        ),
++        ("chat_id", "user_id"),
++    ),
+     TableSpec(
+         "image_filters",
+         ("chat_id", "name", "vec", "scale", "cut", "rate", "live", "samples", "calibrated"),

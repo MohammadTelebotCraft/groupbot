@@ -15,10 +15,8 @@ pub struct View<'a> {
     message: &'a Message,
     media: Option<Media>,
     text: &'a str,
-
     lower: std::sync::OnceLock<String>,
     digits: std::sync::OnceLock<std::borrow::Cow<'a, str>>,
-
     tight: std::sync::OnceLock<Option<String>>,
     ascii: std::sync::OnceLock<Option<String>>,
 }
@@ -82,13 +80,18 @@ pub fn plain() -> impl Iterator<Item = &'static Lock> {
     LOCKS.iter().filter(|lock| !is_ai(lock.key))
 }
 
-pub async fn set(ctx: &Ctx, chat: i64, key: &'static str, on: bool) -> bool {
-    let changed = ctx.settings.set(chat, key, on).await;
+pub async fn try_set(
+    ctx: &Ctx,
+    chat: i64,
+    key: &'static str,
+    on: bool,
+) -> Result<bool, crate::state::SettingsWriteError> {
+    let changed = ctx.settings.try_set(chat, key, on).await?;
+    super::strict::try_sync_pick(ctx, chat, key, on).await?;
     if changed {
-        super::strict::sync_pick(ctx, chat, key, on).await;
         super::bots::on_lock_set(ctx, chat, key, on).await;
     }
-    changed
+    Ok(changed)
 }
 
 pub const LOCKS: &[Lock] = &[
@@ -272,7 +275,6 @@ pub const LOCKS: &[Lock] = &[
         names: &["لینک در بایو", "لینک بایو", "بایو"],
         matches: never,
     },
-
     Lock {
         key: super::comment::LOCK,
         names: &["کامنت", "کامنت ها", "کامنتها"],
@@ -333,15 +335,7 @@ const BOT: &[&str] = &["ربات", "بات"];
 
 const GROUP: &[&str] = &["گروه", "کل گروه"];
 
-pub const GROUP_UNTIL: &str = "glock_until";
-
-const STAMP_WIDTH: usize = 12;
-
 pub const TIMED_RANGE: (u64, u64) = (60, 30 * 86_400);
-
-pub fn stamp(seconds: u64) -> String {
-    format!("{seconds:0STAMP_WIDTH$}")
-}
 
 pub const EDIT: &str = "edit";
 
@@ -402,7 +396,6 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
         {
             return true;
         }
-
         let (active, models): (Vec<&str>, usize) = ctx.settings.with_chat(chat, |settings| {
             (
                 plain()
@@ -419,8 +412,11 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
             0 => String::new(),
             n => format!("\nنگهبان هوشمند · {n} روشن"),
         };
-        let _ = message
-            .reply(if active.is_empty() {
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::LockManagement,
+            if active.is_empty() {
                 format!(
                     "هیچ قفلی فعال نیست. ({} قفل در دسترس){smart}",
                     plain().count()
@@ -432,8 +428,9 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
                     plain().count(),
                     active.join("، ")
                 )
-            })
-            .await;
+            },
+        )
+        .await;
         return true;
     }
 
@@ -441,35 +438,51 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
         if !can_manage(ctx, message).await {
             return moderate(ctx, message, chat, view).await;
         }
-
         let timed = on.then(|| timed_group(view, name)).flatten();
-
         if !names_a_lock(name) && timed.is_none() {
             return false;
         }
-
         if !super::limits::allowed(ctx, message, super::limits::SET) {
-            super::limits::deny(message, super::limits::SET).await;
+            super::limits::deny(ctx, message, super::limits::SET).await;
             return true;
         }
 
         if ALL.contains(&name) {
             let mut changed = 0;
             for lock in plain() {
-                if set(ctx, chat, lock.key, on).await {
-                    changed += 1;
+                match try_set(ctx, chat, lock.key, on).await {
+                    Ok(true) => changed += 1,
+                    Ok(false) => {}
+                    Err(error) => {
+                        ::log::warn!("locks: bulk write for {chat}/{} failed: {error}", lock.key);
+                        super::respond(ctx, message, crate::response::ResponseKind::CommandError, if error.commit_outcome_unknown() {
+                                "نتیجه تنظیم همه قفل ها نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                            } else if changed == 0 {
+                                "قفل ها ذخیره نشدند؛ دوباره تلاش کنید."
+                            } else {
+                                "تنظیم همه قفل ها کامل نشد؛ بعضی قفل ها تغییر کردند. وضعیت را بررسی کنید."
+                            }).await;
+                        return true;
+                    }
                 }
             }
-            let _ = message
-                .reply(if on {
-                    format!(
-                        "✓ همه قفل ها فعال شد ({changed} تغییر، {} قفل).",
-                        plain().count()
-                    )
-                } else {
-                    format!("✗ همه قفل ها برداشته شد ({changed} تغییر).")
-                })
-                .await;
+            super::respond(
+                ctx,
+                message,
+                crate::response::ResponseKind::LockManagement,
+                super::premium::icon_text(
+                    Some(super::premium::protection(on)),
+                    if on {
+                        format!(
+                            "همه قفل ها فعال شد ({changed} تغییر، {} قفل).",
+                            plain().count()
+                        )
+                    } else {
+                        format!("همه قفل ها برداشته شد ({changed} تغییر).")
+                    },
+                ),
+            )
+            .await;
             return true;
         }
 
@@ -498,23 +511,46 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
         let Some(lock) = LOCKS.iter().find(|lock| lock.names.contains(&name)) else {
             return false;
         };
-        let changed = set(ctx, chat, lock.key, on).await;
+        let changed = match try_set(ctx, chat, lock.key, on).await {
+            Ok(changed) => changed,
+            Err(error) => {
+                ::log::warn!("locks: write for {chat}/{} failed: {error}", lock.key);
+                super::respond(
+                    ctx,
+                    message,
+                    crate::response::ResponseKind::CommandError,
+                    if error.commit_outcome_unknown() {
+                        "نتیجه ذخیره قفل نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                    } else {
+                        "قفل ذخیره نشد؛ دوباره تلاش کنید."
+                    },
+                )
+                .await;
+                return true;
+            }
+        };
         let label = lock.names[0];
-        let _ = message
-            .reply(match (on, changed) {
-                (true, true) => format!("✓ قفل {label} فعال شد."),
-                (true, false) => format!("✓ قفل {label} از قبل فعال بود."),
-                (false, true) => format!("✗ قفل {label} برداشته شد."),
-                (false, false) => format!("✗ قفل {label} از قبل باز بود."),
-            })
-            .await;
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::LockManagement,
+            super::premium::icon_text(
+                Some(super::premium::lock_icon(lock.key, on)),
+                match (on, changed) {
+                    (true, true) => format!("قفل {label} فعال شد."),
+                    (true, false) => format!("قفل {label} از قبل فعال بود."),
+                    (false, true) => format!("قفل {label} برداشته شد."),
+                    (false, false) => format!("قفل {label} از قبل باز بود."),
+                },
+            ),
+        )
+        .await;
         return true;
     }
 
     if moderate(ctx, message, chat, view).await {
         return true;
     }
-
     ignored_command(ctx, message, chat, text).await
 }
 
@@ -534,7 +570,6 @@ async fn moderate(
         None
     };
     let acted = enforce(ctx, message, chat, forced, view).await;
-
     if matches!(acted, Acted::Yes) && bio {
         super::biolink::punish(ctx, message, chat).await;
     }
@@ -560,7 +595,7 @@ pub async fn service(ctx: &Ctx, message: &Message) {
     if message.action().is_none() || !ctx.settings.is_locked(chat, SERVICE) {
         return;
     }
-    if let Err(e) = message.delete().await {
+    if let Err(e) = message.delete_critical().await {
         eprintln!("service lock: could not delete in {chat}: {e}");
     }
 }
@@ -580,19 +615,43 @@ fn lock(key: &str) -> Option<&'static Lock> {
 }
 
 fn tripped(ctx: &Ctx, chat: i64, view: &View<'_>) -> Option<&'static Lock> {
-    let armed: Vec<&'static Lock> = ctx.settings.with_chat(chat, |settings| {
-        LOCKS
-            .iter()
-            .filter(|lock| settings.is_locked(lock.key))
-            .collect()
+    const {
+        assert!(LOCKS.len() <= u64::BITS as usize);
+    }
+    let armed = ctx.settings.with_chat(chat, |settings| {
+        LOCKS.iter().enumerate().fold(0u64, |bits, (index, lock)| {
+            bits | (u64::from(settings.is_locked(lock.key)) << index)
+        })
     });
-    armed.into_iter().find(|lock| (lock.matches)(view))
+    LOCKS
+        .iter()
+        .enumerate()
+        .find(|(index, lock)| armed & (1u64 << index) != 0 && (lock.matches)(view))
+        .map(|(_, lock)| lock)
 }
 
 enum Acted {
     No,
     Yes,
     Already,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DeleteClaim {
+    Retryable,
+    Owner,
+    Duplicate,
+}
+
+fn claim_after_delete(deleted: bool, claim: impl FnOnce() -> bool) -> DeleteClaim {
+    if !deleted {
+        return DeleteClaim::Retryable;
+    }
+    if claim() {
+        DeleteClaim::Owner
+    } else {
+        DeleteClaim::Duplicate
+    }
 }
 
 async fn enforce(
@@ -612,19 +671,21 @@ async fn enforce(
         return Acted::No;
     }
 
-    if !ctx.claim_moderation(chat, message.id()) {
-        return Acted::Already;
+    let deleted = match message.delete_critical().await {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("could not delete message in {chat}: {e}");
+            false
+        }
+    };
+    match claim_after_delete(deleted, || ctx.claim_moderation(chat, message.id())) {
+        DeleteClaim::Retryable => return Acted::No,
+        DeleteClaim::Duplicate => return Acted::Already,
+        DeleteClaim::Owner => {}
     }
-
     let text = view.message.text().to_owned();
-
-    if let Err(e) = message.delete().await {
-        eprintln!("could not delete message in {chat}: {e}");
-        return Acted::No;
-    }
     ctx.bump(chat, super::stats::DELETED);
     let sender_name = super::name_of(message);
-
     let (cause, reason_for_log, by_filter) = match (matched, filtered) {
         (Some(lock), _) => (lock.key, lock.names[0], false),
         (None, true) => (super::strict::FILTER, "فیلتر کلمه", true),
@@ -649,12 +710,16 @@ async fn enforce(
         },
     )
     .await;
-
     let chances = match super::strict::punish(ctx, message, chat, cause).await {
-        super::strict::Outcome::Announced => return Acted::Yes,
+        super::strict::Outcome::Announced => {
+            let action = super::cases::action_key(super::strict::action_of(ctx, chat));
+            super::cases::record_delete(ctx, message, cause, reason_for_log, action).await;
+            return Acted::Yes;
+        }
         super::strict::Outcome::Chances(left) => Some(left),
         super::strict::Outcome::Nothing => None,
     };
+    super::cases::record_delete(ctx, message, cause, reason_for_log, "delete").await;
 
     if by_filter {
         super::filters::notify(ctx, message, chat, &text, chances).await;
@@ -664,34 +729,63 @@ async fn enforce(
     Acted::Yes
 }
 
-pub async fn set_group_lock(
-    ctx: &Ctx,
-    chat_ref: grammers_client::session::types::PeerRef,
-    on: bool,
-) -> bool {
-    let Some(chat) = chat_ref.id.bot_api_dialog_id() else {
-        return false;
-    };
-
-    super::rights::apply(ctx, chat_ref, chat, on).await
-}
-
 async fn group_lock(ctx: &Ctx, message: &Message, chat: i64, on: bool) -> bool {
     let Ok(Some(chat_ref)) = message.peer_ref().await else {
         return false;
     };
-    let done = set_group_lock(ctx, chat_ref, on).await;
-
-    if done {
-        ctx.settings.set(chat, GROUP_UNTIL, false).await;
-    }
-    let _ = message
-        .reply(match (done, on) {
-            (true, true) => "✓ گروه قفل شد. تنها ادمین ها می توانند پیام بفرستند.",
-            (true, false) => "✗ قفل گروه برداشته شد.",
-            (false, _) => "انجام نشد. مطمئن شوید ربات اجازه تغییر اطلاعات گروه دارد.",
-        })
+    if let Err(error) = super::rights::seed(ctx, message, chat).await {
+        log::warn!("group lock: could not seed rights for {chat}: {error}");
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            "اختیارات گروه خوانده نشد؛ دوباره تلاش کنید.",
+        )
         .await;
+        return true;
+    }
+    let outcome = super::rights::set_manual_lock(ctx, chat_ref, chat, on).await;
+    let done = matches!(outcome, Ok(super::rights::DeliveryOutcome::Applied));
+    let pending = matches!(
+        outcome,
+        Ok(super::rights::DeliveryOutcome::PendingRetry { .. }
+            | super::rights::DeliveryOutcome::Superseded)
+    );
+    let delivery_unknown = matches!(
+        outcome,
+        Ok(super::rights::DeliveryOutcome::AcceptedDeliveryUnknown { .. })
+    );
+    let unknown = matches!(outcome, Err(ref error) if error.acceptance_unknown());
+    if let Err(ref error) = outcome {
+        if unknown {
+            log::warn!("group lock: mutation outcome unknown for {chat}: {error}");
+        } else {
+            log::warn!("group lock: mutation not accepted for {chat}: {error}");
+        }
+    }
+    super::respond(
+        ctx,
+        message,
+        crate::response::ResponseKind::LockManagement,
+        super::premium::icon_text(
+            Some(if done {
+                super::premium::protection(on)
+            } else if pending || delivery_unknown || unknown {
+                super::premium::Icon::Timer
+            } else {
+                super::premium::Icon::ErrorRed
+            }),
+            match (done, pending, delivery_unknown, unknown, on) {
+                (true, _, _, _, true) => "✓ گروه قفل شد. تنها ادمین ها می توانند پیام بفرستند.",
+                (true, _, _, _, false) => "✗ قفل دستی گروه برداشته شد.",
+                (_, true, _, _, _) => "تغییر ذخیره شد؛ تحویل آن به تلگرام دوباره تلاش می شود.",
+                (_, _, true, _, _) => "تغییر ذخیره شد، اما وضعیت تحویل آن به تلگرام مشخص نیست.",
+                (_, _, _, true, _) => "وضعیت ذخیره سازی مشخص نیست؛ پنل را دوباره بررسی کنید.",
+                _ => "تغییر ذخیره نشد؛ دوباره تلاش کنید.",
+            },
+        ),
+    )
+    .await;
     true
 }
 
@@ -710,70 +804,82 @@ fn timed_group(view: &View<'_>, name: &str) -> Option<u64> {
         rest.starts_with(char::is_whitespace)
             .then(|| rest.trim_start())
     })?;
-    super::restrict::duration_of(tail).map(|asked| {
-        asked
-            .as_secs()
-            .clamp(TIMED_RANGE.0, TIMED_RANGE.1)
-    })
+    super::restrict::duration_of(tail)
+        .map(|asked| asked.as_secs().clamp(TIMED_RANGE.0, TIMED_RANGE.1))
 }
 
 async fn group_lock_timed(ctx: &Ctx, message: &Message, chat: i64, seconds: u64) -> bool {
     let Ok(Some(chat_ref)) = message.peer_ref().await else {
         return false;
     };
-    if !set_group_lock(ctx, chat_ref, true).await {
-        let _ = message
-            .reply("انجام نشد. مطمئن شوید ربات اجازه تغییر اطلاعات گروه دارد.")
-            .await;
+    if let Err(error) = super::rights::seed(ctx, message, chat).await {
+        log::warn!("timed group lock: could not seed rights for {chat}: {error}");
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "اختیارات گروه خوانده نشد؛ دوباره تلاش کنید.",
+            ),
+        )
+        .await;
         return true;
     }
-
     let until = super::stats::local_seconds() + seconds;
-    ctx.settings
-        .set_value(chat, GROUP_UNTIL, &stamp(until))
-        .await;
-
-    let _ = message
-        .reply(format!(
-            "✓ گروه برای {} قفل شد. تنها ادمین ها می توانند پیام بفرستند.",
-            super::log::duration_label(seconds)
-        ))
-        .await;
-    true
-}
-
-pub async fn run_timed(ctx: &std::sync::Arc<Ctx>) {
-    let now = stamp(super::stats::local_seconds());
-    let mut due = Vec::new();
-    for chat in ctx.settings.group_locks_due(&now).await {
-        if super::extras::night_holds_group(ctx, chat) {
-            continue;
-        }
-        let Some(chat_ref) = ctx.chat_ref(chat) else {
-            continue;
-        };
-        due.push((chat, chat_ref));
-    }
-
-    let owner = std::sync::Arc::clone(ctx);
-    super::bounded(due, super::FLEET_CONCURRENCY, move |(chat, chat_ref)| {
-        let ctx = std::sync::Arc::clone(&owner);
-        async move {
-            if !set_group_lock(&ctx, chat_ref, false).await {
-                return;
-            }
-            ctx.settings.set(chat, GROUP_UNTIL, false).await;
-            let _ = ctx
-                .client
-                .send_message(
-                    chat_ref,
-                    grammers_client::message::InputMessage::new()
-                        .html("<b>قفل گروه</b>\n\nمهلت قفل تمام شد و گروه باز شد."),
-                )
-                .await;
-        }
-    })
+    let outcome = super::rights::set_timed_lock(
+        ctx,
+        chat_ref,
+        chat,
+        i64::try_from(until).unwrap_or(i64::MAX),
+    )
     .await;
+    let applied = matches!(outcome, Ok(super::rights::DeliveryOutcome::Applied));
+    let pending = matches!(
+        outcome,
+        Ok(super::rights::DeliveryOutcome::PendingRetry { .. }
+            | super::rights::DeliveryOutcome::Superseded)
+    );
+    let delivery_unknown = matches!(
+        outcome,
+        Ok(super::rights::DeliveryOutcome::AcceptedDeliveryUnknown { .. })
+    );
+    let unknown = matches!(outcome, Err(ref error) if error.acceptance_unknown());
+    if let Err(ref error) = outcome {
+        if unknown {
+            log::warn!("timed group lock: mutation outcome unknown for {chat}: {error}");
+        } else {
+            log::warn!("timed group lock: mutation not accepted for {chat}: {error}");
+        }
+    }
+    super::respond(
+        ctx,
+        message,
+        crate::response::ResponseKind::LockManagement,
+        super::premium::icon_text(
+            Some(if applied || pending || delivery_unknown || unknown {
+                super::premium::Icon::Timer
+            } else {
+                super::premium::Icon::ErrorRed
+            }),
+            if applied {
+                format!(
+                    "گروه برای {} قفل شد. تنها ادمین ها می توانند پیام بفرستند.",
+                    super::log::duration_label(seconds)
+                )
+            } else if pending {
+                "قفل زمان دار ذخیره شد؛ تحویل آن به تلگرام دوباره تلاش می شود.".to_owned()
+            } else if delivery_unknown {
+                "قفل زمان دار ذخیره شد، اما وضعیت تحویل آن به تلگرام مشخص نیست.".to_owned()
+            } else if unknown {
+                "وضعیت ذخیره سازی مشخص نیست؛ پنل را دوباره بررسی کنید.".to_owned()
+            } else {
+                "قفل زمان دار ذخیره نشد؛ دوباره تلاش کنید.".to_owned()
+            },
+        ),
+    )
+    .await;
+    true
 }
 
 fn parse(text: &str) -> Option<(bool, &str)> {
@@ -805,7 +911,6 @@ fn is_link(view: &View) -> bool {
 
     marked_up
         || text_has_link(view.ascii())
-
         || (disguised(view) && text_has_bare_domain(view.ascii()))
         || markup_of(view).is_some_and(markup_has_link)
 }
@@ -820,19 +925,48 @@ fn disguised(view: &View) -> bool {
 
 fn hides_a_link(c: char) -> bool {
     let hidden = invisible(c)
-        && !matches!(c,
-            '\u{200c}' | '\u{200d}' | '\u{200e}' | '\u{200f}' | '\u{0640}'
-            | '\u{fe00}'..='\u{fe0f}');
-
+        && !matches!(
+            c,
+            '\u{200c}' | '\u{200d}' | '\u{200e}' | '\u{200f}' | '\u{0640}' | '\u{fe00}'
+                ..='\u{fe0f}'
+        );
     hidden
-        || matches!(c,
-            '\u{1d00}' | '\u{0299}' | '\u{1d04}' | '\u{1d05}' | '\u{1d07}' | '\u{a730}'
-            | '\u{0262}' | '\u{029c}' | '\u{026a}' | '\u{1d0a}' | '\u{1d0b}' | '\u{029f}'
-            | '\u{1d0d}' | '\u{0274}' | '\u{1d0f}' | '\u{1d18}' | '\u{a7af}' | '\u{0280}'
-            | '\u{a731}' | '\u{1d1b}' | '\u{1d1c}' | '\u{1d20}' | '\u{1d21}' | '\u{028f}'
-            | '\u{1d22}'
-            | '\u{2215}' | '\u{2044}' | '\u{29f8}'
-            | '\u{3002}' | '\u{ff61}' | '\u{2027}' | '\u{2219}' | '\u{22c5}')
+        || matches!(
+            c,
+            '\u{1d00}'
+                | '\u{0299}'
+                | '\u{1d04}'
+                | '\u{1d05}'
+                | '\u{1d07}'
+                | '\u{a730}'
+                | '\u{0262}'
+                | '\u{029c}'
+                | '\u{026a}'
+                | '\u{1d0a}'
+                | '\u{1d0b}'
+                | '\u{029f}'
+                | '\u{1d0d}'
+                | '\u{0274}'
+                | '\u{1d0f}'
+                | '\u{1d18}'
+                | '\u{a7af}'
+                | '\u{0280}'
+                | '\u{a731}'
+                | '\u{1d1b}'
+                | '\u{1d1c}'
+                | '\u{1d20}'
+                | '\u{1d21}'
+                | '\u{028f}'
+                | '\u{1d22}'
+                | '\u{2215}'
+                | '\u{2044}'
+                | '\u{29f8}'
+                | '\u{3002}'
+                | '\u{ff61}'
+                | '\u{2027}'
+                | '\u{2219}'
+                | '\u{22c5}'
+        )
 }
 
 pub(super) fn text_has_bare_domain(text: &str) -> bool {
@@ -843,7 +977,6 @@ pub(super) fn text_has_bare_domain(text: &str) -> bool {
         if left == 0 {
             return false;
         }
-
         if before[..before.len() - left]
             .chars()
             .next_back()
@@ -1032,7 +1165,6 @@ pub(super) fn folded(text: &str) -> String {
     use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfkc_quick};
     match is_nfkc_quick(text.chars()) {
         IsNormalized::Yes => text.to_lowercase(),
-
         _ => text.nfkc().collect::<String>().to_lowercase(),
     }
 }
@@ -1050,17 +1182,33 @@ fn invisible(c: char) -> bool {
 
 fn lookalike(c: char) -> Option<char> {
     Some(match c {
-        '\u{1d00}' => 'a', '\u{0299}' => 'b', '\u{1d04}' => 'c', '\u{1d05}' => 'd',
-        '\u{1d07}' => 'e', '\u{a730}' => 'f', '\u{0262}' => 'g', '\u{029c}' => 'h',
-        '\u{026a}' => 'i', '\u{1d0a}' => 'j', '\u{1d0b}' => 'k', '\u{029f}' => 'l',
-        '\u{1d0d}' => 'm', '\u{0274}' => 'n', '\u{1d0f}' => 'o', '\u{1d18}' => 'p',
-        '\u{a7af}' => 'q', '\u{0280}' => 'r', '\u{a731}' => 's', '\u{1d1b}' => 't',
-        '\u{1d1c}' => 'u', '\u{1d20}' => 'v', '\u{1d21}' => 'w', '\u{028f}' => 'y',
+        '\u{1d00}' => 'a',
+        '\u{0299}' => 'b',
+        '\u{1d04}' => 'c',
+        '\u{1d05}' => 'd',
+        '\u{1d07}' => 'e',
+        '\u{a730}' => 'f',
+        '\u{0262}' => 'g',
+        '\u{029c}' => 'h',
+        '\u{026a}' => 'i',
+        '\u{1d0a}' => 'j',
+        '\u{1d0b}' => 'k',
+        '\u{029f}' => 'l',
+        '\u{1d0d}' => 'm',
+        '\u{0274}' => 'n',
+        '\u{1d0f}' => 'o',
+        '\u{1d18}' => 'p',
+        '\u{a7af}' => 'q',
+        '\u{0280}' => 'r',
+        '\u{a731}' => 's',
+        '\u{1d1b}' => 't',
+        '\u{1d1c}' => 'u',
+        '\u{1d20}' => 'v',
+        '\u{1d21}' => 'w',
+        '\u{028f}' => 'y',
         '\u{1d22}' => 'z',
-
         '\u{2215}' | '\u{2044}' | '\u{29f8}' => '/',
         '\u{3002}' | '\u{ff61}' | '\u{06d4}' | '\u{2027}' | '\u{2219}' | '\u{22c5}' => '.',
-
         '\u{064a}' | '\u{0649}' => '\u{06cc}',
         '\u{0643}' => '\u{06a9}',
         _ => return None,
@@ -1069,12 +1217,28 @@ fn lookalike(c: char) -> Option<char> {
 
 fn latin_twin(c: char) -> Option<char> {
     Some(match c {
-        '\u{0430}' => 'a', '\u{0435}' => 'e', '\u{043e}' => 'o', '\u{0440}' => 'p',
-        '\u{0441}' => 'c', '\u{0443}' => 'y', '\u{0445}' => 'x', '\u{0456}' => 'i',
-        '\u{0458}' => 'j', '\u{0455}' => 's', '\u{04bb}' => 'h', '\u{0501}' => 'd',
-        '\u{03bf}' => 'o', '\u{03b1}' => 'a', '\u{03c1}' => 'p', '\u{03c5}' => 'u',
-        '\u{03bd}' => 'v', '\u{03c4}' => 't', '\u{03ba}' => 'k', '\u{03c7}' => 'x',
-        '\u{0131}' => 'i', '\u{2170}' => 'i',
+        '\u{0430}' => 'a',
+        '\u{0435}' => 'e',
+        '\u{043e}' => 'o',
+        '\u{0440}' => 'p',
+        '\u{0441}' => 'c',
+        '\u{0443}' => 'y',
+        '\u{0445}' => 'x',
+        '\u{0456}' => 'i',
+        '\u{0458}' => 'j',
+        '\u{0455}' => 's',
+        '\u{04bb}' => 'h',
+        '\u{0501}' => 'd',
+        '\u{03bf}' => 'o',
+        '\u{03b1}' => 'a',
+        '\u{03c1}' => 'p',
+        '\u{03c5}' => 'u',
+        '\u{03bd}' => 'v',
+        '\u{03c4}' => 't',
+        '\u{03ba}' => 'k',
+        '\u{03c7}' => 'x',
+        '\u{0131}' => 'i',
+        '\u{2170}' => 'i',
         _ => return None,
     })
 }
@@ -1116,16 +1280,14 @@ pub(super) fn text_has_link(text: &str) -> bool {
 }
 
 pub fn has_telegram_link(text: &str) -> bool {
-    ["t.me", "telegram.me", "telegram.dog"]
-        .iter()
-        .any(|host| {
-            text.match_indices(host).any(|(at, _)| {
-                let before = text[..at].chars().next_back();
-                let after = text[at + host.len()..].chars().next();
-                !before.is_some_and(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '@')
-                    && !after.is_some_and(|c| c.is_alphanumeric() || c == '-')
-            })
+    ["t.me", "telegram.me", "telegram.dog"].iter().any(|host| {
+        text.match_indices(host).any(|(at, _)| {
+            let before = text[..at].chars().next_back();
+            let after = text[at + host.len()..].chars().next();
+            !before.is_some_and(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '@')
+                && !after.is_some_and(|c| c.is_alphanumeric() || c == '-')
         })
+    })
 }
 
 fn is_anonymous_channel(view: &View) -> bool {
@@ -1153,7 +1315,6 @@ pub(super) fn text_has_username(text: &str) -> bool {
         if c != '@' {
             return false;
         }
-
         if text[..at]
             .chars()
             .next_back()
@@ -1292,33 +1453,107 @@ mod tests {
     use super::*;
 
     #[test]
+    fn failed_delete_does_not_consume_the_moderation_claim() {
+        let claims = std::cell::Cell::new(0);
+        let claim = || {
+            claims.set(claims.get() + 1);
+            true
+        };
+
+        assert_eq!(
+            claim_after_delete(false, claim),
+            DeleteClaim::Retryable,
+            "a failed Telegram delete must remain retryable"
+        );
+        assert_eq!(claims.get(), 0, "failure must not touch the claim store");
+        assert_eq!(
+            claim_after_delete(true, claim),
+            DeleteClaim::Owner,
+            "the next successful delivery must still be able to enforce"
+        );
+        assert_eq!(claims.get(), 1);
+    }
+
+    #[test]
+    fn concurrent_successes_have_one_moderation_owner() {
+        use std::sync::{
+            Arc, Barrier,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let start = Arc::new(Barrier::new(3));
+        let claimed = Arc::new(AtomicBool::new(false));
+        let attempts: Vec<_> = (0..2)
+            .map(|_| {
+                let start = Arc::clone(&start);
+                let claimed = Arc::clone(&claimed);
+                std::thread::spawn(move || {
+                    start.wait();
+                    claim_after_delete(true, || {
+                        claimed
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                    })
+                })
+            })
+            .collect();
+
+        start.wait();
+        let decisions: Vec<_> = attempts
+            .into_iter()
+            .map(|attempt| attempt.join().expect("moderation test task panicked"))
+            .collect();
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|decision| **decision == DeleteClaim::Owner)
+                .count(),
+            1,
+            "only one successful delivery may run counters, strikes and notices"
+        );
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|decision| **decision == DeleteClaim::Duplicate)
+                .count(),
+            1,
+            "the other successful delivery must stop as a duplicate"
+        );
+    }
+
+    #[test]
     fn a_username_in_a_font_is_still_a_username() {
         let seen = |text: &str| text_has_username(&folded(text));
 
-        assert!(seen("@\u{1D69C}\u{1D699}\u{1D68A}\u{1D696}\u{1D68B}\u{1D698}\u{1D69D}"));
-        assert!(seen("\u{1D42C}\u{1D429}\u{1D41A}\u{1D426}\u{1D41B}\u{1D428}\u{1D42D} @\u{1D42C}\u{1D429}\u{1D41A}\u{1D426}\u{1D41B}\u{1D428}\u{1D42D}"));
-        assert!(seen("@\u{FF53}\u{FF50}\u{FF41}\u{FF4D}\u{FF42}\u{FF4F}\u{FF54}"));
-
+        assert!(seen(
+            "@\u{1D69C}\u{1D699}\u{1D68A}\u{1D696}\u{1D68B}\u{1D698}\u{1D69D}"
+        ));
+        assert!(seen(
+            "\u{1D42C}\u{1D429}\u{1D41A}\u{1D426}\u{1D41B}\u{1D428}\u{1D42D} @\u{1D42C}\u{1D429}\u{1D41A}\u{1D426}\u{1D41B}\u{1D428}\u{1D42D}"
+        ));
+        assert!(seen(
+            "@\u{FF53}\u{FF50}\u{FF41}\u{FF4D}\u{FF42}\u{FF4F}\u{FF54}"
+        ));
         assert!(seen("@spambot"));
         assert!(seen("سلام @spambot ببین"));
         assert!(seen("@Spam_Bot_99"));
 
         assert!(!seen("name@example.com"));
         assert!(!seen("a@bcdef"));
-
         assert!(!seen("@abc"));
         assert!(!seen("@"));
         assert!(!seen("@ spambot"));
-
         assert!(!seen("@1spambot"));
         assert!(!seen("قیمت 100@ تومان"));
     }
 
     #[test]
     fn the_fold_reaches_fonts_and_spares_persian() {
-        assert_eq!(folded("\u{1D69D}.\u{1D696}\u{1D68E}/\u{1D69C}\u{1D699}\u{1D68A}\u{1D696}"), "t.me/spam");
+        assert_eq!(
+            folded("\u{1D69D}.\u{1D696}\u{1D68E}/\u{1D69C}\u{1D699}\u{1D68A}\u{1D696}"),
+            "t.me/spam"
+        );
         assert_eq!(folded("\u{FF54}.\u{FF4D}\u{FF45}"), "t.me");
-
         assert_eq!(folded("\u{212C}\u{2130}\u{210C}\u{2102}"), "behc");
         assert_eq!(folded("ABC"), "abc");
 
@@ -1327,8 +1562,12 @@ mod tests {
         assert_eq!(folded("۱۲۳"), "۱۲۳");
         assert_eq!(folded("٠١٢"), "٠١٢");
 
-        assert!(text_has_link(&folded("\u{1D69D}.\u{1D696}\u{1D68E}/\u{1D69C}\u{1D699}\u{1D68A}\u{1D696}")));
-        assert!(has_telegram_link(&folded("\u{1D69D}.\u{1D696}\u{1D68E}/\u{1D69C}\u{1D699}\u{1D68A}\u{1D696}")));
+        assert!(text_has_link(&folded(
+            "\u{1D69D}.\u{1D696}\u{1D68E}/\u{1D69C}\u{1D699}\u{1D68A}\u{1D696}"
+        )));
+        assert!(has_telegram_link(&folded(
+            "\u{1D69D}.\u{1D696}\u{1D68E}/\u{1D69C}\u{1D699}\u{1D68A}\u{1D696}"
+        )));
     }
 
     #[test]
@@ -1338,7 +1577,9 @@ mod tests {
         assert!(seen("example.com"));
         assert!(seen("spam.ir"));
         assert!(seen("sub.domain.co.uk"));
-        assert!(seen("\u{1D68E}\u{1D699}\u{1D68A}\u{1D696}.\u{1D68C}\u{1D698}\u{1D696}"));
+        assert!(seen(
+            "\u{1D68E}\u{1D699}\u{1D68A}\u{1D696}.\u{1D68C}\u{1D698}\u{1D696}"
+        ));
         assert!(seen("بیا اینجا example.com زود"));
 
         assert!(!seen("1.5"));
@@ -1346,9 +1587,7 @@ mod tests {
         assert!(!seen("تمام شد. بعدا"));
         assert!(!seen(".com"));
         assert!(!seen("a."));
-
         assert!(!seen("name@example.com"));
-
         assert!(!seen("file.x"));
     }
 
@@ -1358,29 +1597,49 @@ mod tests {
         let link = |t: &str| text_has_link(&tight(t));
 
         for hidden in [
-            "\u{200b}", "\u{200c}", "\u{200d}", "\u{200e}", "\u{200f}", "\u{00ad}",
-            "\u{2060}", "\u{feff}", "\u{034f}", "\u{061c}", "\u{180e}", "\u{fe0f}",
-            "\u{202e}", "\u{2066}", "\u{e0061}",
+            "\u{200b}",
+            "\u{200c}",
+            "\u{200d}",
+            "\u{200e}",
+            "\u{200f}",
+            "\u{00ad}",
+            "\u{2060}",
+            "\u{feff}",
+            "\u{034f}",
+            "\u{061c}",
+            "\u{180e}",
+            "\u{fe0f}",
+            "\u{202e}",
+            "\u{2066}",
+            "\u{e0061}",
         ] {
-            assert!(link(&format!("t{hidden}.me/spam")), "{hidden:?} still hid a link");
-            assert!(link(&format!("htt{hidden}ps://x.com/a")), "{hidden:?} hid a scheme");
+            assert!(
+                link(&format!("t{hidden}.me/spam")),
+                "{hidden:?} still hid a link"
+            );
+            assert!(
+                link(&format!("htt{hidden}ps://x.com/a")),
+                "{hidden:?} hid a scheme"
+            );
         }
-
         assert_eq!(tight("ف\u{640}ی\u{640}ل\u{640}تر"), "فیلتر");
-
         assert!(link("t.me/spam"));
         assert!(!link("سلام دنیا"));
     }
 
     #[test]
     fn an_invisible_character_no_longer_hides_a_username() {
-        let seen = |t: &str| text_has_username(&latinised(&tighten(&folded(t))).unwrap_or_else(|| tighten(&folded(t)).into_owned()));
+        let seen = |t: &str| {
+            text_has_username(
+                &latinised(&tighten(&folded(t)))
+                    .unwrap_or_else(|| tighten(&folded(t)).into_owned()),
+            )
+        };
         assert!(seen("@\u{200b}spambot"));
         assert!(seen("@spam\u{200b}bot"));
         assert!(seen("@spam\u{ad}bot"));
         assert!(seen("@\u{1d18}\u{1d0f}\u{1d0f}\u{1d0f}\u{1d0f}\u{1d0f}"));
         assert!(seen("@spambot"));
-
         assert!(!seen("name@example.com"));
         assert!(!seen("@abc"));
     }
@@ -1388,10 +1647,12 @@ mod tests {
     #[test]
     fn small_capitals_are_ordinary_letters() {
         let tight = |t: &str| tighten(&folded(t)).into_owned();
-        assert_eq!(tight("\u{1d1b}.\u{1d0d}\u{1d07}/\u{1d04}\u{1d0f}\u{1d0d}"), "t.me/com");
+        assert_eq!(
+            tight("\u{1d1b}.\u{1d0d}\u{1d07}/\u{1d04}\u{1d0f}\u{1d0d}"),
+            "t.me/com"
+        );
         assert!(text_has_link(&tight("\u{1d1b}.\u{1d0d}\u{1d07}/spam")));
         assert!(has_telegram_link(&tight("\u{1d1b}.\u{1d0d}\u{1d07}/spam")));
-
         assert!(text_has_link(&tight("t.me\u{2215}spam")));
         assert!(has_telegram_link(&tight("t\u{3002}me/spam")));
     }
@@ -1403,7 +1664,6 @@ mod tests {
 
         assert!(has_telegram_link(&ascii("t.m\u{435}/spam")));
         assert!(text_has_username(&ascii("@\u{455}pambot")));
-
         assert_eq!(tight("привет"), "привет");
         assert_eq!(tight("t.m\u{435}/spam"), "t.m\u{435}/spam");
     }
@@ -1414,7 +1674,6 @@ mod tests {
         assert!(has_telegram_link("t.me?start=join"));
         assert!(has_telegram_link("t.me/spam"));
         assert!(has_telegram_link("telegram.me"));
-
         assert!(!has_telegram_link("not.me"));
         assert!(!has_telegram_link("x@t.me"));
         assert!(!has_telegram_link("t.mexican"));
@@ -1423,26 +1682,31 @@ mod tests {
 
     #[test]
     fn an_emoji_does_not_make_a_filename_a_link() {
-        for ordinary in ['\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{fe0f}', '\u{0640}'] {
+        for ordinary in [
+            '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{fe0f}', '\u{0640}',
+        ] {
             assert!(!hides_a_link(ordinary), "{ordinary:?} is ordinary text");
         }
-
-        for hidden in ['\u{200b}', '\u{00ad}', '\u{2060}', '\u{feff}', '\u{034f}', '\u{202e}'] {
+        for hidden in [
+            '\u{200b}', '\u{00ad}', '\u{2060}', '\u{feff}', '\u{034f}', '\u{202e}',
+        ] {
             assert!(hides_a_link(hidden), "{hidden:?} hides something");
         }
-
         assert!(invisible('\u{fe0f}') && invisible('\u{200c}'));
     }
 
     #[test]
     fn typing_in_your_own_script_is_not_a_disguise() {
-        for ordinary in ['\u{064a}', '\u{0643}', '\u{0649}', '\u{06d4}',
-                         '\u{0430}', '\u{0435}', '\u{043e}', '\u{03bf}', '\u{0131}'] {
-            assert!(!hides_a_link(ordinary), "{ordinary:?} is somebody's alphabet");
-
+        for ordinary in [
+            '\u{064a}', '\u{0643}', '\u{0649}', '\u{06d4}', '\u{0430}', '\u{0435}', '\u{043e}',
+            '\u{03bf}', '\u{0131}',
+        ] {
+            assert!(
+                !hides_a_link(ordinary),
+                "{ordinary:?} is somebody's alphabet"
+            );
             assert!(lookalike(ordinary).is_some() || latin_twin(ordinary).is_some());
         }
-
         for hidden in ['\u{1d1b}', '\u{1d0d}', '\u{a731}', '\u{2215}', '\u{3002}'] {
             assert!(hides_a_link(hidden), "{hidden:?} belongs to no alphabet");
         }
@@ -1450,7 +1714,13 @@ mod tests {
 
     #[test]
     fn ordinary_text_is_not_copied() {
-        for plain in ["سلام دنیا", "hello there", "t.me/spam", "قیمت 1000 تومان", "می\u{200c}شود"] {
+        for plain in [
+            "سلام دنیا",
+            "hello there",
+            "t.me/spam",
+            "قیمت 1000 تومان",
+            "می\u{200c}شود",
+        ] {
             let lower = folded(plain);
             if plain == "می\u{200c}شود" {
                 assert!(tightened(&lower).is_some());
@@ -1542,7 +1812,8 @@ mod tests {
             );
         }
 
-        for word in ["قفل عکس", "سکوت", "بن", "پنل", "ترفیع", "کانفیگ", "توقف"] {
+        for word in ["قفل عکس", "سکوت", "بن", "پنل", "ترفیع", "کانفیگ", "توقف"]
+        {
             assert!(!is_public_command(word), "«{word}» is admin-gated already");
         }
 

@@ -1,6 +1,6 @@
 use grammers_client::message::Message;
 
-use super::{Ctx};
+use super::Ctx;
 
 pub const ADD: &[&str] = &["ویژه", "افزودن ویژه", "تنظیم ویژه"];
 pub const REMOVE: &[&str] = &["حذف ویژه", "لغو ویژه"];
@@ -33,17 +33,47 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
 
     let Some((target, target_name)) = super::resolve(ctx, message, named).await else {
-        let _ = message
-            .reply("کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.",
+            ),
+        )
+        .await;
         return true;
     };
     let Some(target_id) = target.id.bare_id() else {
-        let _ = message.reply("کاربر پیدا نشد.").await;
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            super::premium::icon_text(Some(super::premium::Icon::ErrorRed), "کاربر پیدا نشد."),
+        )
+        .await;
         return true;
     };
 
-    let changed = ctx.settings.set(chat, &key(target_id), add).await;
+    let changed = match ctx.settings.try_set(chat, &key(target_id), add).await {
+        Ok(changed) => changed,
+        Err(error) => {
+            ::log::warn!("vip: write for {chat}/{target_id} failed: {error}");
+            super::respond(
+                ctx,
+                message,
+                crate::response::ResponseKind::CommandError,
+                if error.commit_outcome_unknown() {
+                    "نتیجه ذخیره فهرست ویژه نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                } else {
+                    "فهرست ویژه ذخیره نشد؛ دوباره تلاش کنید."
+                },
+            )
+            .await;
+            return true;
+        }
+    };
     let mark = if add { "✓" } else { "✗" };
     let what = match (add, changed) {
         (true, true) => "به لیست ویژه اضافه شد",
@@ -51,7 +81,16 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         (false, true) => "از لیست ویژه حذف شد",
         (false, false) => "در لیست ویژه نبود",
     };
-    let _ = message.reply(format!("{mark} {target_name} {what}.")).await;
+    super::respond(
+        ctx,
+        message,
+        crate::response::ResponseKind::AdminTool,
+        super::premium::icon_text(
+            Some(super::premium::Icon::PremiumStar),
+            format!("{mark} {target_name} {what}."),
+        ),
+    )
+    .await;
     true
 }
 

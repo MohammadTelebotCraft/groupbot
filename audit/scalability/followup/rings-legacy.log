@@ -1,0 +1,7 @@
+
+running 1 test
+test handlers::scalability_tests::event_ring_memory ... PERF {"capacities":[4096,4096],"events":10000000,"kind":"event_ring_memory","legacy_capacity":true,"maps":2,"rss_delta_kib":128428,"seconds":0.102163356,"subjects_per_map":1000,"timestamp_buffer_bytes":131072000}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 363 filtered out; finished in 0.12s
+

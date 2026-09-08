@@ -1,8 +1,9 @@
-use grammers_client::message::{Button, InputMessage, Message, ReplyMarkup};
+use grammers_client::message::{Button, Message};
 use grammers_client::session::types::PeerId;
 use grammers_client::update::CallbackQuery;
 
 use super::{Ctx, esc, name_of};
+use crate::response::ResponseKind;
 
 pub const PREFIX: &str = "filter:";
 
@@ -30,17 +31,14 @@ pub fn matches(ctx: &Ctx, chat: i64, view: &super::locks::View) -> bool {
     if ctx.settings.indexed_empty(chat, PREFIX) {
         return false;
     }
-
     let haystack = view.tight();
     if haystack.is_empty() {
         return false;
     }
     let exact = ctx.settings.is_locked(chat, EXACT);
-
-    ctx.settings
-        .indexed_any(chat, PREFIX, |word| {
-            found(haystack, &super::locks::tighten(word), exact)
-        })
+    ctx.settings.indexed_any(chat, PREFIX, |word| {
+        found(haystack, &super::locks::tighten(word), exact)
+    })
 }
 
 fn found(text: &str, word: &str, exact: bool) -> bool {
@@ -60,7 +58,6 @@ fn found(text: &str, word: &str, exact: bool) -> bool {
         {
             return true;
         }
-
         from = start + word.chars().next().map_or(1, char::len_utf8);
     }
     false
@@ -75,19 +72,30 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-        ctx.settings.set(chat, EXACT, on).await;
-        let _ = message
-            .reply(match on {
+        if let Err(error) = ctx.settings.try_set(chat, EXACT, on).await {
+            ::log::warn!("filters: exact-mode write for {chat} failed: {error}");
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                if error.commit_outcome_unknown() {
+                    "نتیجه ذخیره حالت فیلتر نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                } else {
+                    "حالت فیلتر ذخیره نشد؛ دوباره تلاش کنید."
+                },
+            )
+            .await;
+            return true;
+        }
+        super::respond(ctx, message, ResponseKind::FilterManagement, match on {
                 true => "✓ فیلتر دقیق فعال شد · کلمه فقط وقتی می گیرد که جدا آمده باشد، نه داخل کلمه دیگر.",
                 false => "✓ فیلتر عادی فعال شد · کلمه هر جای متن باشد می گیرد.",
-            })
-            .await;
+            }).await;
         return true;
     }
     let Some((add, command, word)) = parse(text) else {
         return false;
     };
-
     let phrase = super::phrase_carries_text(command);
     if !word.is_empty() && !phrase {
         return false;
@@ -102,7 +110,6 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         false => Some(word.to_owned()),
     }
     .filter(|word| !word.is_empty());
-
     if asked.is_none() && !phrase {
         return false;
     }
@@ -113,25 +120,38 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
     let Some(word) = asked else {
-        let _ = message
-            .reply(
-                "کلمه را بعد از دستور بنویسید، مثل «افزودن فیلتر ممد»، یا روی پیام آن ریپلای کنید.",
-            )
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            "کلمه را بعد از دستور بنویسید، مثل «افزودن فیلتر ممد»، یا روی پیام آن ریپلای کنید.",
+        )
+        .await;
         return true;
     };
 
     let word = super::locks::tighten(&super::locks::folded(word.trim())).into_owned();
     if word.is_empty() || word.chars().count() > MAX_LEN || word.contains('=') {
-        let _ = message
-            .reply("این کلمه پذیرفته نمی شود: خیلی بلند است یا نویسه غیرمجاز دارد.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "این کلمه پذیرفته نمی شود: خیلی بلند است یا نویسه غیرمجاز دارد.",
+            ),
+        )
+        .await;
         return true;
     }
     if add && words(ctx, chat).len() >= MAX_WORDS {
-        let _ = message
-            .reply(format!("لیست فیلتر پر است ({MAX_WORDS} کلمه)."))
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::FilterManagement,
+            format!("لیست فیلتر پر است ({MAX_WORDS} کلمه)."),
+        )
+        .await;
         return true;
     }
 
@@ -142,7 +162,24 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             .find(|held| super::locks::tighten(held) == word)
             .unwrap_or_else(|| word.clone()),
     };
-    let changed = ctx.settings.set(chat, &key(&stored), add).await;
+    let changed = match ctx.settings.try_set(chat, &key(&stored), add).await {
+        Ok(changed) => changed,
+        Err(error) => {
+            ::log::warn!("filters: list write for {chat} failed: {error}");
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                if error.commit_outcome_unknown() {
+                    "نتیجه ذخیره فیلتر نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                } else {
+                    "فیلتر ذخیره نشد؛ دوباره تلاش کنید."
+                },
+            )
+            .await;
+            return true;
+        }
+    };
     let mark = if add { "✓" } else { "✗" };
     let what = match (add, changed) {
         (true, true) => "به لیست فیلتر اضافه شد",
@@ -150,7 +187,16 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         (false, true) => "از لیست فیلتر حذف شد",
         (false, false) => "در لیست فیلتر نبود",
     };
-    let _ = message.reply(format!("{mark} «{word}» {what}.")).await;
+    super::respond(
+        ctx,
+        message,
+        ResponseKind::FilterManagement,
+        super::premium::icon_text(
+            Some(super::premium::Icon::Chat),
+            format!("{mark} «{word}» {what}."),
+        ),
+    )
+    .await;
     true
 }
 
@@ -192,8 +238,7 @@ pub async fn notify(
 
     let _ = message
         .respond(
-            InputMessage::new()
-                .html(format!(
+            super::premium::icon_html(Some(super::premium::Icon::Chat), format!(
                     "<a href=\"tg://user?id={user}\">{}</a> پیام شما به دلیل داشتن کلمه فیلتر شده حذف شد.{}",
                     esc(&name_of(message)),
                     match chances {
@@ -201,7 +246,7 @@ pub async fn notify(
                         None => String::new(),
                     }
                 ))
-                .reply_markup(ReplyMarkup::from_buttons(&[vec![Button::data(
+                .reply_markup(super::premium::buttons(&[vec![Button::data(
                     "متن پیام من چه بود؟",
                     format!("f:{user}:{key}").into_bytes(),
                 )]])),
@@ -219,7 +264,10 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, is_adm
     if query.sender_id().bare_id() != Some(offender) && !is_admin {
         let _ = query
             .answer()
-            .alert("این دکمه برای فرستنده پیام و ادمین ها است.")
+            .alert(super::premium::plain_label(
+                Some(super::premium::Icon::Locked),
+                "این دکمه برای فرستنده پیام و ادمین ها است.",
+            ))
             .send()
             .await;
         return;
@@ -242,19 +290,13 @@ mod tests {
     #[test]
     fn exact_matching_spares_the_word_inside_a_word() {
         assert!(found("صحبت های دیروز", "بت", false));
-
         assert!(!found("صحبت های دیروز", "بت", true));
-
         assert!(found("این بت پرستی است", "بت", true));
         assert!(found("بت", "بت", true), "the whole message is the word");
-
         assert!(found("گفت: بت!", "بت", true));
         assert!(!found("صحبت\u{200c}ها", "بت", true), "the half-space joins");
-
         assert!(found("صحبت درباره بت", "بت", true));
-
         assert!(found("این تبلیغ رایگان است", "تبلیغ رایگان", true));
-
         assert!(!found("فروشی", "فروش", true));
         assert!(found("فروشی", "فروش", false));
     }
@@ -265,7 +307,6 @@ mod tests {
             parse("فیلتر کلمه تبلیغ"),
             Some((true, "فیلتر کلمه", "تبلیغ"))
         );
-
         assert_eq!(
             parse("افزودن فیلتر ممد"),
             Some((true, "افزودن فیلتر", "ممد"))

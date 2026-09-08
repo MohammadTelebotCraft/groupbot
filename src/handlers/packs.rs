@@ -71,12 +71,14 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         },
     };
     let Some((set, title)) = found else {
-        let _ = message
-            .reply(
-                "روی یک استیکر از آن پک ریپلای کنید، یا لینک پک را بفرستید:\n\
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            "روی یک استیکر از آن پک ریپلای کنید، یا لینک پک را بفرستید:\n\
                  «قفل پک https://t.me/addstickers/NAME»",
-            )
-            .await;
+        )
+        .await;
         return true;
     };
 
@@ -86,11 +88,57 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         title
     };
     if locking {
-        ctx.settings.set_value(chat, &key(set), &label).await;
-        let _ = message.reply(format!("✓ «{label}» قفل شد.")).await;
+        if let Err(error) = ctx.settings.try_set_value(chat, &key(set), &label).await {
+            ::log::warn!("packs: lock write for {chat}/{set} failed: {error}");
+            super::respond(
+                ctx,
+                message,
+                crate::response::ResponseKind::CommandError,
+                if error.commit_outcome_unknown() {
+                    "نتیجه ذخیره قفل پک نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                } else {
+                    "قفل پک ذخیره نشد؛ دوباره تلاش کنید."
+                },
+            )
+            .await;
+            return true;
+        }
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::LockManagement,
+            super::premium::icon_text(
+                Some(super::premium::Icon::Locked),
+                format!("«{label}» قفل شد."),
+            ),
+        )
+        .await;
     } else {
-        ctx.settings.set(chat, &key(set), false).await;
-        let _ = message.reply(format!("✗ «{label}» باز شد.")).await;
+        if let Err(error) = ctx.settings.try_set(chat, &key(set), false).await {
+            ::log::warn!("packs: unlock write for {chat}/{set} failed: {error}");
+            super::respond(
+                ctx,
+                message,
+                crate::response::ResponseKind::CommandError,
+                if error.commit_outcome_unknown() {
+                    "نتیجه حذف قفل پک نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                } else {
+                    "قفل پک حذف نشد؛ دوباره تلاش کنید."
+                },
+            )
+            .await;
+            return true;
+        }
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::LockManagement,
+            super::premium::icon_text(
+                Some(super::premium::Icon::Unlocked),
+                format!("«{label}» باز شد."),
+            ),
+        )
+        .await;
     }
     true
 }

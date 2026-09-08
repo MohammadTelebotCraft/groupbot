@@ -1,0 +1,46 @@
+    Blocking waiting for file lock on package cache
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling crc32fast v1.5.0
+   Compiling serde_core v1.0.229
+   Compiling getrandom v0.4.3
+   Compiling num-traits v0.2.19
+   Compiling thiserror v1.0.69
+   Compiling nix v0.31.3
+   Compiling grammers-tl-parser v1.2.2 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-tl-parser)
+   Compiling flate2 v1.1.9
+   Compiling grammers-tl-gen v0.10.0 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-tl-gen)
+   Compiling syn v3.0.3
+   Compiling syn v2.0.119
+   Compiling num-integer v0.1.47
+   Compiling grammers-tl-types v0.10.0 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-tl-types)
+   Compiling num-bigint v0.4.8
+   Compiling mio v1.2.2
+   Compiling socket2 v0.6.5
+   Compiling os_info v3.15.0
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling toml v1.1.4+spec-1.1.0
+   Compiling glass_pumpkin v2.0.0-rc0
+   Compiling thiserror-impl v1.0.69
+   Compiling grammers-crypto v0.10.0 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-crypto)
+   Compiling tokio-macros v2.7.2
+   Compiling async-trait v0.1.92
+   Compiling tokio v1.53.1
+   Compiling socks5-proto v0.4.1
+   Compiling socks5-server v0.10.1
+   Compiling grammers-mtproto v0.10.0 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-mtproto)
+   Compiling grammers-session v0.10.0 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-session)
+   Compiling grammers-mtsender v0.10.0 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-mtsender)
+    Finished `release` profile [optimized] target(s) in 25.88s
+     Running unittests src/lib.rs (target/release/deps/grammers_mtsender-5d4e74e97cdd123e)
+
+running 4 tests
+test errors::tests::check_rpc_error_parsing ... ok
+test sender_pool::admission_tests::canceled_callers_do_not_release_queued_request_budget ... ok
+test sender_pool::admission_tests::body_bytes_and_liveness_gate_are_enforced ... ok
+test sender_pool::admission_tests::flood_wait_is_shared_by_other_requests ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+

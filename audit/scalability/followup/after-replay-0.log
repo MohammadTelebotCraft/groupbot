@@ -1,0 +1,7 @@
+
+running 1 test
+test handlers::scalability_tests::replay_dispatch ... PERF {"active":1000,"active_fixture_delta_kib":12616,"allocated_bytes_per_update":0.0,"allocation_meter":false,"allocations_per_update":0.0,"application_queue_peak":1,"chat_state_bytes":928,"counted":100000,"cpu_percent":329.8297190171066,"cpu_seconds":1.76,"db_queries":0,"dispatcher":"fair","groups":10000,"kind":"dispatch","latency_sample_stride":1,"latency_samples":100000,"max_joinset":148,"mirror_delta_kib":3104,"p50_us":38.11,"p95_us":92.331,"p99_us":249.12,"rss_kib":47684,"seconds":0.533608677,"telegram":"disconnected; non-action workload","telegram_calls":0,"updates":100000,"updates_per_second":187403.24944153783}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 363 filtered out; finished in 1.04s
+

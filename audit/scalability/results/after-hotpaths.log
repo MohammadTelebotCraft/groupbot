@@ -1,0 +1,14 @@
+
+running 4 tests
+test handlers::scalability_tests::flood_window_cost ... PERF {"iterations":20000,"kind":"flood_window","ns_per_update":97.3747,"occupancy":32}
+PERF {"iterations":20000,"kind":"flood_window","ns_per_update":19.4422,"occupancy":4096}
+ok
+test handlers::scalability_tests::replay_dispatch ... PERF {"active":1000,"active_fixture_delta_kib":12388,"allocated_bytes_per_update":0.0,"allocations_per_update":0.0,"chat_state_bytes":928,"counted":100000,"cpu_percent":325.32527925011937,"cpu_seconds":1.8499999999999999,"db_queries":0,"groups":10000,"kind":"dispatch","max_joinset":149,"mirror_delta_kib":3084,"p50_us":34.273,"p95_us":80.959,"p99_us":178.353,"rss_kib":38964,"seconds":0.568661619,"telegram":"disconnected; non-action workload","telegram_calls":0,"updates":100000,"updates_per_second":175851.50229736182}
+ok
+test handlers::scalability_tests::scan_allocations ... PERF {"allocations_per_scan":0.0,"iterations":500000,"kind":"lock_scan","ns_per_scan":1230.984124,"seconds":0.615492062}
+ok
+test handlers::scalability_tests::voice_worker_parallelism ... PERF {"jobs":16,"kind":"voice_workers","seconds":0.426349067,"stub_delay_ms":100,"workers":4}
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 346 filtered out; finished in 2.57s
+

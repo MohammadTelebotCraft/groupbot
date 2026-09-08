@@ -1,4 +1,4 @@
-use grammers_client::message::{Button, InputMessage, ReplyMarkup};
+use grammers_client::message::Button;
 use grammers_client::session::types::{PeerAuth, PeerId, PeerRef};
 use grammers_client::tl;
 
@@ -23,7 +23,6 @@ async fn invite(ctx: &Ctx, chat: i64, chat_ref: PeerRef) -> Option<String> {
             request_needed: false,
             peer: chat_ref.into(),
             expire_date: None,
-
             usage_limit: None,
             title: Some("بازگشت اعضا".to_owned()),
             subscription_pricing: None,
@@ -43,7 +42,9 @@ async fn invite(ctx: &Ctx, chat: i64, chat_ref: PeerRef) -> Option<String> {
     if !link.starts_with("https://t.me/") {
         return None;
     }
-    let _ = ctx.settings.set_value(chat, INVITE_KEY, &link).await;
+    if let Err(error) = ctx.settings.try_set_value(chat, INVITE_KEY, &link).await {
+        ::log::warn!("left back: could not cache invite for {chat}: {error}");
+    }
     Some(link)
 }
 
@@ -66,8 +67,16 @@ pub async fn on_participant_update(ctx: &Ctx, update: &tl::types::UpdateChannelP
     if ctx.me_id() == update.user_id {
         return;
     }
-    let Some(access_hash) = ctx.settings.started_user(update.user_id).await else {
-        return;
+    let access_hash = match ctx.settings.started_user(update.user_id).await {
+        Ok(Some(access_hash)) => access_hash,
+        Ok(None) => return,
+        Err(error) => {
+            log::warn!(
+                "left-back: started-user lookup for {} failed; suppressing unsolicited DM: {error}",
+                update.user_id
+            );
+            return;
+        }
     };
     let Some(chat_ref) = ctx
         .chat_ref(chat)
@@ -84,15 +93,14 @@ pub async fn on_participant_update(ctx: &Ctx, update: &tl::types::UpdateChannelP
         id: user,
         auth: PeerAuth::from_hash(access_hash),
     };
-    let message = InputMessage::new()
-        .html(format!(
-            "شما از گروه خارج شدید. اگر می خواهید دوباره به گروه برگردید، از لینک زیر وارد شوید:\n\n{}",
-            esc(&link)
-        ))
-        .reply_markup(ReplyMarkup::from_buttons(&[vec![Button::url(
-            "➕ عضویت دوباره در گروه",
-            link,
-        )]]));
+    let message = super::premium::html(format!(
+        "شما از گروه خارج شدید. اگر می خواهید دوباره به گروه برگردید، از لینک زیر وارد شوید:\n\n{}",
+        esc(&link)
+    ))
+    .reply_markup(super::premium::buttons(&[vec![Button::url(
+        "➕ عضویت دوباره در گروه",
+        link,
+    )]]));
     if let Err(e) = ctx.client.send_message(target, message).await {
         eprintln!("left back: could not message {user} about {chat}: {e}");
     }

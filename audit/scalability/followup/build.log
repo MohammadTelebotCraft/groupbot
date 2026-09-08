@@ -1,0 +1,6 @@
+    Blocking waiting for file lock on package cache
+   Compiling grammers-mtsender v0.10.0 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-mtsender)
+   Compiling grammers-client v0.10.0 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-client)
+   Compiling groupbot v0.1.0 (/mnt/c/Users/moh/Desktop/GroupManagement/groupbot)
+    Finished `release` profile [optimized] target(s) in 53.57s
+  Executable unittests src/main.rs (target/release/deps/groupbot-e0fabec816ad445f)

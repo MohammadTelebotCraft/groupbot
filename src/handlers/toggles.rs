@@ -1,5 +1,7 @@
-use grammers_client::message::{Button, InputMessage, Message, ReplyMarkup};
+use grammers_client::message::{Button, Message, ReplyMarkup};
 use grammers_client::update::CallbackQuery;
+
+use crate::response::ResponseKind;
 
 use super::Ctx;
 
@@ -44,22 +46,49 @@ const GROUPS: &[&Toggles] = &[&FORWARD, &BOT, &USERNAME];
 
 pub async fn prompt(ctx: &Ctx, message: &Message, chat: i64, toggles: &Toggles, on: bool) -> bool {
     if !on {
-        for (key, _) in toggles.items {
-            ctx.settings.set(chat, key, false).await;
+        let mutations: Vec<_> = toggles
+            .items
+            .iter()
+            .map(|(key, _)| crate::state::SettingMutation::Delete { key })
+            .collect();
+        if let Err(error) = ctx.settings.try_apply_batch(chat, &mutations).await {
+            ::log::warn!(
+                "toggle group: clear for {chat}/{} failed: {error}",
+                toggles.group
+            );
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                if error.commit_outcome_unknown() {
+                    "نتیجه حذف قفل ها نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                } else {
+                    "قفل ها حذف نشدند؛ دوباره تلاش کنید."
+                },
+            )
+            .await;
+            return true;
         }
         let cleared: Vec<&str> = toggles.items.iter().map(|(_, label)| *label).collect();
-        let _ = message
-            .reply(format!("✗ برداشته شد · {}", cleared.join("، ")))
-            .await;
-        return true;
-    }
-    let _ = message
-        .reply(
-            InputMessage::new()
-                .html(prompt_text(toggles))
-                .reply_markup(markup(ctx, chat, toggles)),
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::LockManagement,
+            super::premium::icon_text(
+                Some(super::premium::Icon::Unlocked),
+                format!("برداشته شد · {}", cleared.join("، ")),
+            ),
         )
         .await;
+        return true;
+    }
+    super::respond_shared(
+        ctx,
+        message,
+        ResponseKind::LockManagement,
+        super::premium::html(prompt_text(toggles)).reply_markup(markup(ctx, chat, toggles)),
+    )
+    .await;
     true
 }
 
@@ -78,7 +107,7 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, action: &str, chat: i
     if key == "close" {
         let _ = query
             .answer()
-            .edit(InputMessage::new().html(summary(ctx, chat, toggles)))
+            .edit(super::premium::html(summary(ctx, chat, toggles)))
             .await;
         return;
     }
@@ -87,17 +116,27 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, action: &str, chat: i
     }
 
     let now_on = !ctx.settings.is_locked(chat, key);
-    if ctx.settings.set(chat, key, now_on).await {
-        super::bots::on_lock_set(ctx, chat, key, now_on).await;
+    match ctx.settings.try_set(chat, key, now_on).await {
+        Ok(true) => super::bots::on_lock_set(ctx, chat, key, now_on).await,
+        Ok(false) => {}
+        Err(error) => {
+            ::log::warn!("toggle: write for {chat}/{key} failed: {error}");
+            let _ = query
+                .answer()
+                .alert(if error.commit_outcome_unknown() {
+                    "نتیجه ذخیره تنظیم نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                } else {
+                    "تنظیم ذخیره نشد؛ دوباره تلاش کنید."
+                })
+                .send()
+                .await;
+            return;
+        }
     }
 
     let _ = query
         .answer()
-        .edit(
-            InputMessage::new()
-                .html(prompt_text(toggles))
-                .reply_markup(markup(ctx, chat, toggles)),
-        )
+        .edit(super::premium::html(prompt_text(toggles)).reply_markup(markup(ctx, chat, toggles)))
         .await;
 }
 
@@ -111,18 +150,23 @@ fn markup(ctx: &Ctx, chat: i64, toggles: &Toggles) -> ReplyMarkup {
             } else {
                 "✗"
             };
-            vec![super::style::toggle(
-                format!("{mark}  {label}"),
-                format!("t:{}:{key}", toggles.group).into_bytes(),
-                ctx.settings.is_locked(chat, key),
+            vec![super::premium::decorate(
+                super::style::toggle(
+                    format!("{mark}  {label}"),
+                    format!("t:{}:{key}", toggles.group).into_bytes(),
+                    ctx.settings.is_locked(chat, key),
+                ),
+                Some(super::premium::protection(
+                    ctx.settings.is_locked(chat, key),
+                )),
             )]
         })
         .collect();
-    rows.push(vec![Button::data(
-        "بستن",
-        format!("t:{}:close", toggles.group).into_bytes(),
+    rows.push(vec![super::premium::decorate(
+        Button::data("بستن", format!("t:{}:close", toggles.group).into_bytes()),
+        Some(super::premium::Icon::Close),
     )]);
-    ReplyMarkup::from_buttons(&rows)
+    super::premium::buttons(&rows)
 }
 
 fn summary(ctx: &Ctx, chat: i64, toggles: &Toggles) -> String {

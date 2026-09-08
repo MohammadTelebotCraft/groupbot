@@ -1,0 +1,16 @@
+
+running 5 tests
+test handlers::scalability_tests::fleet_stats_flush ... PERF {"db_statements":59,"groups":10000,"kind":"fleet_stats_flush","legacy_groups_seen_in_20_passes":512,"legacy_single_pass_chat_limit":512,"persisted_groups":10000,"remaining_dirty":0,"seconds":0.43946657}
+ok
+test handlers::scalability_tests::flood_window_cost ... PERF {"iterations":20000,"kind":"flood_window","ns_per_update":27.60075,"occupancy":32}
+PERF {"iterations":20000,"kind":"flood_window","ns_per_update":24.04545,"occupancy":4096}
+ok
+test handlers::scalability_tests::replay_dispatch ... PERF {"active":1000,"active_fixture_delta_kib":9752,"allocated_bytes_per_update":0.0,"allocation_meter":false,"allocations_per_update":0.0,"application_queue_peak":0,"chat_state_bytes":928,"counted":100000,"cpu_percent":340.1152762546709,"cpu_seconds":1.97,"db_queries":0,"dispatcher":"legacy","groups":10000,"kind":"dispatch","max_joinset":174,"mirror_delta_kib":60,"p50_us":32.023,"p95_us":78.013,"p99_us":117.497,"rss_kib":38224,"seconds":0.579215383,"telegram":"disconnected; non-action workload","telegram_calls":0,"updates":100000,"updates_per_second":172647.34835262483}
+ok
+test handlers::scalability_tests::scan_allocations ... PERF {"allocations_per_scan":0.0,"iterations":500000,"kind":"lock_scan","ns_per_scan":1233.184794,"seconds":0.616592397}
+ok
+test handlers::scalability_tests::voice_worker_parallelism ... PERF {"jobs":16,"kind":"voice_workers","seconds":0.442595907,"stub_delay_ms":100,"workers":4}
+ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 349 filtered out; finished in 4.21s
+

@@ -1,0 +1,7 @@
+
+running 1 test
+PERF {"counter":7,"kind":"durable_statistics","restart_replay_exactly_once":true,"sql_failure_rolled_back":true,"tally":7}
+test state::durable::tests::failed_and_uncertain_statistics_commits_replay_once ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 363 filtered out; finished in 0.28s
+

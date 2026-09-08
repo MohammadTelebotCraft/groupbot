@@ -1,3 +1,4 @@
+
 use super::nsfw_head_vectors::{BIAS, WEIGHTS};
 
 const _: () = assert!(WEIGHTS.len() == super::vision::DIM);
@@ -30,6 +31,11 @@ mod tests {
 
     #[test]
     fn the_prior_is_ordinary() {
-        const { assert!(BIAS < 0.0, "with no evidence at all the head must not lean towards deleting") };
+        const {
+            assert!(
+                BIAS < 0.0,
+                "with no evidence at all the head must not lean towards deleting"
+            )
+        };
     }
 }

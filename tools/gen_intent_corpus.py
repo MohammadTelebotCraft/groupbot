@@ -34,6 +34,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 OUT = HERE / "data" / "intent_corpus.tsv"
 EVAL = HERE / "data" / "intent_eval.tsv"
 BATTERY = HERE / "data" / "intent_battery.tsv"
+CONTEXT = HERE / "data" / "intent_context.tsv"
 FLEET = HERE / "data" / "intent_fleet.tsv"
 
 SEED = 4711
@@ -562,11 +563,13 @@ def trigrams(text: str) -> set[str]:
 
 def held_out_grams() -> set[str]:
     grams: set[str] = set()
-    for path in (EVAL, BATTERY):
+    for path in (EVAL, BATTERY, CONTEXT):
         if not path.exists():
             continue
         for line in path.read_text(encoding="utf-8").splitlines():
-            grams |= trigrams(line.split("\t")[-1])
+            fields = line.split("\t")
+            for text in (fields[1:] if len(fields) == 2 else fields[2:]):
+                grams |= trigrams(text)
     return grams
 
 

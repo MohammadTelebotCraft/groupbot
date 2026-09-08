@@ -1,0 +1,31 @@
+
+running 14 tests
+test state::tests::batch_flags_reconcile_the_mirror_and_database ... ok
+test state::tests::chats_with_only_lists_configured_chats ... ok
+test state::tests::cleaner_recommendations_select_only_due_known_groups ... ok
+test state::tests::clearing_a_valued_setting_removes_the_row ... ok
+test state::tests::counters_roll_over ... ok
+test state::tests::due_group_locks_compare_as_numbers ... ok
+test state::tests::every_chunk_of_a_large_flush_lands ... ok
+test state::tests::forget_idle_only_touches_the_chats_it_is_given ... FAILED
+test state::tests::moderation_cases_are_isolated_audited_and_expire ... ok
+test state::tests::panels_for_finds_owned_and_admined_chats ... ok
+test state::tests::roundtrip ... ok
+test state::tests::strikes_expire_in_the_write ... ok
+test state::tests::tallies_roll_over_in_the_write ... ok
+test state::tests::the_fleet_dashboard_counts_what_it_says ... ok
+
+failures:
+
+---- state::tests::forget_idle_only_touches_the_chats_it_is_given stdout ----
+
+thread 'state::tests::forget_idle_only_touches_the_chats_it_is_given' (62100) panicked at src/state.rs:4010:54:
+called `Result::unwrap()` on an `Err` value: Database(PgDatabaseError { severity: Error, code: "55P03", message: "canceling statement due to lock timeout", detail: None, hint: None, position: None, where: None, schema: None, table: None, column: None, data_type: None, constraint: None, file: Some("postgres.c"), line: Some(3411), routine: Some("ProcessInterrupts") })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    state::tests::forget_idle_only_touches_the_chats_it_is_given
+
+test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 341 filtered out; finished in 3.49s
+

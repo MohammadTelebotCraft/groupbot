@@ -1,4 +1,5 @@
-use super::{limits, locks, log, rights, tempmedia};
+
+use super::{limits, locks, log, premium, rights, tempmedia};
 
 pub struct Cmd {
     pub form: &'static str,
@@ -16,16 +17,18 @@ const fn eg(typed: &'static str, result: &'static str) -> Example {
 
 pub struct Topic {
     pub id: &'static str,
-
-    pub icon: &'static str,
     pub title: &'static str,
     pub intro: &'static str,
     pub commands: &'static [Cmd],
     pub examples: &'static [Example],
-
     pub extra: Option<fn() -> String>,
-
     pub notes: &'static [&'static str],
+}
+
+impl Topic {
+    pub fn icon(&self) -> Option<premium::Icon> {
+        premium::section_icon(self.id)
+    }
 }
 
 const fn cmd(form: &'static str, does: &'static str) -> Cmd {
@@ -45,7 +48,6 @@ pub const INDEX: &[&str] = &[
 pub const TOPICS: &[Topic] = &[
     Topic {
         id: "locks",
-        icon: "🔒",
         title: "قفل ها",
         intro: "هر قفل یک نوع محتوا را می گیرد و پیامش را حذف می کند. ادمین ها و کاربران ویژه از قفل ها معاف اند.",
         commands: &[
@@ -84,7 +86,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "usr",
-        icon: "👤",
         title: "مدیریت کاربر",
         intro: "هدف هر کدام از این ها یک ریپلای است، یا یوزرنیم، یا آیدی عددی. مدت زمان اختیاری است و بدون آن دائمی می شود.",
         commands: &[
@@ -97,6 +98,11 @@ pub const TOPICS: &[Topic] = &[
             cmd("اخطار", "یک اخطار ثبت می کند"),
             cmd("حذف اخطار", "یک اخطار کم می کند"),
             cmd("اخطارها", "اخطارهای یک کاربر"),
+            cmd("پرونده ها", "پرونده های باز و سابقه برخوردها"),
+            cmd("پرونده 123", "جزئیات و رویدادهای یک پرونده"),
+            cmd("تاریخچه", "با ریپلای، سابقه یک کاربر"),
+            cmd("بستن پرونده 123", "گزارش را بدون اقدام می بندد"),
+            cmd("لغو پرونده 123", "اخطار، سکوت یا بن پرونده را بر می گرداند"),
             cmd("ویژه", "کاربر ویژه؛ معاف از قفل ها بدون هیچ دسترسی"),
             cmd("حذف ویژه", "از لیست ویژه بر می دارد"),
             cmd("معاف", "از عضویت اجباری و اد اجباری معاف می کند"),
@@ -140,7 +146,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "adm",
-        icon: "👑",
         title: "ادمین ها",
         intro: "دو سطح ادمین هست: ادمین واقعی تلگرام، و ادمین ربات که فقط از قفل ها معاف است و به دستورها دسترسی دارد.",
         commands: &[
@@ -181,7 +186,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "sec",
-        icon: "🛡",
         title: "امنیت و ورود",
         intro: "گاردهایی که خودشان کار می کنند و شرط هایی که پیش از نوشتن باید انجام شود. تنظیم دقیق هر کدام در صفحه خودش است.",
         commands: &[
@@ -227,7 +231,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "msg",
-        icon: "💬",
         title: "پیام و پاسخ",
         intro: "چیزهایی که ربات خودش می نویسد: خوشامد، پاسخ خودکار و اعلان حذف.",
         commands: &[
@@ -264,8 +267,30 @@ pub const TOPICS: &[Topic] = &[
         ],
     },
     Topic {
+        id: "response",
+        title: "پیام های ربات",
+        intro: "فقط اعلان های حذف و خوشامد را خصوصی یا عمومی می کند. دستورها، پنل، راهنما و بقیه پیام های ربات عادی می مانند.",
+        commands: &[
+            cmd("/ephemeral status", "وضعیت اعلان ها و خوشامد"),
+            cmd("/ephemeral notice private", "اعلان حذف فقط برای همان کاربر"),
+            cmd("/ephemeral notice public", "اعلان حذف به شکل پیام عادی"),
+            cmd("/ephemeral welcome private", "خوشامد فقط برای عضو تازه"),
+            cmd("/ephemeral welcome public", "خوشامد به شکل پیام عادی"),
+            cmd("/ephemeral reset", "هر دو را به حالت عمومی برمی گرداند"),
+        ],
+        examples: &[eg(
+            "/ephemeral notice private",
+            "اعلان حذف فقط برای فرستنده پیام حذف شده دیده می شود.",
+        )],
+        extra: None,
+        notes: &[
+            "این دو انتخاب از پنل و مینی اپ هم در دسترس اند.",
+            "اطلاعات حساس حتی با حالت خاموش به گروه برنمی گردند.",
+            "اگر فرستنده یک کاربر واقعی نباشد، ربات گیرنده خصوصی را حدس نمی زند.",
+        ],
+    },
+    Topic {
         id: "tm",
-        icon: "🧹",
         title: "پاکسازی و زمان",
         intro: "کارهایی که سر ساعت یا پس از مدتی خودشان انجام می شوند.",
         commands: &[
@@ -293,7 +318,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "tmed",
-        icon: "⏳",
         title: "رسانه موقت",
         intro: "عکس و فیلم و استیکر و باقی رسانه ها پس از مدتی خودشان پاک می شوند. گروهی که رسانه انبار نمی کند، چیز کمتری برای گزارش شدن دارد.",
         commands: &[],
@@ -306,7 +330,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "ls",
-        icon: "📋",
         title: "لیست ها",
         intro: "هر لیست را هم می شود دید و هم تک تک از داخلش حذف کرد. دکمه پاکسازی کل لیست را با یک تایید خالی می کند.",
         commands: &[
@@ -331,7 +354,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "filter",
-        icon: "🔤",
         title: "فیلتر کلمه",
         intro: "پیامی که یکی از این کلمه ها را داشته باشد حذف می شود. مقایسه بدون حساسیت به بزرگی و کوچکی حروف است.",
         commands: &[
@@ -362,7 +384,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "cl",
-        icon: "🧽",
         title: "کلینر",
         intro: "یک حساب کاربری که کارهایی را انجام می دهد که ربات ها اجازه اش را ندارند: پاک کردن تاریخچه قدیمی و همه پیام های یک نفر.",
         commands: &[
@@ -394,7 +415,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "st",
-        icon: "📊",
         title: "آمار",
         intro: "شمارش پیام ها در حافظه انجام می شود و روی تایمر ذخیره می شود، پس هیچ کدام از این ها روی سرعت گروه اثر ندارد.",
         commands: &[
@@ -430,7 +450,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "gr",
-        icon: "⚙️",
         title: "اختیارات گروه",
         intro: "این ها اختیار اعضای عادی است و ادمین ها شامل آن نمی شوند. با هر تغییر، کل مجموعه دوباره روی گروه نوشته می شود.",
         commands: &[
@@ -450,7 +469,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "lg",
-        icon: "📝",
         title: "کانال لاگ",
         intro: "کارهایی که ربات انجام می دهد در یک کانال نوشته می شود. پیام ها دسته ای فرستاده می شوند، پس یک طوفان حذف یک پیام می شود نه صدتا.",
         commands: &[
@@ -468,7 +486,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "lim",
-        icon: "⚖️",
         title: "محدودیت مدیران",
         intro: "ادمین بودن یک چیز است و اینکه به کدام دستورها دسترسی داشته باشد چیز دیگری. مالک می تواند هر کدام را جدا ببندد.",
         commands: &[],
@@ -482,7 +499,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "s",
-        icon: "🔥",
         title: "حالت سختگیرانه",
         intro: "به طور عادی پیامی که قفل بگیرد فقط پاک می شود. با این حالت، فرستنده اش هم پس از چند تخلف تنبیه می شود.",
         commands: &[],
@@ -497,7 +513,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "fl",
-        icon: "⚡",
         title: "ضد رگبار",
         intro: "کسی که در یک بازه کوتاه بیش از حد پیام بفرستد، سکوت یا بن می شود. شمارش برای هر کاربر جداست و ادمین ها شامل آن نمی شوند.",
         commands: &[
@@ -513,7 +528,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "rd",
-        icon: "🚨",
         title: "ضد هجوم",
         intro: "ورود ناگهانی چند عضو در یک بازه کوتاه یعنی هجوم؛ تازه واردها تا مدتی سکوت می شوند تا فرصت بررسی باشد.",
         commands: &[],
@@ -526,7 +540,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "bt",
-        icon: "🕵",
         title: "ضد خیانت ادمین",
         intro: "ادمینی که در مدت کوتاهی چند نفر را حذف کند، خودش عزل می شود. مالک ربات شامل آن نمی شود.",
         commands: &[cmd("تنظیم خیانت 5 10", "۵ حذف در ۱۰ دقیقه")],
@@ -536,7 +549,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "cp",
-        icon: "🧩",
         title: "احراز هویت",
         intro: "عضو تازه تا وقتی ایموجی درست را از روی تصویر نزند ساکت می ماند. تصویر هر ایموجی یک بار ساخته می شود و بعد از آن از حافظه تلگرام می آید.",
         commands: &[
@@ -553,7 +565,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "wn",
-        icon: "⚠️",
         title: "اخطار",
         intro: "اخطارها روی هر کاربر جمع می شوند و در سقف تعیین شده کار مشخص شده انجام می شود.",
         commands: &[
@@ -571,7 +582,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "jn",
-        icon: "🚪",
         title: "عضویت اجباری",
         intro: "تا وقتی کاربر عضو کانال نشده باشد پیامش پاک می شود و یک اعلان با دکمه عضویت می گیرد.",
         commands: &[
@@ -589,7 +599,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "ad",
-        icon: "➕",
         title: "اد اجباری",
         intro: "تا وقتی کاربر تعداد مشخصی عضو اضافه نکرده باشد اجازه نوشتن ندارد. شمارش از روی همان کسانی است که خودش اضافه کرده.",
         commands: &[
@@ -607,7 +616,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "gp",
-        icon: "🔔",
         title: "اعلان شرط",
         intro: "اعلانی که به کسی که هنوز شرط ورود را انجام نداده نشان داده می شود. هم فاصله بین اعلان ها و هم حذف خودکارشان قابل تنظیم است.",
         commands: &[cmd(
@@ -620,7 +628,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "nt",
-        icon: "🔕",
         title: "اعلان حذف",
         intro: "وقتی قفلی پیامی را حذف می کند، ربات یک اعلان کوتاه می گذارد تا فرستنده بداند چرا. اعلان خودش هم پس از مدتی پاک می شود.",
         commands: &[cmd("تنظیم اعلان 15", "پاک شدن پس از ۱۵ ثانیه")],
@@ -630,7 +637,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "an",
-        icon: "💡",
         title: "پاسخ خودکار",
         intro: "پیامی که متنش دقیقا برابر یک عبارت ذخیره شده باشد، پاسخ آماده اش را می گیرد. پاسخ می تواند رسانه هم داشته باشد.",
         commands: &[
@@ -651,7 +657,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "wc",
-        icon: "👋",
         title: "خوشامد",
         intro: "پیامی که برای هر عضو تازه فرستاده می شود. می تواند متن، رسانه یا هر دو باشد.",
         commands: &[
@@ -675,7 +680,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "ng",
-        icon: "🌙",
         title: "قفل شب",
         intro: "گروه هر شب سر ساعت مشخص بسته و صبح باز می شود. ساعت ها به وقت تهران است.",
         commands: &[
@@ -694,7 +698,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "sl",
-        icon: "🐢",
         title: "اسلوموشن",
         intro: "فاصله اجباری بین دو پیام هر عضو. این تنظیم خود تلگرام است و ادمین ها شامل آن نمی شوند.",
         commands: &[
@@ -710,7 +713,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "ap",
-        icon: "🗑",
         title: "پاکسازی خودکار",
         intro: "هر روز سر ساعت مشخص، تعدادی از پیام های گروه پاک می شوند.",
         commands: &[],
@@ -723,7 +725,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "dr",
-        icon: "📅",
         title: "گزارش روزانه",
         intro: "خلاصه یک روز گروه، هر شب سر ساعت مشخص در همان گروه فرستاده می شود.",
         commands: &[
@@ -737,7 +738,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "sp",
-        icon: "🎯",
         title: "موارد تخلف",
         intro: "انتخاب اینکه کدام قفل ها در حالت سختگیرانه تخلف حساب شوند. باقی قفل ها فقط پیام را پاک می کنند.",
         commands: &[],
@@ -750,7 +750,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "bl",
-        icon: "🪪",
         title: "لینک در بایو",
         intro: "عضوی که در بایوی پروفایلش لینک یا آیدی کانال دارد، پیامش حذف می شود. این تنها قفلی است که به جای پیام، به فرستنده نگاه می کند.",
         commands: &[
@@ -771,7 +770,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "ai",
-        icon: "🤖",
         title: "نگهبان هوشمند",
         intro: "هر چیزی که به جای نوع پیام، به معنای آن نگاه می کند: محتوای غیراخلاقی، شش موضوع مشخص، تبلیغی که روی خود عکس نوشته شده، و خرید و فروش که متن پیام را می فهمد. اینها با قفل های معمولی یک جا نیستند چون فرق دارند — قفل معمولی از روی خود پیام تصمیم می گیرد و مجانی است، اینها پیام را به مدل می دهند.",
         commands: &[
@@ -810,7 +808,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "nsw",
-        icon: "🔞",
         title: "محتوای غیراخلاقی",
         intro: "عکس، گیف، استیکر و کاور فیلم را به مدل تشخیص تصویر می دهد و اگر مستهجن بود پاک می کند. تنها قفلی است که به جای نوع پیام، به خود تصویر نگاه می کند.",
         commands: &[
@@ -833,7 +830,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "cq",
-        icon: "🚭",
         title: "قفل موضوعی",
         intro: "چند موضوع مشخص را در تصویرها می گیرد — سیگار، مشروب، اسلحه، قمار، مواد و خون. مثل قفل غیراخلاقی به خود تصویر نگاه می کند، ولی به جای یک مدل آموزش دیده برای همان کار، از یک مدل عمومی استفاده می کند — همان مدلی که وتوی قفل غیراخلاقی هم هست.",
         commands: &[
@@ -856,7 +852,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "imf",
-        icon: "🎯",
         title: "فیلتر تصویری",
         intro: "قفل تصویری که خود گروه تعریف می کند. یا با یک عبارت، یا با ریپلای روی نمونه. هر تصویر یک بار بررسی می شود، پس چند فیلتر با هم هیچ هزینه اضافه ای ندارد.",
         commands: &[
@@ -889,7 +884,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "etc",
-        icon: "✨",
         title: "باقی دستورها",
         intro: "چیزهایی که جای دیگری نمی گنجند.",
         commands: &[
@@ -897,7 +891,10 @@ pub const TOPICS: &[Topic] = &[
             cmd("پنل پیوی", "همان پنل، در پیوی خودتان"),
             cmd("راهنما", "همین فهرست"),
             cmd("پینگ", "سرعت پاسخ ربات و دیتابیس"),
-            cmd("نرخ ارز", "صفحه های خوانای قیمت خرید و فروش ارزهای بازار آزاد"),
+            cmd(
+                "نرخ ارز",
+                "صفحه های خوانای قیمت خرید و فروش ارزهای بازار آزاد",
+            ),
             cmd("قیمت ارز", "همان صفحه های نرخ ارز"),
             cmd("گزارش", "با ریپلای، پیام را به ادمین ها گزارش می کند"),
             cmd("قوانین", "قوانین گروه"),
@@ -928,7 +925,6 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         id: "vw",
-        icon: "🎙",
         title: "فیلتر ویس",
         intro: "ویس های گروه به متن تبدیل می شوند و اگر کلمه ای از این فهرست در آن ها باشد، ویس حذف می شود. چند کلمه از پیش آماده است و هر کدام را می شود خاموش کرد.",
         commands: &[
@@ -1065,7 +1061,9 @@ fn fa(number: usize) -> String {
 pub fn page(topic: &Topic) -> String {
     let mut out = format!(
         "{} <b>راهنما</b> › <b>{}</b>\n\n{}\n",
-        topic.icon, topic.title, topic.intro
+        premium::badge(topic.icon()),
+        topic.title,
+        topic.intro
     );
 
     if !topic.commands.is_empty() {
@@ -1078,7 +1076,6 @@ pub fn page(topic: &Topic) -> String {
             .iter()
             .map(|command| format!("<code>{}</code> · {}", command.form, command.does))
             .collect();
-
         out.push_str(&quoted(&lines.join("\n"), false));
     }
 
@@ -1205,9 +1202,11 @@ mod tests {
             owned("panel::OPEN", super::super::panel::OPEN),
             owned("panel::OPEN_LISTS", super::super::panel::OPEN_LISTS),
             owned("panel::TO_PRIVATE", super::super::panel::TO_PRIVATE),
+            owned("ephemeral::COMMANDS", super::super::ephemeral::COMMANDS),
             owned("ping::COMMANDS", super::super::ping::COMMANDS),
             owned("currency::COMMANDS", super::super::currency::COMMANDS),
             owned("report::COMMANDS", super::super::report::COMMANDS),
+            owned("cases::COMMANDS", super::super::cases::COMMANDS),
             owned("purge::COMMANDS", super::super::purge::COMMANDS),
             owned("purge::ALL", super::super::purge::ALL),
             owned("cleaner::ADD", super::super::cleaner::ADD),
@@ -1318,17 +1317,9 @@ mod tests {
     #[test]
     fn the_content_carries_no_markup() {
         for topic in TOPICS {
-            assert!(!topic.icon.is_empty(), "«{}» has no icon", topic.id);
-            assert!(
-                topic.icon.chars().count() <= 2,
-                "«{}» carries more than one icon",
-                topic.id
-            );
-            assert!(
-                !topic.icon.is_ascii(),
-                "«{}» has an ascii icon, not an emoji",
-                topic.id
-            );
+            if let Some(icon) = topic.icon() {
+                assert_eq!(icon.entry().confidence, premium::Confidence::High);
+            }
 
             let mut all = vec![topic.title, topic.intro];
             all.extend(topic.notes);
@@ -1363,10 +1354,24 @@ mod tests {
     #[test]
     fn every_panel_section_has_a_topic() {
         const NOT_CONTENT: &[&str] = &[
-            "root", "close", "page", "in", "on", "off", "adv", "ng_toggle", "ap_toggle",
-            "dr_toggle", "dr_now", "lg_off", "jn_off", "wc_off",
-
-            "imf", "nsfw",
+            "root",
+            "close",
+            "page",
+            "in",
+            "on",
+            "off",
+            "adv",
+            "ng_toggle",
+            "ap_toggle",
+            "dr_toggle",
+            "dr_now",
+            "lg_off",
+            "jn_off",
+            "wc_off",
+            "response_categories",
+            "response_kinds",
+            "imf",
+            "nsfw",
         ];
         for page in super::super::panel::PAGES {
             if NOT_CONTENT.contains(page) {
@@ -1436,7 +1441,6 @@ mod tests {
                 lock.names[0]
             );
         }
-
         for id in ["ai", "nsw", "cq"] {
             assert!(
                 TOPICS.iter().any(|topic| topic.id == id),

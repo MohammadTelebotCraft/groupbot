@@ -1,0 +1,772 @@
+.\src\dispatcher.rs:171:                    let _ = barrier.acquire().await.unwrap();
+.\src\main.rs:120:        .ok()
+.\src\main.rs:121:        .and_then(|value| value.parse().ok())
+.\src\main.rs:181:        let _ = tokio::signal::ctrl_c().await;
+.\src\main.rs:196:        .ok()
+.\src\main.rs:197:        .and_then(|value| value.parse().ok())
+.\src\main.rs:278:    let owner_monitor = tokio::spawn(Arc::clone(&settings).monitor_ownership());
+.\src\main.rs:294:    let pool_task = tokio::spawn(runner.run());
+.\src\main.rs:424:        .ok()
+.\src\main.rs:427:        .ok()
+.\src\main.rs:485:    let user_task = tokio::spawn(user_runner.run());
+.\src\main.rs:519:    let cleaner_worker = tokio::spawn(async move {
+.\src\main.rs:899:    let _ = cleaner_stop.send(true);
+.\src\main.rs:911:      let _ = cleaner_worker.await;
+.\src\main.rs:929:    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+.\src\main.rs:930:        let _ = tokio::join!(pool_task, user_task);
+.\src\state.rs:360:            .and_then(|value| value.parse().ok())
+.\src\state.rs:1674:        .ok()
+.\src\state.rs:2147:            .ok()
+.\src\state.rs:2191:        .ok()
+.\src\state.rs:2556:                .ok()??;
+.\src\state.rs:3472:            .filter_map(|(chat, key)| Some((chat, key.strip_prefix("badge:")?.parse().ok()?)))
+.\src\state.rs:3519:        sqlx::query("SELECT 1").execute(&self.pool).await.ok()?;
+.\src\state.rs:3658:    #[allow(clippy::too_many_arguments)]
+.\src\state.rs:3804:    #[allow(clippy::too_many_arguments)]
+.\src\state.rs:4020:            .ok()
+.\src\dispatcher\load_tests.rs:31:            let producer = tokio::spawn(async move {
+.\audit\scalability\results\voice.baseline.rs:114:            .ok()
+.\audit\scalability\results\voice.baseline.rs:115:            .and_then(|value| value.parse::<usize>().ok())
+.\audit\scalability\results\voice.baseline.rs:119:            .ok()
+.\audit\scalability\results\voice.baseline.rs:120:            .and_then(|value| value.parse::<usize>().ok())
+.\audit\scalability\results\voice.baseline.rs:126:            tokio::spawn(worker_loop(Arc::clone(&receiver), index));
+.\audit\scalability\results\voice.baseline.rs:170:                let _ = process.child.kill().await;
+.\audit\scalability\results\voice.baseline.rs:174:        let _ = job.result.send(result);
+.\audit\scalability\results\voice.baseline.rs:463:        let _ = message.reply(body).await;
+.\audit\scalability\results\voice.baseline.rs:480:            .ok()
+.\audit\scalability\results\voice.baseline.rs:487:        let _ = message
+.\audit\scalability\results\voice.baseline.rs:500:                let _ = message
+.\audit\scalability\results\voice.baseline.rs:509:                let _ = message
+.\audit\scalability\results\voice.baseline.rs:517:                let _ = message
+.\audit\scalability\results\voice.baseline.rs:524:        let _ = message
+.\audit\scalability\results\voice.baseline.rs:535:        let _ = message
+.\audit\scalability\results\voice.baseline.rs:544:        let _ = message
+.\audit\scalability\results\voice.baseline.rs:576:    let _ = message
+.\audit\scalability\results\voice.baseline.rs:637:    tokio::spawn(async move {
+.\audit\scalability\results\voice.baseline.rs:736:        let _ = query
+.\audit\scalability\results\voice.baseline.rs:750:        let _ = query
+.\audit\scalability\results\voice.baseline.rs:761:    let is_admin = match ctx.chat_ref(chat).or(query.peer_ref().await.ok().flatten()) {
+.\audit\scalability\results\voice.baseline.rs:766:        let _ = query
+.\audit\scalability\results\voice.baseline.rs:785:    let _ = query.answer().alert(answer).send().await;
+.\audit\scalability\results\voice.baseline.rs:797:    let _ = tokio::fs::remove_file(path).await;
+.\src\state\scalability_tests.rs:29:    let release = tokio::spawn(async move {
+.\src\state\scalability_tests.rs:94:    let _ = victim.close().await;
+.\audit\scalability\followup\main.before.rs:111:        .ok()
+.\audit\scalability\followup\main.before.rs:112:        .and_then(|value| value.parse().ok())
+.\audit\scalability\followup\main.before.rs:172:        let _ = tokio::signal::ctrl_c().await;
+.\audit\scalability\followup\main.before.rs:187:        .ok()
+.\audit\scalability\followup\main.before.rs:188:        .and_then(|value| value.parse().ok())
+.\audit\scalability\followup\main.before.rs:279:    let pool_task = tokio::spawn(runner.run());
+.\audit\scalability\followup\main.before.rs:352:            .ok()
+.\audit\scalability\followup\main.before.rs:392:        .ok()
+.\audit\scalability\followup\main.before.rs:395:        .ok()
+.\audit\scalability\followup\main.before.rs:443:    let user_task = tokio::spawn(user_runner.run());
+.\audit\scalability\followup\main.before.rs:471:        tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:537:    tokio::spawn(handlers::cases::run_retention(Arc::clone(&ctx)));
+.\audit\scalability\followup\main.before.rs:538:    tokio::spawn(handlers::autoconfig::recover_startup(Arc::clone(&ctx)));
+.\audit\scalability\followup\main.before.rs:541:    tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:553:    tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:563:    tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:573:    tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:583:    tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:595:    tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:605:    tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:615:    tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:625:    tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:645:    tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:668:    tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:723:    tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:736:    tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:743:    tokio::spawn(async move {
+.\audit\scalability\followup\main.before.rs:800:    let _ = pool_task.await;
+.\audit\scalability\followup\stats.before.rs:199:        let _ = message
+.\audit\scalability\followup\stats.before.rs:215:        let _ = message
+.\audit\scalability\followup\stats.before.rs:238:                .ok()
+.\audit\scalability\followup\stats.before.rs:253:        let _ = match at {
+.\audit\scalability\followup\stats.before.rs:313:        let _ = query
+.\audit\scalability\followup\stats.before.rs:328:        let _ = query
+.\audit\scalability\followup\stats.before.rs:341:    let _ = query
+.\audit\scalability\followup\stats.before.rs:636:        let _ = message
+.\audit\scalability\followup\stats.before.rs:660:        .ok()
+.\audit\scalability\followup\stats.before.rs:707:    let _ = message.reply(card).await;
+.\audit\scalability\followup\stats.before.rs:737:        let _ = message
+.\audit\scalability\followup\stats.before.rs:773:    let _ = message
+.\audit\scalability\followup\stats.before.rs:817:            let mime = doc.mime_type().unwrap_or_default();
+.\audit\scalability\followup\stats.before.rs:964:    let _ = ctx
+.\audit\scalability\followup\stats.before.rs:1088:            let _ = ctx
+.\audit\scalability\followup\stats.before.rs:1110:        let _ = at;
+.\src\state\ownership.rs:32:        let monitor = tokio::spawn(owner.clone().monitor_ownership());
+.\src\state\durable.rs:497:        let _ = std::fs::remove_file(&temporary);
+.\src\state\durable.rs:514:            let _ = cleanup;
+.\src\state\durable.rs:634:    fn recovery_rejects_unsafe_ids() {
+.\src\handlers\cleaner_setup.rs:109:        .unwrap_or_default()
+.\src\handlers\cleaner_setup.rs:262:        .ok()
+.\src\handlers\cleaner_setup.rs:269:        let _ = query
+.\src\handlers\cleaner_setup.rs:280:        let _ = query
+.\src\handlers\cleaner_setup.rs:288:        let _ = query
+.\src\handlers\cleaner_setup.rs:296:        let _ = query.answer().alert(alert).send().await;
+.\src\handlers\cleaner_setup.rs:299:        let _ = query
+.\src\handlers\concepts.rs:241:#[allow(clippy::too_many_arguments)]
+.\audit\scalability\results\state.baseline.rs:279:            .and_then(|value| value.parse().ok())
+.\audit\scalability\results\state.baseline.rs:390:                .ok()
+.\audit\scalability\results\state.baseline.rs:391:                .and_then(|value| value.parse().ok())
+.\audit\scalability\results\state.baseline.rs:397:                .ok()
+.\audit\scalability\results\state.baseline.rs:398:                .and_then(|value| value.parse().ok())
+.\audit\scalability\results\state.baseline.rs:404:                .ok()
+.\audit\scalability\results\state.baseline.rs:405:                .and_then(|value| value.parse().ok())
+.\audit\scalability\results\state.baseline.rs:411:                .ok()
+.\audit\scalability\results\state.baseline.rs:412:                .and_then(|value| value.parse().ok())
+.\audit\scalability\results\state.baseline.rs:430:            .ok()
+.\audit\scalability\results\state.baseline.rs:431:            .and_then(|value| value.parse().ok())
+.\audit\scalability\results\state.baseline.rs:1259:        .ok()
+.\audit\scalability\results\state.baseline.rs:1501:        .ok()
+.\audit\scalability\results\state.baseline.rs:1598:            .ok()
+.\audit\scalability\results\state.baseline.rs:1642:        .ok()
+.\audit\scalability\results\state.baseline.rs:2050:                .ok()??;
+.\audit\scalability\results\state.baseline.rs:2057:    #[allow(clippy::too_many_arguments)]
+.\audit\scalability\results\state.baseline.rs:2983:            .filter_map(|(chat, key)| Some((chat, key.strip_prefix("badge:")?.parse().ok()?)))
+.\audit\scalability\results\state.baseline.rs:3030:        sqlx::query("SELECT 1").execute(&self.pool).await.ok()?;
+.\audit\scalability\results\state.baseline.rs:3169:    #[allow(clippy::too_many_arguments)]
+.\audit\scalability\results\state.baseline.rs:3242:    #[allow(clippy::too_many_arguments)]
+.\audit\scalability\results\state.baseline.rs:3458:            .ok()
+.\audit\scalability\results\state.baseline.rs:3574:                        let _ = self.set_value(chat, key, value).await;
+.\audit\scalability\results\state.baseline.rs:3584:            let _ = std::fs::rename(path, format!("{path}.imported"));
+.\src\handlers\cleaner.rs:48:    std::env::var("SUDO_ID").ok()?.parse().ok()
+.\src\handlers\cleaner.rs:130:        let _ = message
+.\src\handlers\cleaner.rs:147:        let _ = message.reply(body).await;
+.\src\handlers\cleaner.rs:151:    let _ = message
+.\src\handlers\cleaner.rs:158:    let _ = message.reply(body).await;
+.\src\handlers\cleaner.rs:349:        let _ = message
+.\src\handlers\cleaner.rs:355:        let _ = message
+.\src\handlers\cleaner.rs:361:    let _ = message
+.\src\handlers\cleaner.rs:381:        let _ = message
+.\src\handlers\cleaner.rs:390:        let _ = message
+.\src\handlers\cleaner.rs:401:                let _ = message
+.\src\handlers\cleaner.rs:408:    let _ = message
+.\src\handlers\cleaner.rs:435:        let _ = message
+.\src\handlers\cleaner.rs:448:        let _ = message
+.\src\handlers\cleaner.rs:461:        let _ = message
+.\src\handlers\cleaner.rs:466:    let _ = match done {
+.\src\handlers\cleaner.rs:550:            return participant.user()?.to_ref().await.ok().flatten();
+.\src\handlers\cleaner.rs:719:        let _ = message
+.\src\handlers\cleaner.rs:728:        let _ = message.reply("ورود کلینر همین حالا در حال انجام است.").await;
+.\src\handlers\cleaner.rs:735:                    let _ = message.reply("شناسه حساب کلینر معتبر نیست.").await;
+.\src\handlers\cleaner.rs:739:                let _ = message
+.\src\handlers\cleaner.rs:745:                let _ = message
+.\src\handlers\cleaner.rs:753:            let _ = message
+.\src\handlers\cleaner.rs:792:                let _ = message
+.\src\handlers\cleaner.rs:800:                    let _ = message
+.\src\handlers\cleaner.rs:805:                let _ = match user.check_password(token, password.trim()).await {
+.\src\handlers\cleaner.rs:808:                            let _ = message.reply("شناسه حساب کلینر معتبر نیست.").await;
+.\src\handlers\cleaner.rs:832:                    let _ = message.reply("شناسه حساب کلینر معتبر نیست.").await;
+.\src\handlers\cleaner.rs:836:                let _ = message
+.\src\handlers\cleaner.rs:845:                let _ = message
+.\src\handlers\cleaner.rs:851:                let _ = message
+.\src\handlers\cleaner.rs:861:    let _ = message
+.\src\handlers\cleaner.rs:880:    let _ = message.delete().await;
+.\src\handlers\cleaner.rs:905:    let _ = message.reply(card).await;
+.\src\handlers\cleaner.rs:909:    let code = qrcode::QrCode::new(url.as_bytes()).ok()?;
+.\src\handlers\cleaner.rs:917:        .ok()?;
+.\src\handlers\captcha.rs:80:    let _ = message
+.\src\handlers\captcha.rs:99:        .and_then(|value| value.parse().ok())
+.\src\handlers\captcha.rs:107:        .and_then(|value| value.parse().ok())
+.\src\handlers\captcha.rs:359:        let _ = query
+.\src\handlers\captcha.rs:390:                let _ = query
+.\src\handlers\captcha.rs:400:                let _ = query
+.\src\handlers\captcha.rs:411:            let _ = query
+.\src\handlers\captcha.rs:421:            let _ = query
+.\src\handlers\captcha.rs:431:            let _ = query
+.\src\handlers\captcha.rs:442:            let _ = query
+.\src\handlers\captcha.rs:742:        .ok()
+.\src\handlers\comment.rs:157:            tokio::spawn(async move {
+.\src\handlers\currency.rs:94:            let _ = message
+.\src\handlers\currency.rs:99:            let _ = message.reply(ERROR_MESSAGE).await;
+.\src\handlers\currency.rs:290:        let _ = query.answer().send().await;
+.\src\handlers\currency.rs:294:        let _ = query.answer().send().await;
+.\src\handlers\currency.rs:302:            let _ = query.answer().send().await;
+.\src\handlers\currency.rs:310:            let _ = query.answer().alert(ERROR_MESSAGE).send().await;
+.\src\handlers\currency.rs:318:    let _ = query
+.\src\handlers\cases.rs:24:#[allow(dead_code)] // consumed by the exhaustive command-registry tests
+.\src\handlers\cases.rs:76:        Some(Media::Document(document)) => match document.mime_type().unwrap_or_default() {
+.\src\handlers\cases.rs:100:#[allow(clippy::too_many_arguments)]
+.\src\handlers\cases.rs:186:        let _ = ctx
+.\src\handlers\cases.rs:202:#[allow(clippy::too_many_arguments)]
+.\src\handlers\cases.rs:237:        let _ = ctx
+.\src\handlers\cases.rs:265:        .ok()
+.\src\handlers\cases.rs:366:            let _ = message.reply("مثال: بستن پرونده ۱۲۳ [یادداشت]").await;
+.\src\handlers\cases.rs:370:        let _ = message.reply(reply).await;
+.\src\handlers\cases.rs:373:            let _ = message.reply("مثال: لغو پرونده ۱۲۳ [یادداشت]").await;
+.\src\handlers\cases.rs:377:        let _ = message.reply(reply).await;
+.\src\handlers\cases.rs:382:                let _ = message.reply("مثال: پرونده ۱۲۳").await;
+.\src\handlers\cases.rs:391:            let _ = message
+.\src\handlers\cases.rs:397:            let _ = message
+.\src\handlers\cases.rs:417:            let _ = message.reply("پرونده‌ای پیدا نشد.").await;
+.\src\handlers\cases.rs:421:            let _ = message
+.\src\handlers\cases.rs:430:            let _ = message
+.\src\handlers\cases.rs:443:            let _ = message
+.\src\handlers\cases.rs:451:            let _ = message.reply("پرونده پیدا نشد.").await;
+.\src\handlers\cases.rs:455:            let _ = message
+.\src\handlers\cases.rs:493:    let _ = query.answer().edit(answer).await;
+.\src\handlers\cases.rs:538:        let _ = ctx
+.\src\handlers\cases.rs:662:        let _ = ctx
+.\src\handlers\cases.rs:690:#[allow(clippy::too_many_arguments)]
+.\src\handlers\cases.rs:706:#[allow(clippy::too_many_arguments)]
+.\src\handlers\cases.rs:749:    let id = parts.next()?.parse().ok()?;
+.\audit\scalability\results\main.baseline.rs:72:        .ok()
+.\audit\scalability\results\main.baseline.rs:73:        .and_then(|value| value.parse().ok())
+.\audit\scalability\results\main.baseline.rs:133:        let _ = tokio::signal::ctrl_c().await;
+.\audit\scalability\results\main.baseline.rs:148:        .ok()
+.\audit\scalability\results\main.baseline.rs:149:        .and_then(|value| value.parse().ok())
+.\audit\scalability\results\main.baseline.rs:234:    let pool_task = tokio::spawn(runner.run());
+.\audit\scalability\results\main.baseline.rs:313:            .ok()
+.\audit\scalability\results\main.baseline.rs:353:        .ok()
+.\audit\scalability\results\main.baseline.rs:356:        .ok()
+.\audit\scalability\results\main.baseline.rs:404:    let user_task = tokio::spawn(user_runner.run());
+.\audit\scalability\results\main.baseline.rs:432:        tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:492:    tokio::spawn(handlers::cases::run_retention(Arc::clone(&ctx)));
+.\audit\scalability\results\main.baseline.rs:493:    tokio::spawn(handlers::autoconfig::recover_startup(Arc::clone(&ctx)));
+.\audit\scalability\results\main.baseline.rs:496:    tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:508:    tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:518:    tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:528:    tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:538:    tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:550:    tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:560:    tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:570:    tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:580:    tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:600:    tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:625:    tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:676:    tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:689:    tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:696:    tokio::spawn(async move {
+.\audit\scalability\results\main.baseline.rs:764:    let _ = pool_task.await;
+.\audit\scalability\followup\state.before.rs:282:            .and_then(|value| value.parse().ok())
+.\audit\scalability\followup\state.before.rs:393:                .ok()
+.\audit\scalability\followup\state.before.rs:394:                .and_then(|value| value.parse().ok())
+.\audit\scalability\followup\state.before.rs:400:                .ok()
+.\audit\scalability\followup\state.before.rs:401:                .and_then(|value| value.parse().ok())
+.\audit\scalability\followup\state.before.rs:407:                .ok()
+.\audit\scalability\followup\state.before.rs:408:                .and_then(|value| value.parse().ok())
+.\audit\scalability\followup\state.before.rs:414:                .ok()
+.\audit\scalability\followup\state.before.rs:415:                .and_then(|value| value.parse().ok())
+.\audit\scalability\followup\state.before.rs:429:            .ok()
+.\audit\scalability\followup\state.before.rs:430:            .and_then(|value| value.parse().ok())
+.\audit\scalability\followup\state.before.rs:1280:        .ok()
+.\audit\scalability\followup\state.before.rs:1522:        .ok()
+.\audit\scalability\followup\state.before.rs:1619:            .ok()
+.\audit\scalability\followup\state.before.rs:1663:        .ok()
+.\audit\scalability\followup\state.before.rs:2071:                .ok()??;
+.\audit\scalability\followup\state.before.rs:2078:    #[allow(clippy::too_many_arguments)]
+.\audit\scalability\followup\state.before.rs:3004:            .filter_map(|(chat, key)| Some((chat, key.strip_prefix("badge:")?.parse().ok()?)))
+.\audit\scalability\followup\state.before.rs:3051:        sqlx::query("SELECT 1").execute(&self.pool).await.ok()?;
+.\audit\scalability\followup\state.before.rs:3190:    #[allow(clippy::too_many_arguments)]
+.\audit\scalability\followup\state.before.rs:3263:    #[allow(clippy::too_many_arguments)]
+.\audit\scalability\followup\state.before.rs:3479:            .ok()
+.\audit\scalability\followup\state.before.rs:3595:                        let _ = self.set_value(chat, key, value).await;
+.\audit\scalability\followup\state.before.rs:3605:            let _ = std::fs::rename(path, format!("{path}.imported"));
+.\src\handlers\config.rs:36:    let value = std::env::var(name).ok()?;
+.\src\handlers\config.rs:78:            .ok()
+.\src\handlers\config.rs:81:            .unwrap_or_default();
+.\src\handlers\config.rs:136:    let _ = message.reply(card).await;
+.\src\handlers\config.rs:154:    let _ = ctx;
+.\src\handlers\config.rs:155:    let _ = message
+.\src\handlers\config.rs:185:        let _ = message
+.\src\handlers\config.rs:211:        let _ = creator;
+.\src\handlers\config.rs:222:                let _ = message
+.\src\handlers\config.rs:241:            let _ = message
+.\src\handlers\config.rs:260:        let _ = message
+.\src\handlers\config.rs:291:            let _ = message
+.\src\handlers\config.rs:299:        let _ = message
+.\src\handlers\config.rs:306:        let _ = message
+.\src\handlers\config.rs:327:    let _ = message
+.\src\handlers\config.rs:359:        // Unset is covered by `link`'s `var(...).ok()?`; empty and malformed values draw no
+.\src\miniapp\cases.rs:99:                let _ = ctx
+.\src\handlers\betrayal.rs:39:        .and_then(|value| value.parse().ok())
+.\src\handlers\betrayal.rs:125:    let _ = ctx
+.\src\miniapp\auth.rs:61:    // unsafe process-environment mutation.
+.\src\miniapp\auth.rs:112:        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+.\src\miniapp\auth.rs:159:        .and_then(|(_, v)| v.parse().ok())
+.\src\miniapp\auth.rs:174:        .and_then(|(_, v)| serde_json::from_str::<serde_json::Value>(v).ok())
+.\src\miniapp\auth.rs:267:            .and_then(|value| value.to_str().ok())
+.\src\miniapp\auth.rs:280:            .and_then(|value| value.to_str().ok())
+.\src\miniapp\auth.rs:281:            .and_then(|value| value.trim().parse::<i64>().ok());
+.\src\miniapp\auth.rs:285:                .and_then(|s| s.parse::<i64>().ok())
+.\src\miniapp\auth.rs:344:            .and_then(|value| value.to_str().ok())
+.\src\miniapp\auth.rs:351:            .and_then(|value| value.to_str().ok())
+.\src\miniapp\auth.rs:352:            .and_then(|value| value.trim().parse::<i64>().ok());
+.\src\miniapp\auth.rs:356:                .and_then(|value| value.parse().ok())
+.\src\miniapp\auth.rs:384:            .and_then(|value| value.to_str().ok())
+.\src\miniapp\auth.rs:391:            .and_then(|value| value.to_str().ok())
+.\src\miniapp\auth.rs:392:            .and_then(|value| value.trim().parse::<i64>().ok());
+.\src\miniapp\auth.rs:396:                .and_then(|value| value.parse::<i64>().ok())
+.\src\miniapp\auth.rs:433:            .and_then(|value| value.to_str().ok())
+.\src\handlers\callbacks.rs:18:            let _ = query
+.\src\handlers\callbacks.rs:39:        .and_then(|chat| chat.parse::<i64>().ok())
+.\src\handlers\callbacks.rs:89:        let _ = query
+.\src\handlers\imgfilter.rs:394:#[allow(clippy::too_many_arguments)]
+.\src\handlers\imgfilter.rs:574:            .ok()
+.\src\handlers\imgfilter.rs:620:    .ok()
+.\src\handlers\imgfilter.rs:635:            let _ = message
+.\src\handlers\imgfilter.rs:643:            let _ = message
+.\src\handlers\imgfilter.rs:651:            let _ = message
+.\src\handlers\imgfilter.rs:656:            let _ = message
+.\src\handlers\imgfilter.rs:668:        let _ = message
+.\src\handlers\imgfilter.rs:677:        let _ = message
+.\src\handlers\imgfilter.rs:683:        let _ = message
+.\src\handlers\imgfilter.rs:691:            let _ = message.reply(why).await;
+.\src\handlers\imgfilter.rs:712:            let _ = message
+.\src\handlers\imgfilter.rs:780:        let _ = message
+.\src\handlers\imgfilter.rs:801:    let _ = message
+.\src\handlers\imgfilter.rs:815:        let _ = message
+.\src\handlers\imgfilter.rs:826:    let _ = message
+.\src\handlers\imgfilter.rs:836:        let _ = message
+.\src\handlers\imgfilter.rs:848:        let _ = message
+.\src\handlers\imgfilter.rs:873:    let _ = message
+.\src\handlers\imgfilter.rs:883:        let _ = message
+.\src\handlers\imgfilter.rs:895:        let _ = message
+.\src\handlers\imgfilter.rs:920:    let _ = message
+.\src\handlers\autoconfig.rs:32:        Some(session) => session.peer(id).await.ok().flatten(),
+.\src\handlers\autoconfig.rs:90:    tokio::spawn(async move {
+.\src\handlers\autoconfig.rs:306:        .unwrap_or_default()
+.\audit\scalability\results\outbound.baseline.rs:184:        .ok()
+.\audit\scalability\results\outbound.baseline.rs:185:        .and_then(|value| value.parse::<u32>().ok())
+.\audit\scalability\results\outbound.baseline.rs:192:        .ok()
+.\audit\scalability\results\outbound.baseline.rs:193:        .and_then(|value| value.parse::<usize>().ok())
+.\src\handlers\bots.rs:49:        let _ = message
+.\src\handlers\bots.rs:58:        let _ = message
+.\src\handlers\bots.rs:75:    let _ = message
+.\src\handlers\bots.rs:167:    let _ = ctx
+.\src\handlers\bots.rs:308:        let _ = message.delete().await;
+.\src\handlers\bots.rs:549:    let _ = message
+.\src\handlers\answers.rs:125:    let _ = message
+.\src\handlers\answers.rs:161:        let _ = message
+.\src\handlers\answers.rs:175:            let _ = message
+.\src\handlers\answers.rs:183:        let _ = message
+.\src\handlers\answers.rs:203:                .unwrap_or_default(),
+.\src\handlers\answers.rs:208:                let _ = message
+.\src\handlers\answers.rs:220:                    .unwrap_or_default(),
+.\src\handlers\answers.rs:226:        let _ = message
+.\src\handlers\answers.rs:234:        let _ = message.reply("آن پیام محتوایی برای فرستادن ندارد.").await;
+.\src\handlers\answers.rs:239:        let _ = message
+.\src\handlers\answers.rs:246:        let _ = message.reply("رسانه یا متن پاسخ بیش از حد بزرگ است.").await;
+.\src\handlers\answers.rs:252:        let _ = message
+.\src\handlers\answers.rs:259:        let _ = message
+.\src\handlers\answers.rs:267:    let _ = message
+.\src\handlers\biolink.rs:103:    tokio::spawn(async move {
+.\src\handlers\emoji_image.rs:69:        .ok()?;
+.\src\handlers\extras.rs:119:    let (from, to) = (from.parse().ok()?, to.parse().ok()?);
+.\src\handlers\extras.rs:188:        let _ = match rules(ctx, chat) {
+.\src\handlers\extras.rs:220:        let _ = message
+.\src\handlers\extras.rs:250:                .ok()
+.\src\handlers\extras.rs:253:                .unwrap_or_default()
+.\src\handlers\extras.rs:258:            let _ = message
+.\src\handlers\extras.rs:264:        let _ = message
+.\src\handlers\extras.rs:288:        let _ = message
+.\src\handlers\extras.rs:315:            let _ = message.reply("روی پیام کاربر ریپلای کنید.").await;
+.\src\handlers\extras.rs:325:            let _ = message.reply("متن یادداشت را بعد از دستور بنویسید.").await;
+.\src\handlers\extras.rs:329:            let _ = match note(ctx, chat, user).await {
+.\src\handlers\extras.rs:344:        let _ = message
+.\src\handlers\extras.rs:405:        let _ = message
+.\src\handlers\extras.rs:434:        let _ = message
+.\src\handlers\extras.rs:443:        let _ = message
+.\src\handlers\extras.rs:450:    let _ = message
+.\src\handlers\extras.rs:468:        .and_then(|value| value.parse::<u32>().ok())
+.\src\handlers\extras.rs:470:    let _ = match (done, now) {
+.\src\handlers\extras.rs:498:        let _ = message.reply("روی پیام موردنظر ریپلای کنید.").await;
+.\src\handlers\extras.rs:511:    let _ = match result {
+.\src\handlers\extras.rs:628:                    let _ = ctx
+.\src\handlers\extras.rs:739:        let _ = self.finish();
+.\src\handlers\extras.rs:787:        let _ = message
+.\src\handlers\extras.rs:808:    tokio::spawn(async move {
+.\src\handlers\extras.rs:911:        let _ = ctx
+.\src\handlers\extras.rs:971:        Some((h, m)) => (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?),
+.\src\handlers\extras.rs:972:        None => (word.parse::<u32>().ok()?, 0),
+.\audit\scalability\results\locks.baseline.rs:545:        let _ = message
+.\audit\scalability\results\locks.baseline.rs:594:            let _ = message
+.\audit\scalability\results\locks.baseline.rs:637:        let _ = message
+.\audit\scalability\results\locks.baseline.rs:882:    let _ = message
+.\audit\scalability\results\locks.baseline.rs:930:        let _ = message
+.\audit\scalability\results\locks.baseline.rs:947:    let _ = message
+.\audit\scalability\results\locks.baseline.rs:989:            let _ = ctx
+.\src\handlers\flood.rs:74:        let _ = message
+.\src\handlers\flood.rs:83:    let _ = message
+.\src\handlers\flood.rs:166:        let _ = message
+.\src\handlers\install.rs:374:    let _ = ctx.client.send_message(chat_ref, body).await;
+.\src\handlers\install.rs:387:    let _ = ctx
+.\src\handlers\install.rs:429:    tokio::spawn(async move {
+.\src\handlers\install.rs:468:            let _ = ctx.client.send_message(chat_ref, body).await;
+.\src\handlers\install.rs:531:        let _ = message
+.\src\handlers\install.rs:540:        let _ = message
+.\src\handlers\install.rs:565:            let _ = message
+.\src\handlers\install.rs:576:    let _ = message
+.\src\handlers\leftback.rs:52:    let _ = ctx.settings.set_value(chat, INVITE_KEY, &link).await;
+.\src\handlers\filters.rs:116:        let _ = message
+.\src\handlers\filters.rs:136:            .ok()
+.\src\handlers\filters.rs:154:        let _ = message
+.\src\handlers\filters.rs:168:        let _ = message
+.\src\handlers\filters.rs:177:        let _ = message
+.\src\handlers\filters.rs:202:    let _ = message
+.\src\handlers\filters.rs:247:    let _ = message
+.\src\handlers\filters.rs:273:        let _ = query
+.\src\handlers\filters.rs:291:    let _ = query.answer().alert(answer).send().await;
+.\src\handlers\invite.rs:37:        .ok()?;
+.\src\handlers\invite.rs:143:        let _ = match &current {
+.\src\handlers\invite.rs:159:    let _ = match made {
+.\src\handlers\join.rs:144:    let _ = ctx.settings.set_flags(&on, GATE, true).await;
+.\src\handlers\join.rs:145:    let _ = ctx.settings.set_flags(&off, GATE, false).await;
+.\src\handlers\join.rs:159:        let _ = message
+.\src\handlers\join.rs:173:        let _ = message
+.\src\handlers\join.rs:204:            let _ = message
+.\src\handlers\join.rs:213:            let _ = message
+.\src\handlers\join.rs:229:        let _ = message
+.\src\handlers\join.rs:263:                let _ = message
+.\src\handlers\join.rs:269:        let _ = message
+.\src\handlers\join.rs:297:        let _ = match count {
+.\src\handlers\join.rs:341:        let _ = message
+.\src\handlers\join.rs:368:        let _ = message
+.\src\handlers\join.rs:377:    let _ = message
+.\src\handlers\join.rs:419:            let member = is_member(ctx, name, message.sender_ref().await.ok().flatten()).await;
+.\src\handlers\join.rs:497:    let Some(chat) = payload.parse::<i64>().ok() else {
+.\src\handlers\join.rs:510:        Some(name) => is_member(ctx, &name, query.sender_ref().await.ok().flatten()).await,
+.\src\handlers\join.rs:516:    let _ = query
+.\src\handlers\join.rs:535:    let _ = query
+.\src\handlers\join.rs:568:    let peer = ctx.client.resolve_username(name).await.ok()??;
+.\src\handlers\join.rs:569:    let peer = peer.to_ref().await.ok()??;
+.\src\miniapp\mod.rs:38:        .ok()
+.\src\miniapp\mod.rs:39:        .and_then(|value| value.parse::<usize>().ok())
+.\src\handlers\intent.rs:149:            .and_then(|path| std::fs::read_to_string(path).ok())
+.\src\handlers\intent.rs:151:            .unwrap_or_default()
+.\src\handlers\intent.rs:194:        scores.push(score.parse::<f32>().ok()?);
+.\src\handlers\intent.rs:212:        let text = std::fs::read_to_string(beside_the_binary(VOCAB_FILE)?).ok()?;
+.\src\handlers\intent.rs:347:    let ids = ort::value::Value::from_array((shape.clone(), ids)).ok()?;
+.\src\handlers\intent.rs:348:    let mask = ort::value::Value::from_array((shape, mask)).ok()?;
+.\src\handlers\intent.rs:350:        let mut session = session.lock().ok()?;
+.\src\handlers\intent.rs:351:        let output = session.run(ort::inputs![ids, mask]).ok()?;
+.\src\handlers\intent.rs:358:        let (_, score) = score.try_extract_tensor::<f32>().ok()?;
+.\src\handlers\intent.rs:359:        let (_, logits) = logits.try_extract_tensor::<f32>().ok()?;
+.\audit\scalability\results\handlers.baseline.rs:1455:                .ok()
+.\audit\scalability\results\handlers.baseline.rs:1456:                .and_then(|value| value.parse::<usize>().ok())
+.\audit\scalability\results\handlers.baseline.rs:1471:                .ok()
+.\audit\scalability\results\handlers.baseline.rs:1472:                .and_then(|value| value.parse::<usize>().ok())
+.\audit\scalability\results\handlers.baseline.rs:1595:                .ok()
+.\audit\scalability\results\handlers.baseline.rs:1596:                .and_then(|value| value.parse::<usize>().ok())
+.\audit\scalability\results\handlers.baseline.rs:1733:        .ok()
+.\audit\scalability\results\handlers.baseline.rs:1762:        let _ = self.bot_session.set(session);
+.\audit\scalability\results\handlers.baseline.rs:1786:        .ok()
+.\audit\scalability\results\handlers.baseline.rs:1838:            .unwrap_or_default()
+.\audit\scalability\results\handlers.baseline.rs:2229:            .ok()
+.\audit\scalability\results\handlers.baseline.rs:2868:            let _ = ctx.settings.set_value(chat, TITLE, title).await;
+.\audit\scalability\results\handlers.baseline.rs:2897:        tokio::spawn(async move {
+.\audit\scalability\results\handlers.baseline.rs:2925:        let _ = biolink::tripped(ctx, chat, message).await;
+.\audit\scalability\results\handlers.baseline.rs:2986:    let _ = locks::handle(ctx, message, &view).await
+.\audit\scalability\results\handlers.baseline.rs:3298:            let peer = ctx.client.resolve_username(username).await.ok()??;
+.\audit\scalability\results\handlers.baseline.rs:3300:            return Some((peer.to_ref().await.ok()??, name));
+.\audit\scalability\results\handlers.baseline.rs:3307:    let replied = message.get_reply().await.ok()??;
+.\audit\scalability\results\handlers.baseline.rs:3309:    Some((replied.sender_ref().await.ok()??, name))
+.\audit\scalability\results\handlers.baseline.rs:3339:        .map(|word| word.parse().ok())
+.\audit\scalability\results\handlers.baseline.rs:3498:            .ok()
+.\audit\scalability\results\handlers.baseline.rs:3580:    ctx.client.get_permissions(chat, sender).await.ok()
+.\audit\scalability\results\handlers.baseline.rs:3769:        let waiter = tokio::spawn(async move {
+.\audit\scalability\results\handlers.baseline.rs:3771:            let _ = ready.send(());
+.\src\handlers\imgtext.rs:192:    let (ids, bytes, eos) = read_vocab(&std::fs::read_to_string(vocab).ok()?)?;
+.\src\handlers\imgtext.rs:193:    let merges = read_merges(&std::fs::read_to_string(merges).ok()?, &ids);
+.\src\handlers\imgtext.rs:295:    let value = ort::value::Value::from_array((vec![1i64, TOKENS as i64], ids)).ok()?;
+.\src\handlers\imgtext.rs:296:    let mut session = session.lock().ok()?;
+.\src\handlers\imgtext.rs:297:    let output = session.run(ort::inputs![value]).ok()?;
+.\src\handlers\imgtext.rs:298:    let (_, values) = output[0].try_extract_tensor::<f32>().ok()?;
+.\audit\scalability\followup\handlers.before.rs:1476:                .ok()
+.\audit\scalability\followup\handlers.before.rs:1477:                .and_then(|value| value.parse::<usize>().ok())
+.\audit\scalability\followup\handlers.before.rs:1492:                .ok()
+.\audit\scalability\followup\handlers.before.rs:1493:                .and_then(|value| value.parse::<usize>().ok())
+.\audit\scalability\followup\handlers.before.rs:1616:                .ok()
+.\audit\scalability\followup\handlers.before.rs:1617:                .and_then(|value| value.parse::<usize>().ok())
+.\audit\scalability\followup\handlers.before.rs:1754:        .ok()
+.\audit\scalability\followup\handlers.before.rs:1783:        let _ = self.bot_session.set(session);
+.\audit\scalability\followup\handlers.before.rs:1807:        .ok()
+.\audit\scalability\followup\handlers.before.rs:1859:            .unwrap_or_default()
+.\audit\scalability\followup\handlers.before.rs:2250:            .ok()
+.\audit\scalability\followup\handlers.before.rs:2894:            let _ = ctx.settings.set_value(chat, TITLE, title).await;
+.\audit\scalability\followup\handlers.before.rs:2923:        tokio::spawn(async move {
+.\audit\scalability\followup\handlers.before.rs:2951:        let _ = biolink::tripped(ctx, chat, message).await;
+.\audit\scalability\followup\handlers.before.rs:3012:    let _ = locks::handle(ctx, message, &view).await
+.\audit\scalability\followup\handlers.before.rs:3340:            let peer = ctx.client.resolve_username(username).await.ok()??;
+.\audit\scalability\followup\handlers.before.rs:3342:            return Some((peer.to_ref().await.ok()??, name));
+.\audit\scalability\followup\handlers.before.rs:3349:    let replied = message.get_reply().await.ok()??;
+.\audit\scalability\followup\handlers.before.rs:3351:    Some((replied.sender_ref().await.ok()??, name))
+.\audit\scalability\followup\handlers.before.rs:3381:        .map(|word| word.parse().ok())
+.\audit\scalability\followup\handlers.before.rs:3540:            .ok()
+.\audit\scalability\followup\handlers.before.rs:3622:    ctx.client.get_permissions(chat, sender).await.ok()
+.\audit\scalability\followup\handlers.before.rs:3811:        let waiter = tokio::spawn(async move {
+.\audit\scalability\followup\handlers.before.rs:3813:            let _ = ready.send(());
+.\src\handlers\limits.rs:125:    let _ = message
+.\src\handlers\limits.rs:135:    let _ = query
+.\src\handlers\lists.rs:57:        let _ = message
+.\src\handlers\lists.rs:73:    let _ = message
+.\src\handlers\lists.rs:576:                        Some(peer) => peer.to_ref().await.ok().flatten(),
+.\src\handlers\lists.rs:616:            assert_eq!(parts.next().and_then(|p| p.parse().ok()), Some(opener));
+.\src\handlers\lists.rs:617:            assert_eq!(parts.next().and_then(|p| p.parse().ok()), Some(chat));
+.\src\handlers\log.rs:24:        Some((id, hash)) => (id.parse().ok()?, hash.parse().ok()),
+.\src\handlers\log.rs:25:        None => (stored.parse().ok()?, None),
+.\src\handlers\log.rs:278:        .unwrap_or_default()
+.\src\handlers\log.rs:293:        let _ = message
+.\src\handlers\log.rs:313:        let _ = message
+.\src\handlers\log.rs:327:        let _ = message
+.\src\handlers\log.rs:355:    let _ = match sent {
+.\src\handlers\log.rs:385:        return peer.to_ref().await.ok().flatten();
+.\src\handlers\log.rs:399:        None => PeerId::from_bot_api_dialog_id(super::digits(rest).parse().ok()?)?,
+.\src\handlers\log.rs:405:        .ok()?
+.\src\handlers\log.rs:408:        .ok()
+.\src\handlers\locks.rs:545:        let _ = message
+.\src\handlers\locks.rs:594:            let _ = message
+.\src\handlers\locks.rs:637:        let _ = message
+.\src\handlers\locks.rs:922:    let _ = message
+.\src\handlers\locks.rs:970:        let _ = message
+.\src\handlers\locks.rs:987:    let _ = message
+.\src\handlers\locks.rs:1029:            let _ = ctx
+.\src\handlers\nsfw.rs:389:        .ok()
+.\src\handlers\nsfw.rs:390:        .and_then(|value| value.parse::<usize>().ok())
+.\src\handlers\nsfw.rs:397:        .ok()
+.\src\handlers\nsfw.rs:398:        .and_then(|value| value.parse::<usize>().ok())
+.\src\handlers\nsfw.rs:436:    let mut path = std::env::current_exe().ok()?;
+.\src\handlers\nsfw.rs:444:        std::fs::write(&staging, RUNTIME).ok()?;
+.\src\handlers\nsfw.rs:445:        std::fs::rename(&staging, &path).ok()?;
+.\src\handlers\nsfw.rs:451:    let mut builder = ort::session::Session::builder().ok()?;
+.\src\handlers\nsfw.rs:452:    builder = builder.with_intra_threads(infer_threads()).ok()?;
+.\src\handlers\nsfw.rs:456:            .ok()
+.\src\handlers\nsfw.rs:457:            .and_then(|value| value.parse::<i32>().ok())
+.\src\handlers\nsfw.rs:464:            .ok()?;
+.\src\handlers\nsfw.rs:602:    let input = ort::value::Value::from_array((shape, pixels)).ok()?;
+.\src\handlers\nsfw.rs:603:    let mut session = session.lock().ok()?;
+.\src\handlers\nsfw.rs:604:    let output = session.run(ort::inputs![input]).ok()?;
+.\src\handlers\nsfw.rs:606:        let (_, values) = value.try_extract_tensor::<f32>().ok()?;
+.\src\handlers\nsfw.rs:618:    let input = ort::value::Value::from_array((shape, pixels)).ok()?;
+.\src\handlers\nsfw.rs:619:    let mut session = session.lock().ok()?;
+.\src\handlers\nsfw.rs:620:    let output = session.run(ort::inputs![input]).ok()?;
+.\src\handlers\nsfw.rs:622:    let (shape, values) = value.try_extract_tensor::<f32>().ok()?;
+.\src\handlers\nsfw.rs:653:#[allow(dead_code)]
+.\src\handlers\nsfw.rs:1197:        .ok()?
+.\src\handlers\nsfw.rs:1205:    let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
+.\src\handlers\nsfw.rs:1211:        let frame = frame.ok()?;
+.\src\handlers\nsfw.rs:1249:        .ok()?;
+.\src\handlers\nsfw.rs:1276:            let _ = child.kill().await;
+.\src\handlers\nsfw.rs:1277:            let _ = child.wait().await;
+.\src\handlers\nsfw.rs:1304:        .or_else(|| value.and_then(serde_json::Value::as_str)?.parse().ok())
+.\src\handlers\nsfw.rs:1314:    let _ = tokio::fs::remove_file(&path).await;
+.\src\handlers\nsfw.rs:1336:    let json: serde_json::Value = serde_json::from_slice(&probe.stdout).ok()?;
+.\src\handlers\nsfw.rs:1983:    tokio::spawn(async move {
+.\src\handlers\nsfw.rs:2042:        .ok()
+.\src\handlers\nsfw.rs:2055:#[allow(clippy::too_many_arguments)]
+.\src\handlers\nsfw.rs:2135:        .ok()
+.\src\handlers\nsfw.rs:2262:                        let frame = image::load_from_memory(&sharper).ok()?.to_rgb8();
+.\src\handlers\nsfw.rs:2418:                    .ok()
+.\src\handlers\nsfw.rs:2420:                    .unwrap_or_default();
+.\src\handlers\nsfw.rs:2594:#[allow(clippy::too_many_arguments)]
+.\src\handlers\nsfw.rs:2647:#[allow(clippy::too_many_arguments)]
+.\src\handlers\nsfw.rs:2923:        let _ = tokio::fs::remove_file(&path).await;
+.\src\handlers\notice.rs:19:        .and_then(|value| value.parse().ok())
+.\src\handlers\mod.rs:1582:                .ok()
+.\src\handlers\mod.rs:1583:                .and_then(|value| value.parse::<usize>().ok())
+.\src\handlers\mod.rs:1598:                .ok()
+.\src\handlers\mod.rs:1599:                .and_then(|value| value.parse::<usize>().ok())
+.\src\handlers\mod.rs:1734:                .ok()
+.\src\handlers\mod.rs:1735:                .and_then(|value| value.parse::<usize>().ok())
+.\src\handlers\mod.rs:1872:        .ok()
+.\src\handlers\mod.rs:1916:        .ok()
+.\src\handlers\mod.rs:1968:            .unwrap_or_default()
+.\src\handlers\mod.rs:2210:        self.cleaner_login.try_lock().ok()
+.\src\handlers\mod.rs:2343:            .ok()
+.\src\handlers\mod.rs:3000:            let _ = ctx.settings.set_value(chat, TITLE, title).await;
+.\src\handlers\mod.rs:3028:        tokio::spawn(async move {
+.\src\handlers\mod.rs:3056:        let _ = biolink::tripped(ctx, chat, message).await;
+.\src\handlers\mod.rs:3117:    let _ = locks::handle(ctx, message, &view).await
+.\src\handlers\mod.rs:3446:            let peer = ctx.client.resolve_username(username).await.ok()??;
+.\src\handlers\mod.rs:3448:            return Some((peer.to_ref().await.ok()??, name));
+.\src\handlers\mod.rs:3455:    let replied = message.get_reply().await.ok()??;
+.\src\handlers\mod.rs:3457:    Some((replied.sender_ref().await.ok()??, name))
+.\src\handlers\mod.rs:3487:        .map(|word| word.parse().ok())
+.\src\handlers\mod.rs:3647:        return user.to_ref().await.ok().flatten().map(|peer| (peer, name));
+.\src\handlers\mod.rs:3737:    ctx.client.get_permissions(chat, sender).await.ok()
+.\src\handlers\mod.rs:3978:        let waiter = tokio::spawn(async move {
+.\src\handlers\mod.rs:3980:            let _ = ready.send(());
+.\src\handlers\purge.rs:40:            let _ = ctx
+.\src\handlers\purge.rs:114:            let _ = marker
+.\src\handlers\purge.rs:153:    let _ = message
+.\src\handlers\purge.rs:186:        let _ = query
+.\src\handlers\purge.rs:197:        let _ = query
+.\src\handlers\purge.rs:209:    let _ = query.answer().send().await;
+.\src\handlers\purge.rs:222:        let _ = ctx
+.\src\handlers\purge.rs:248:    let _ = message
+.\src\handlers\strict.rs:202:    let _ = ctx
+.\src\handlers\promote.rs:62:        let _ = message
+.\src\handlers\promote.rs:68:        let _ = message
+.\src\handlers\promote.rs:75:        let _ = message
+.\src\handlers\promote.rs:89:    let _ =
+.\src\handlers\promote.rs:147:    let Some((peer, _)) = super::admin_ref(ctx, chat_ref, user.unwrap_or_default()).await else {
+.\src\handlers\promote.rs:202:        let _ = message
+.\src\handlers\promote.rs:232:    let _ = message
+.\src\handlers\promote.rs:309:    let _ = match outcome {
+.\src\handlers\promote.rs:346:        let _ = query
+.\src\handlers\promote.rs:357:        let _ = query
+.\src\handlers\promote.rs:371:            let _ = query
+.\src\handlers\promote.rs:384:            let Some(bit) = index.parse::<usize>().ok().and_then(|i| RIGHTS.get(i)) else {
+.\src\handlers\promote.rs:389:            let _ = query
+.\src\handlers\promote.rs:420:        let _ = query
+.\src\handlers\promote.rs:468:    let _ = query
+.\src\handlers\stats.rs:199:        let _ = message
+.\src\handlers\stats.rs:215:        let _ = message
+.\src\handlers\stats.rs:238:                .ok()
+.\src\handlers\stats.rs:253:        let _ = match at {
+.\src\handlers\stats.rs:313:        let _ = query
+.\src\handlers\stats.rs:328:        let _ = query
+.\src\handlers\stats.rs:341:    let _ = query
+.\src\handlers\stats.rs:636:        let _ = message
+.\src\handlers\stats.rs:660:        .ok()
+.\src\handlers\stats.rs:707:    let _ = message.reply(card).await;
+.\src\handlers\stats.rs:737:        let _ = message
+.\src\handlers\stats.rs:773:    let _ = message
+.\src\handlers\stats.rs:817:            let mime = doc.mime_type().unwrap_or_default();
+.\src\handlers\stats.rs:1146:            let _ = ctx
+.\src\handlers\stats.rs:1168:        let _ = at;
+.\src\handlers\premium.rs:58:                    .then(|| entry.custom_emoji_id.as_deref()?.parse().ok()).flatten()
+.\src\handlers\setting.rs:833:            let _ = ctx
+.\src\handlers\scalability_tests.rs:17:unsafe impl GlobalAlloc for Meter {
+.\src\handlers\scalability_tests.rs:18:    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+.\src\handlers\scalability_tests.rs:24:        unsafe { System.alloc(layout) }
+.\src\handlers\scalability_tests.rs:26:    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+.\src\handlers\scalability_tests.rs:29:        unsafe { System.dealloc(ptr, layout) }
+.\src\handlers\scalability_tests.rs:31:    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+.\src\handlers\scalability_tests.rs:38:        unsafe { System.realloc(ptr, layout, size) }
+.\src\handlers\scalability_tests.rs:93:                .ok()
+.\src\handlers\welcome.rs:58:        .and_then(|value| value.parse().ok())
+.\src\handlers\welcome.rs:83:        let _ = message
+.\src\handlers\welcome.rs:99:                let _ = message.reply(help()).await;
+.\src\handlers\welcome.rs:125:    let replied = message.get_reply().await.ok().flatten();
+.\src\handlers\welcome.rs:133:                replied.fmt_entities().cloned().unwrap_or_default(),
+.\src\handlers\welcome.rs:148:            .unwrap_or_default();
+.\src\handlers\welcome.rs:157:        let _ = message.reply(help()).await;
+.\src\handlers\welcome.rs:163:    let stored_media = media.as_ref().and_then(encode_media).unwrap_or_default();
+.\src\handlers\welcome.rs:185:    let _ = message
+.\src\handlers\welcome.rs:353:    let text = ctx.settings.value(chat, TEXT).unwrap_or_default();
+.\src\handlers\welcome.rs:354:    let media = ctx.settings.value(chat, MEDIA).unwrap_or_default();
+.\src\handlers\welcome.rs:363:    Vec::<tl::enums::MessageEntity>::from_bytes(&unhex(&stored)?).ok()
+.\src\handlers\welcome.rs:404:        let input = body.clone().unwrap_or_default().media(media);
+.\src\handlers\welcome.rs:457:                .unwrap_or_default(),
+.\src\handlers\welcome.rs:651:    tl::enums::InputMedia::from_bytes(&unhex(stored)?).ok()
+.\src\handlers\welcome.rs:689:                .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+.\src\handlers\rights.rs:257:        let _ = message
+.\src\handlers\rights.rs:287:        let _ = message
+.\src\handlers\rights.rs:305:    let _ = message
+.\src\handlers\warns.rs:22:        .and_then(|value| value.parse().ok())
+.\src\handlers\warns.rs:76:        let _ = message
+.\src\handlers\warns.rs:96:                    let _ = message
+.\src\handlers\warns.rs:105:            let _ = message
+.\src\handlers\warns.rs:120:                    let _ = message
+.\src\handlers\warns.rs:129:            let _ = message
+.\src\handlers\warns.rs:153:                    let _ = message
+.\src\handlers\warns.rs:203:                let _ = message
+.\src\handlers\warns.rs:238:        .ok()
+.\src\handlers\warns.rs:285:    let _ = message
+.\src\handlers\restrict.rs:358:        let _ = message
+.\src\handlers\restrict.rs:379:        .ok()
+.\src\handlers\restrict.rs:413:    let _ = match result {
+.\src\handlers\restrict.rs:847:    let amount: u64 = digits.parse().ok()?;
+.\src\handlers\restrict.rs:1013:        let _ = message
+.\src\handlers\restrict.rs:1039:        let _ = message
+.\src\handlers\restrict.rs:1045:        let _ = message
+.\src\handlers\restrict.rs:1053:        let _ = message
+.\src\handlers\restrict.rs:1061:        let _ = message
+.\src\handlers\restrict.rs:1070:        let _ = message
+.\src\handlers\restrict.rs:1082:        let _ = message
+.\src\handlers\restrict.rs:1090:    let _ = message
+.\src\handlers\restrict.rs:1105:        let _ = message.reply("بنویسید: «حذف دستور <کلمه یا عبارت>»").await;
+.\src\handlers\restrict.rs:1128:    let _ = message
+.\src\handlers\report.rs:29:    let _ = message.delete().await;
+.\src\handlers\report.rs:43:        .unwrap_or_default();
+.\src\handlers\report.rs:60:    let _ = reported
+.\src\handlers\report.rs:128:    let _ = query
+.\src\handlers\voicemonitor.rs:114:            .ok()
+.\src\handlers\voicemonitor.rs:115:            .and_then(|value| value.parse::<usize>().ok())
+.\src\handlers\voicemonitor.rs:119:            .ok()
+.\src\handlers\voicemonitor.rs:120:            .and_then(|value| value.parse::<usize>().ok())
+.\src\handlers\voicemonitor.rs:126:            tokio::spawn(worker_loop(Arc::clone(&receiver), index));
+.\src\handlers\voicemonitor.rs:181:                let _ = process.child.kill().await;
+.\src\handlers\voicemonitor.rs:185:        let _ = job.result.send(result);
+.\src\handlers\voicemonitor.rs:475:        let _ = message.reply(body).await;
+.\src\handlers\voicemonitor.rs:492:            .ok()
+.\src\handlers\voicemonitor.rs:499:        let _ = message
+.\src\handlers\voicemonitor.rs:512:                let _ = message
+.\src\handlers\voicemonitor.rs:521:                let _ = message
+.\src\handlers\voicemonitor.rs:529:                let _ = message
+.\src\handlers\voicemonitor.rs:536:        let _ = message
+.\src\handlers\voicemonitor.rs:547:        let _ = message
+.\src\handlers\voicemonitor.rs:556:        let _ = message
+.\src\handlers\voicemonitor.rs:588:    let _ = message
+.\src\handlers\voicemonitor.rs:649:    tokio::spawn(async move {
+.\src\handlers\voicemonitor.rs:748:        let _ = query
+.\src\handlers\voicemonitor.rs:762:        let _ = query
+.\src\handlers\voicemonitor.rs:773:    let is_admin = match ctx.chat_ref(chat).or(query.peer_ref().await.ok().flatten()) {
+.\src\handlers\voicemonitor.rs:778:        let _ = query
+.\src\handlers\voicemonitor.rs:797:    let _ = query.answer().alert(answer).send().await;
+.\src\handlers\voicemonitor.rs:809:    let _ = tokio::fs::remove_file(path).await;
+.\src\handlers\raid.rs:207:    let _ = ctx
+.\src\handlers\vision.rs:118:    let mut path = std::env::current_exe().ok()?;
+.\src\handlers\vision.rs:130:    let session = session.lock().ok()?;
+.\src\handlers\nsfw_head_vectors.rs:11:#![allow(clippy::unreadable_literal, clippy::excessive_precision)]
+.\src\handlers\packs.rs:64:        .ok()
+.\src\handlers\packs.rs:76:        let _ = message
+.\src\handlers\packs.rs:92:        let _ = message
+.\src\handlers\packs.rs:100:        let _ = message
+.\src\handlers\packs.rs:134:        .ok()?;
+.\src\handlers\vip.rs:36:        let _ = message
+.\src\handlers\vip.rs:45:        let _ = message
+.\src\handlers\vip.rs:62:    let _ = message
+.\src\handlers\pinlock.rs:19:        let _ = message
+.\src\handlers\pinlock.rs:34:        let _ = message
+.\src\handlers\pinlock.rs:49:            .ok()
+.\src\handlers\pinlock.rs:54:        let _ = message
+.\src\handlers\pinlock.rs:62:        let _ = message
+.\src\handlers\pinlock.rs:72:    let _ = message
+.\src\handlers\pinlock.rs:162:    let _ = ctx
+.\src\handlers\premium\telegram.rs:72:    let _ = RENDERER.set(renderer);
+.\src\handlers\premium\telegram.rs:109:                    let start = usize::try_from(link.offset).ok()?;
+.\src\handlers\premium\telegram.rs:110:                    let end = start.checked_add(usize::try_from(link.length).ok()?)?;
+.\src\handlers\sudo.rs:61:    let _ = message
+.\src\handlers\sudo.rs:81:        let _ = query.answer().send().await;
+.\src\handlers\sudo.rs:85:    let _ = query
+.\src\handlers\ping.rs:27:    let _ = sent
+.\src\handlers\tune.rs:50:        let _ = message.reply(usage(what)).await;
+.\src\handlers\tune.rs:101:    let _ = message
+.\src\handlers\toggles.rs:51:        let _ = message
+.\src\handlers\toggles.rs:59:    let _ = message
+.\src\handlers\toggles.rs:78:        let _ = query
+.\src\handlers\toggles.rs:97:    let _ = query
+.\src\handlers\panel.rs:71:    let _ = match sent {
+.\src\handlers\panel.rs:125:        let _ = message
+.\src\handlers\panel.rs:145:    let _ = message
+.\src\handlers\panel.rs:180:    let _ = message
+.\src\handlers\panel.rs:202:    let _ = message
+.\src\handlers\panel.rs:270:    let _ = message
+.\src\handlers\panel.rs:292:    text.parse().ok()
+.\src\handlers\panel.rs:375:    let peer = query.peer_ref().await.ok().flatten().or_else(|| {
+.\src\handlers\panel.rs:451:        let _ = query
+.\src\handlers\panel.rs:578:        let _ = query
+.\src\handlers\panel.rs:597:        let _ = query
+.\src\handlers\panel.rs:614:        let _ = query
+.\src\handlers\panel.rs:663:            let _ = imgfilter::toggle_live(ctx, chat, &picked["imf:".len()..]).await;
+.\src\handlers\panel.rs:778:                let _ = query
+.\src\handlers\panel.rs:831:            let _ = query.answer().send().await;
+.\src\handlers\panel.rs:833:                let _ = ctx
+.\src\handlers\panel.rs:984:    let link = std::env::var("MINIAPP_LINK").ok()?;
+.\src\handlers\panel.rs:1373:        .and_then(|value| value.parse::<u32>().ok())
+.\src\handlers\panel.rs:1391:        .and_then(|value| value.parse::<u32>().ok())
+.\src\handlers\panel.rs:1413:    let text = ctx.settings.value(chat, welcome::TEXT).unwrap_or_default();
+.\src\handlers\panel.rs:1925:            .unwrap_or_default(),
+.\src\handlers\panel.rs:1961:            .unwrap_or_default(),
+.\src\handlers\panel.rs:1979:            .unwrap_or_default(),
+.\src\handlers\panel.rs:1983:            .unwrap_or_default(),
+.\src\handlers\trade.rs:777:    tokio::spawn(async move {
+.\src\handlers\trade.rs:785:                    .ok()
+.\src\handlers\trade.rs:813:        .ok()
+.\src\handlers\trade.rs:862:#[allow(clippy::too_many_arguments)]
+.\src\handlers\trade.rs:898:#[allow(clippy::too_many_arguments)]
+.\src\handlers\trade.rs:933:#[allow(clippy::too_many_arguments)]

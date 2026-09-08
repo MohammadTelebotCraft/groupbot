@@ -13,6 +13,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::response::ResponseKind;
+
 use super::locks::View;
 use super::{Ctx, locks, notice, stats};
 
@@ -37,6 +39,7 @@ const WINDOW_SECONDS: f64 = 20.0;
 const FULL_SCAN_SECONDS: f64 = 90.0;
 const MAX_WINDOWS: usize = 6;
 const JOB_TIMEOUT: Duration = Duration::from_secs(240);
+const CONFIG_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_TRANSCRIPT_TEXT_CHARS: usize = 4_096;
 const CALLBACK_TEXT_CHARS: usize = 180;
 const DEFAULT_WORKERS: usize = 4;
@@ -71,6 +74,300 @@ pub(crate) struct Transcript {
     pub(crate) confidence: Option<f32>,
 }
 
+#[derive(Clone)]
+pub(super) struct VoiceConfig {
+    backend: VoiceBackend,
+    whisper_device: VoiceDevice,
+    whisper_compute_type: String,
+    whisper_model: String,
+    whisper_beam_size: usize,
+    whisper_window_workers: usize,
+    workers: usize,
+    queue_capacity: usize,
+    python: PathBuf,
+    script: PathBuf,
+}
+
+impl VoiceConfig {
+    pub(super) fn from_environment() -> Result<Self, String> {
+        let backend = match std::env::var("VOICE_BACKEND") {
+            Ok(value) => parse_backend(&value)?,
+            Err(std::env::VarError::NotPresent) => VoiceBackend::Google,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err("VOICE_BACKEND is not valid Unicode".to_owned());
+            }
+        };
+        let (default_workers, max_workers) = match backend {
+            VoiceBackend::Google => (DEFAULT_WORKERS, MAX_WORKERS),
+            VoiceBackend::Whisper | VoiceBackend::FasterWhisper => {
+                (DEFAULT_WHISPER_WORKERS, MAX_WHISPER_WORKERS)
+            }
+        };
+
+        let whisper_device = match std::env::var("VOICE_WHISPER_DEVICE") {
+            Ok(value) => parse_device(&value)?,
+            Err(std::env::VarError::NotPresent) => VoiceDevice::Cpu,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err("VOICE_WHISPER_DEVICE is not valid Unicode".to_owned());
+            }
+        };
+        let default_compute_type = match whisper_device {
+            VoiceDevice::Cuda => "float16",
+            VoiceDevice::Cpu | VoiceDevice::Auto => "int8",
+        };
+        let whisper_compute_type =
+            configured_text("VOICE_WHISPER_COMPUTE_TYPE", default_compute_type)?;
+        const COMPUTE_TYPES: &[&str] = &[
+            "default",
+            "auto",
+            "int8",
+            "int8_float32",
+            "int8_float16",
+            "int8_bfloat16",
+            "int16",
+            "float16",
+            "bfloat16",
+            "float32",
+        ];
+        if !COMPUTE_TYPES.contains(&whisper_compute_type.as_str()) {
+            return Err(format!(
+                "VOICE_WHISPER_COMPUTE_TYPE must be a CTranslate2 compute type, got {whisper_compute_type:?}"
+            ));
+        }
+        let whisper_model = configured_text("VOICE_WHISPER_MODEL", "large-v3")?;
+
+        let whisper_window_workers = super::configured_usize(
+            "VOICE_WHISPER_WINDOW_WORKERS",
+            DEFAULT_WHISPER_WORKERS,
+            1,
+            MAX_WINDOWS,
+        )?;
+
+        let python = configured_path("VOICE_PYTHON")?.unwrap_or_else(|| {
+            let bundled = Path::new(".venv-voice/bin/python");
+            if bundled.exists() {
+                bundled.to_owned()
+            } else {
+                PathBuf::from("python3")
+            }
+        });
+        let script = match configured_path("VOICE_MONITOR_SCRIPT")? {
+            Some(script) => script,
+            None => default_script_path()?,
+        };
+        if !script.is_file() {
+            return Err(format!(
+                "VOICE_MONITOR_SCRIPT does not point to a file: {}",
+                script.display()
+            ));
+        }
+
+        Ok(Self {
+            backend,
+            whisper_device,
+            whisper_compute_type,
+            whisper_model,
+            whisper_beam_size: super::configured_usize("VOICE_WHISPER_BEAM_SIZE", 5, 1, 64)?,
+            whisper_window_workers,
+            workers: super::configured_usize("VOICE_WORKERS", default_workers, 1, max_workers)?,
+            queue_capacity: super::configured_usize(
+                "VOICE_QUEUE",
+                DEFAULT_QUEUE_CAPACITY,
+                1,
+                MAX_QUEUE_CAPACITY,
+            )?,
+            python,
+            script,
+        })
+    }
+
+    pub(super) async fn validate(&self) -> Result<(), String> {
+        let mut command = self.command();
+        command
+            .arg("--check-config")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = command.spawn().map_err(|error| {
+            format!(
+                "VOICE_PYTHON {:?} could not start {:?}: {error}",
+                self.python, self.script
+            )
+        })?;
+        let status = match tokio::time::timeout(CONFIG_CHECK_TIMEOUT, child.wait()).await {
+            Ok(status) => status.map_err(|error| {
+                format!(
+                    "voice configuration probe {:?} failed: {error}",
+                    self.script
+                )
+            })?,
+            Err(_) => {
+                if let Err(error) = child.kill().await {
+                    return Err(format!(
+                        "voice configuration probe timed out after {} seconds and could not be stopped: {error}",
+                        CONFIG_CHECK_TIMEOUT.as_secs()
+                    ));
+                }
+                return Err(format!(
+                    "voice configuration probe timed out after {} seconds",
+                    CONFIG_CHECK_TIMEOUT.as_secs()
+                ));
+            }
+        };
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "voice configuration probe {:?} returned unsuccessful status {status}",
+                self.script
+            ))
+        }
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.python);
+        command
+            .arg(&self.script)
+            .env("VOICE_BACKEND", self.backend.as_str())
+            .env("VOICE_WHISPER_DEVICE", self.whisper_device.as_str())
+            .env("VOICE_WHISPER_COMPUTE_TYPE", &self.whisper_compute_type)
+            .env("VOICE_WHISPER_MODEL", &self.whisper_model)
+            .env(
+                "VOICE_WHISPER_BEAM_SIZE",
+                self.whisper_beam_size.to_string(),
+            )
+            .env(
+                "VOICE_WHISPER_WINDOW_WORKERS",
+                self.whisper_window_workers.to_string(),
+            )
+            .kill_on_drop(true);
+        command
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test() -> Self {
+        Self {
+            backend: VoiceBackend::Google,
+            whisper_device: VoiceDevice::Cpu,
+            whisper_compute_type: "int8".to_owned(),
+            whisper_model: "large-v3".to_owned(),
+            whisper_beam_size: 5,
+            whisper_window_workers: DEFAULT_WHISPER_WORKERS,
+            workers: 1,
+            queue_capacity: 1,
+            python: PathBuf::from("python3"),
+            script: PathBuf::from("voice_monitor.py"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VoiceBackend {
+    Google,
+    Whisper,
+    FasterWhisper,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VoiceDevice {
+    Cpu,
+    Cuda,
+    Auto,
+}
+
+impl VoiceDevice {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+impl VoiceBackend {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::Whisper => "whisper",
+            Self::FasterWhisper => "faster-whisper",
+        }
+    }
+}
+
+fn parse_backend(value: &str) -> Result<VoiceBackend, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "google" => Ok(VoiceBackend::Google),
+        "whisper" => Ok(VoiceBackend::Whisper),
+        "faster-whisper" => Ok(VoiceBackend::FasterWhisper),
+        _ => Err(format!(
+            "VOICE_BACKEND must be google, whisper, or faster-whisper, got {value:?}"
+        )),
+    }
+}
+
+fn parse_device(value: &str) -> Result<VoiceDevice, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "cpu" => Ok(VoiceDevice::Cpu),
+        "cuda" => Ok(VoiceDevice::Cuda),
+        "auto" => Ok(VoiceDevice::Auto),
+        _ => Err(format!(
+            "VOICE_WHISPER_DEVICE must be cpu, cuda, or auto, got {value:?}"
+        )),
+    }
+}
+
+fn configured_text(name: &str, default: &str) -> Result<String, String> {
+    match std::env::var(name) {
+        Ok(value) => parse_configured_text(name, &value),
+        Err(std::env::VarError::NotPresent) => Ok(default.to_owned()),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid Unicode")),
+    }
+}
+
+fn parse_configured_text(name: &str, value: &str) -> Result<String, String> {
+    if !value.is_empty() && value == value.trim() {
+        Ok(value.to_owned())
+    } else {
+        Err(format!(
+            "{name} must be nonempty and have no leading or trailing whitespace, got {value:?}"
+        ))
+    }
+}
+
+fn configured_path(name: &str) -> Result<Option<PathBuf>, String> {
+    match std::env::var_os(name) {
+        None => Ok(None),
+        Some(value) if value.is_empty() => Err(format!("{name} must not be empty")),
+        Some(value) => Ok(Some(PathBuf::from(value))),
+    }
+}
+
+fn default_script_path() -> Result<PathBuf, String> {
+    let working = PathBuf::from("voice_monitor.py");
+    if working.is_file() {
+        return Ok(working);
+    }
+    let executable = std::env::current_exe().map_err(|error| {
+        format!("could not locate the executable for voice_monitor.py: {error}")
+    })?;
+    let sibling = executable.with_file_name("voice_monitor.py");
+    if sibling.is_file() {
+        return Ok(sibling);
+    }
+    if let Some(repository) = executable
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+    {
+        let repository = repository.join("voice_monitor.py");
+        if repository.is_file() {
+            return Ok(repository);
+        }
+    }
+    Err("voice_monitor.py was not found in the working directory, beside the executable, or at the repository root; set VOICE_MONITOR_SCRIPT".to_owned())
+}
+
 struct VoiceJob {
     input: PathBuf,
     duration: f64,
@@ -85,47 +382,30 @@ struct WorkerProcess {
 
 pub struct VoicePool {
     sender: mpsc::Sender<VoiceJob>,
+    workers: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl VoicePool {
-    pub fn new() -> Self {
-        let local_whisper = std::env::var("VOICE_BACKEND")
-            .map(|value| {
-                matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "whisper" | "faster-whisper"
-                )
-            })
-            .unwrap_or(false);
-        let default_workers = if local_whisper {
-            DEFAULT_WHISPER_WORKERS
-        } else {
-            DEFAULT_WORKERS
-        };
-        let max_workers = if local_whisper {
-            MAX_WHISPER_WORKERS
-        } else {
-            MAX_WORKERS
-        };
-        let workers = std::env::var("VOICE_WORKERS")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(default_workers)
-            .clamp(1, max_workers);
-        let queue = std::env::var("VOICE_QUEUE")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_QUEUE_CAPACITY)
-            .clamp(1, MAX_QUEUE_CAPACITY);
-        let (sender, receiver) = mpsc::channel(queue);
+    pub(super) fn new(config: VoiceConfig) -> Self {
+        let (sender, receiver) = mpsc::channel(config.queue_capacity);
         let receiver = Arc::new(tokio::sync::Mutex::new(receiver));
-        for index in 0..workers {
-            tokio::spawn(worker_loop(Arc::clone(&receiver), index));
+        let config = Arc::new(config);
+        let workers = (0..config.workers)
+            .map(|index| {
+                tokio::spawn(worker_loop(
+                    Arc::clone(&receiver),
+                    index,
+                    Arc::clone(&config),
+                ))
+            })
+            .collect();
+        Self {
+            sender,
+            workers: std::sync::Mutex::new(workers),
         }
-        Self { sender }
     }
 
-    pub async fn recognize(
+    pub(super) async fn recognize(
         &self,
         input: PathBuf,
         duration: f64,
@@ -143,13 +423,54 @@ impl VoicePool {
             .await
             .map_err(|_| "voice recognizer worker stopped".to_owned())?
     }
+
+    pub async fn shutdown(&self) {
+        let workers = {
+            let mut workers = self
+                .workers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *workers)
+        };
+        for worker in &workers {
+            worker.abort();
+        }
+        for worker in workers {
+            if let Err(error) = worker.await
+                && !error.is_cancelled()
+            {
+                log::error!("voice recognizer worker failed: {error}");
+            }
+        }
+    }
 }
 
-async fn worker_loop(receiver: Arc<tokio::sync::Mutex<mpsc::Receiver<VoiceJob>>>, index: usize) {
+impl Drop for VoicePool {
+    fn drop(&mut self) {
+        let workers = self
+            .workers
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for worker in workers.drain(..) {
+            worker.abort();
+        }
+    }
+}
+
+async fn worker_loop(
+    receiver: Arc<tokio::sync::Mutex<mpsc::Receiver<VoiceJob>>>,
+    index: usize,
+    config: Arc<VoiceConfig>,
+) {
     let mut process: Option<WorkerProcess> = None;
-    while let Some(job) = receiver.lock().await.recv().await {
+    loop {
+        let job = { receiver.lock().await.recv().await };
+        let Some(job) = job else { break };
+        if job.result.is_closed() {
+            continue;
+        }
         if process.is_none() {
-            process = match start_worker(index) {
+            process = match start_worker(index, &config) {
                 Ok(process) => Some(process),
                 Err(error) => {
                     eprintln!("voice monitor: worker {index} could not start: {error}");
@@ -159,7 +480,11 @@ async fn worker_loop(receiver: Arc<tokio::sync::Mutex<mpsc::Receiver<VoiceJob>>>
         }
 
         let result = match process.as_mut() {
-            Some(process) => process.request(&job.input, job.duration).await,
+            Some(process) => {
+                tokio::time::timeout(JOB_TIMEOUT, process.request(&job.input, job.duration))
+                    .await
+                    .unwrap_or_else(|_| Err("voice recognizer worker timed out".to_owned()))
+            }
             None => Err("voice recognizer process unavailable".to_owned()),
         };
         if result.is_err() {
@@ -172,19 +497,9 @@ async fn worker_loop(receiver: Arc<tokio::sync::Mutex<mpsc::Receiver<VoiceJob>>>
     }
 }
 
-fn start_worker(index: usize) -> Result<WorkerProcess, String> {
-    let python = std::env::var("VOICE_PYTHON").unwrap_or_else(|_| {
-        let bundled = Path::new(".venv-voice/bin/python");
-        if bundled.exists() {
-            bundled.to_string_lossy().into_owned()
-        } else {
-            "python3".to_owned()
-        }
-    });
-    let script =
-        std::env::var("VOICE_MONITOR_SCRIPT").unwrap_or_else(|_| "voice_monitor.py".to_owned());
-    let mut child = Command::new(python)
-        .arg(script)
+fn start_worker(index: usize, config: &VoiceConfig) -> Result<WorkerProcess, String> {
+    let mut child = config
+        .command()
         .arg("--worker")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -244,6 +559,42 @@ impl WorkerProcess {
             return Err(error.to_owned());
         }
         serde_json::from_value(value).map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::{VoiceBackend, VoiceDevice, parse_backend, parse_configured_text, parse_device};
+
+    #[test]
+    fn voice_backend_is_closed_and_case_insensitive() {
+        assert_eq!(parse_backend("google").unwrap(), VoiceBackend::Google);
+        assert_eq!(parse_backend(" WHISPER ").unwrap(), VoiceBackend::Whisper);
+        assert_eq!(
+            parse_backend("Faster-Whisper").unwrap(),
+            VoiceBackend::FasterWhisper
+        );
+        assert!(parse_backend("").is_err());
+        assert!(parse_backend("fallback").is_err());
+    }
+
+    #[test]
+    fn whisper_device_is_closed_and_case_insensitive() {
+        assert_eq!(parse_device("cpu").unwrap(), VoiceDevice::Cpu);
+        assert_eq!(parse_device(" CUDA ").unwrap(), VoiceDevice::Cuda);
+        assert_eq!(parse_device("Auto").unwrap(), VoiceDevice::Auto);
+        assert!(parse_device("metal").is_err());
+    }
+
+    #[test]
+    fn configured_text_rejects_ambiguous_empty_or_padded_values() {
+        assert_eq!(
+            parse_configured_text("VOICE_WHISPER_MODEL", "large-v3").unwrap(),
+            "large-v3"
+        );
+        assert!(parse_configured_text("VOICE_WHISPER_MODEL", "").is_err());
+        assert!(parse_configured_text("VOICE_WHISPER_MODEL", " large-v3").is_err());
+        assert!(parse_configured_text("VOICE_WHISPER_MODEL", "large-v3 ").is_err());
     }
 }
 
@@ -315,56 +666,91 @@ pub fn words_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             })
             .collect::<Vec<_>>(),
     );
-
     rows.push(super::panel::back_row(opener, chat, "sec", "vw"));
-    ReplyMarkup::from_buttons(&rows)
+    super::premium::buttons(&rows)
 }
 
-pub async fn remove_word(ctx: &Ctx, chat: i64, id: &str) {
+pub async fn remove_word(
+    ctx: &Ctx,
+    chat: i64,
+    id: &str,
+) -> Result<bool, crate::state::SettingsWriteError> {
     if let Some(word) = words(ctx, chat)
         .into_iter()
         .find(|word| super::lists::word_id(word) == id)
     {
         if is_default_word(&word).is_some() {
-            ctx.settings
-                .set(chat, &format!("{WORDS_PREFIX}{word}"), false)
-                .await;
-            ctx.settings
-                .set(chat, &format!("{DISABLED_DEFAULT_PREFIX}{word}"), true)
-                .await;
+            let custom = format!("{WORDS_PREFIX}{word}");
+            let disabled = format!("{DISABLED_DEFAULT_PREFIX}{word}");
+            return ctx
+                .settings
+                .try_apply_batch(
+                    chat,
+                    &[
+                        crate::state::SettingMutation::Delete { key: &custom },
+                        crate::state::SettingMutation::Put {
+                            key: &disabled,
+                            value: "",
+                        },
+                    ],
+                )
+                .await
+                .map(|changed| changed != 0);
         } else {
-            ctx.settings
-                .set(chat, &format!("{WORDS_PREFIX}{word}"), false)
+            return ctx
+                .settings
+                .try_set(chat, &format!("{WORDS_PREFIX}{word}"), false)
                 .await;
         }
     }
+    Ok(false)
 }
 
-pub async fn restore_word(ctx: &Ctx, chat: i64, id: &str) {
+pub async fn restore_word(
+    ctx: &Ctx,
+    chat: i64,
+    id: &str,
+) -> Result<bool, crate::state::SettingsWriteError> {
     if let Some(word) = disabled_default_words(ctx, chat)
         .into_iter()
         .find(|word| super::lists::word_id(word) == id)
     {
-        ctx.settings
-            .set(chat, &format!("{DISABLED_DEFAULT_PREFIX}{word}"), false)
+        return ctx
+            .settings
+            .try_set(chat, &format!("{DISABLED_DEFAULT_PREFIX}{word}"), false)
             .await;
     }
+    Ok(false)
 }
 
-pub async fn restore_all_defaults(ctx: &Ctx, chat: i64) -> usize {
+pub async fn restore_all_defaults(
+    ctx: &Ctx,
+    chat: i64,
+) -> Result<usize, crate::state::SettingsWriteError> {
     let disabled = disabled_default_words(ctx, chat);
-    for word in &disabled {
-        ctx.settings
-            .set(chat, &format!("{DISABLED_DEFAULT_PREFIX}{word}"), false)
-            .await;
-    }
-    disabled.len()
+    let keys: Vec<String> = disabled
+        .iter()
+        .map(|word| format!("{DISABLED_DEFAULT_PREFIX}{word}"))
+        .collect();
+    let mutations: Vec<_> = keys
+        .iter()
+        .map(|key| crate::state::SettingMutation::Delete { key })
+        .collect();
+    ctx.settings.try_apply_batch(chat, &mutations).await?;
+    Ok(disabled.len())
 }
 
 pub enum AddWordError {
     Empty,
     TooLong,
     Full,
+    Settings(crate::state::SettingsWriteError),
+}
+
+impl From<crate::state::SettingsWriteError> for AddWordError {
+    fn from(error: crate::state::SettingsWriteError) -> Self {
+        Self::Settings(error)
+    }
 }
 
 pub async fn add_word(ctx: &Ctx, chat: i64, raw: &str) -> Result<bool, AddWordError> {
@@ -383,20 +769,23 @@ pub async fn add_word(ctx: &Ctx, chat: i64, raw: &str) -> Result<bool, AddWordEr
     }
     let changed = match builtin {
         Some(word) => {
-            let a = ctx
-                .settings
-                .set(chat, &format!("{WORDS_PREFIX}{word}"), false)
-                .await;
-            let b = ctx
-                .settings
-                .set(chat, &format!("{DISABLED_DEFAULT_PREFIX}{word}"), false)
-                .await;
-            a || b
+            let custom = format!("{WORDS_PREFIX}{word}");
+            let disabled = format!("{DISABLED_DEFAULT_PREFIX}{word}");
+            ctx.settings
+                .try_apply_batch(
+                    chat,
+                    &[
+                        crate::state::SettingMutation::Delete { key: &custom },
+                        crate::state::SettingMutation::Delete { key: &disabled },
+                    ],
+                )
+                .await?
+                != 0
         }
         None => {
             ctx.settings
-                .set(chat, &format!("{WORDS_PREFIX}{word}"), true)
-                .await
+                .try_set(chat, &format!("{WORDS_PREFIX}{word}"), true)
+                .await?
         }
     };
     Ok(changed)
@@ -447,7 +836,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
                 tail
             )
         };
-        let _ = message.reply(body).await;
+        super::respond(ctx, message, ResponseKind::AntiSpamControl, body).await;
         return true;
     }
 
@@ -471,11 +860,13 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         Some(inline.to_owned())
     };
     let Some(asked) = asked.filter(|word| !word.is_empty()) else {
-        let _ = message
-            .reply(format!(
-                "کلمه را بعد از «{command}» بنویسید یا روی پیام آن ریپلای کنید."
-            ))
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            format!("کلمه را بعد از «{command}» بنویسید یا روی پیام آن ریپلای کنید."),
+        )
+        .await;
         return true;
     };
 
@@ -484,59 +875,138 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             Ok(true) => ("✓", "به فیلتر ویس اضافه شد".to_owned()),
             Ok(false) => ("✓", "از قبل در فیلتر ویس بود".to_owned()),
             Err(AddWordError::Empty) => {
-                let _ = message.reply("این کلمه قابل استفاده نیست.").await;
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    super::premium::icon_text(
+                        Some(super::premium::Icon::ErrorRed),
+                        "این کلمه قابل استفاده نیست.",
+                    ),
+                )
+                .await;
                 return true;
             }
             Err(AddWordError::TooLong) => {
-                let _ = message
-                    .reply(format!(
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    super::premium::icon_text(Some(super::premium::Icon::ErrorRed), format!(
                         "این کلمه پذیرفته نمی شود: حداکثر {MAX_WORD_CHARS} نویسه و بدون «=» باشد."
-                    ))
-                    .await;
+                    )),
+                )
+                .await;
                 return true;
             }
             Err(AddWordError::Full) => {
-                let _ = message
-                    .reply(format!("لیست کلمات سفارشی ویس پر است ({MAX_WORDS} کلمه)."))
-                    .await;
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::AntiSpamControl,
+                    format!("لیست کلمات سفارشی ویس پر است ({MAX_WORDS} کلمه)."),
+                )
+                .await;
+                return true;
+            }
+            Err(AddWordError::Settings(error)) => {
+                ::log::warn!("voice filter: add for {chat} failed: {error}");
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    if error.commit_outcome_unknown() {
+                        "نتیجه ذخیره کلمه نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                    } else {
+                        "کلمه ذخیره نشد؛ دوباره تلاش کنید."
+                    },
+                )
+                .await;
                 return true;
             }
         };
         let word = normalize(&asked);
-        let _ = message.reply(format!("{mark} «{word}» {result}.")).await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::AntiSpamControl,
+            super::premium::icon_text(
+                Some(super::premium::Icon::Voice),
+                format!("{mark} «{word}» {result}."),
+            ),
+        )
+        .await;
         return true;
     }
 
     let word = normalize(&asked);
     if word.is_empty() {
-        let _ = message.reply("این کلمه قابل استفاده نیست.").await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "این کلمه قابل استفاده نیست.",
+            ),
+        )
+        .await;
         return true;
     }
     if word.chars().count() > MAX_WORD_CHARS || word.contains('=') {
-        let _ = message
-            .reply(format!(
-                "این کلمه پذیرفته نمی شود: حداکثر {MAX_WORD_CHARS} نویسه و بدون «=» باشد."
-            ))
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                format!("این کلمه پذیرفته نمی شود: حداکثر {MAX_WORD_CHARS} نویسه و بدون «=» باشد."),
+            ),
+        )
+        .await;
         return true;
     }
     let builtin = is_default_word(&word);
     let changed = match builtin {
         Some(word) => {
-            let custom_removed = ctx
-                .settings
-                .set(chat, &format!("{WORDS_PREFIX}{word}"), false)
-                .await;
-            let disabled = ctx
-                .settings
-                .set(chat, &format!("{DISABLED_DEFAULT_PREFIX}{word}"), true)
-                .await;
-            custom_removed || disabled
+            let custom = format!("{WORDS_PREFIX}{word}");
+            let disabled = format!("{DISABLED_DEFAULT_PREFIX}{word}");
+            ctx.settings
+                .try_apply_batch(
+                    chat,
+                    &[
+                        crate::state::SettingMutation::Delete { key: &custom },
+                        crate::state::SettingMutation::Put {
+                            key: &disabled,
+                            value: "",
+                        },
+                    ],
+                )
+                .await
+                .map(|changed| changed != 0)
         }
         None => {
             ctx.settings
-                .set(chat, &format!("{WORDS_PREFIX}{word}"), false)
+                .try_set(chat, &format!("{WORDS_PREFIX}{word}"), false)
                 .await
+        }
+    };
+    let changed = match changed {
+        Ok(changed) => changed,
+        Err(error) => {
+            ::log::warn!("voice filter: remove for {chat} failed: {error}");
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                if error.commit_outcome_unknown() {
+                    "نتیجه حذف کلمه نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                } else {
+                    "کلمه حذف نشد؛ دوباره تلاش کنید."
+                },
+            )
+            .await;
+            return true;
         }
     };
     let (mark, result) = if changed {
@@ -544,7 +1014,16 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     } else {
         ("✗", "در فیلتر ویس نبود")
     };
-    let _ = message.reply(format!("{mark} «{word}» {result}.")).await;
+    super::respond(
+        ctx,
+        message,
+        ResponseKind::AntiSpamControl,
+        super::premium::icon_text(
+            Some(super::premium::Icon::Voice),
+            format!("{mark} «{word}» {result}."),
+        ),
+    )
+    .await;
     true
 }
 
@@ -596,9 +1075,8 @@ pub async fn watch(ctx: &Arc<Ctx>, message: &Message, chat: i64, view: &View<'_>
     let ctx = Arc::clone(ctx);
     let message = message.clone();
     let document = document.clone();
-
     let job = ctx.voice_job_slot().await;
-    tokio::spawn(async move {
+    Arc::clone(&ctx).spawn_owned(async move {
         let _job = job;
         analyze(
             ctx,
@@ -665,21 +1143,26 @@ async fn analyze(
 }
 
 async fn moderate(ctx: &Arc<Ctx>, message: &Message, chat: i64, transcript: Option<&str>) {
-    if let Err(error) = message.delete().await {
+    if let Err(error) = message.delete_critical().await {
         eprintln!("voice monitor: could not delete in {chat}: {error}");
         return;
     }
     ctx.bump(chat, stats::DELETED);
 
     let chances = match super::strict::punish(ctx, message, chat, MODE).await {
-        super::strict::Outcome::Announced => return,
+        super::strict::Outcome::Announced => {
+            let action = super::cases::action_key(super::strict::action_of(ctx, chat));
+            super::cases::record_delete(ctx, message, MODE, "واژه نامناسب در ویس", action).await;
+            return;
+        }
         super::strict::Outcome::Chances(left) => Some(left),
         super::strict::Outcome::Nothing => None,
     };
+    super::cases::record_delete(ctx, message, MODE, "واژه نامناسب در ویس", "delete").await;
     let markup = transcript.filter(|text| !text.is_empty()).map(|text| {
         let speaker = message.sender_id().and_then(PeerId::bare_id);
         let key = ctx.remember_filtered_voice(chat, speaker, text.to_owned());
-        ReplyMarkup::from_buttons(&[vec![Button::data(
+        super::premium::buttons(&[vec![Button::data(
             "متن تشخیص داده شده ویس",
             format!("v:{key}").into_bytes(),
         )]])
@@ -692,7 +1175,14 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, chat: 
         return;
     };
     let Some((stored_chat, speaker, text)) = ctx.filtered_voice(key) else {
-        let _ = query.answer().alert("متن ویس منقضی شده است.").send().await;
+        let _ = query
+            .answer()
+            .alert(super::premium::plain_label(
+                Some(super::premium::Icon::Timer),
+                "متن ویس منقضی شده است.",
+            ))
+            .send()
+            .await;
         return;
     };
     let Some(presser) = query.sender_id().bare_id() else {
@@ -701,7 +1191,10 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, chat: 
     if stored_chat != chat {
         let _ = query
             .answer()
-            .alert("این دکمه برای این گروه نیست.")
+            .alert(super::premium::plain_label(
+                Some(super::premium::Icon::Locked),
+                "این دکمه برای این گروه نیست.",
+            ))
             .send()
             .await;
         return;
@@ -714,7 +1207,10 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, chat: 
     if speaker != Some(presser) && !is_admin {
         let _ = query
             .answer()
-            .alert("این دکمه برای فرستنده ویس و ادمین ها است.")
+            .alert(super::premium::plain_label(
+                Some(super::premium::Icon::Locked),
+                "این دکمه برای فرستنده ویس و ادمین ها است.",
+            ))
             .send()
             .await;
         return;

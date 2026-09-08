@@ -1,3 +1,4 @@
+
 use std::sync::Arc;
 
 use grammers_client::message::Message;
@@ -11,7 +12,6 @@ use super::vision::{DIM, dot};
 pub struct Concept {
     pub key: &'static str,
     pub names: &'static [&'static str],
-
     pub notice: &'static str,
     pub vector: &'static [f32; DIM],
 }
@@ -147,7 +147,7 @@ pub async fn act_known(
     if !over(margin, armed.limit) || !armed.live {
         return;
     }
-    if let Err(e) = message.delete().await {
+    if let Err(e) = message.delete_critical().await {
         eprintln!("concept: could not delete in {chat}: {e}");
         return;
     }
@@ -160,26 +160,40 @@ pub async fn act_known(
     super::notice::send(ctx, message, chat, concept.notice, chances).await;
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn act_detached(
-    ctx: &Arc<Ctx>,
-    chat: i64,
-    chat_ref: PeerRef,
-    message_id: i32,
-    id: i64,
-    all: &[f32; super::CONCEPT_SLOTS],
-    armed: &Armed,
-    sender: Option<i64>,
-    name: &str,
-) {
-    report(chat, id, all, armed, false);
-    let Some((concept, margin)) = worst(all, armed) else {
+pub struct Detached<'a> {
+    pub chat: i64,
+    pub chat_ref: PeerRef,
+    pub message_id: i32,
+    pub media_id: i64,
+    pub margins: &'a [f32; super::CONCEPT_SLOTS],
+    pub armed: &'a Armed,
+    pub sender: Option<i64>,
+    pub name: &'a str,
+}
+
+pub async fn act_detached(ctx: &Arc<Ctx>, detached: Detached<'_>) {
+    let Detached {
+        chat,
+        chat_ref,
+        message_id,
+        media_id,
+        margins,
+        armed,
+        sender,
+        name,
+    } = detached;
+    report(chat, media_id, margins, armed, false);
+    let Some((concept, margin)) = worst(margins, armed) else {
         return;
     };
     if !over(margin, armed.limit) || !armed.live {
         return;
     }
-    match ctx.client.delete_messages(chat_ref, &[message_id]).await {
+    match ctx
+        .client
+        .delete_messages_critical(chat_ref, &[message_id])
+        .await
+    {
         Ok(0) => {
             eprintln!("concept: delete affected nothing in {chat} msg {message_id}");
             return;
@@ -191,7 +205,19 @@ pub async fn act_detached(
         }
     }
     ctx.bump(chat, super::stats::DELETED);
-    nsfw::punish_and_notify(ctx, chat, chat_ref, sender, name, concept.key, concept.notice).await;
+    nsfw::punish_and_notify(
+        ctx,
+        nsfw::DetachedModeration {
+            chat,
+            chat_ref,
+            message_id,
+            sender,
+            name,
+            cause: concept.key,
+            reason: concept.notice,
+        },
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -222,7 +248,6 @@ mod tests {
             live: true,
         };
         let (concept, margin) = worst(&all, &armed).expect("a winner among the armed");
-
         assert_eq!(concept.key, CONCEPTS[0].key);
         assert!((margin - 0.061).abs() < 1e-6);
     }
@@ -287,7 +312,6 @@ mod tests {
         for m in matches {
             assert!(m > 0.0);
         }
-
         assert!(over(0.064, DEFAULT_LIMIT));
         assert!(over(0.053, DEFAULT_LIMIT));
         assert!(over(0.035, DEFAULT_LIMIT));

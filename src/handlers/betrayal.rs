@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use grammers_client::message::InputMessage;
 use grammers_client::session::types::{PeerId, PeerRef};
 use grammers_client::tl;
 
@@ -42,14 +41,9 @@ fn number(ctx: &Ctx, chat: i64, key: &str, default: u32, range: (u32, u32)) -> u
         .clamp(range.0, range.1)
 }
 
-pub async fn set(ctx: &Ctx, chat: i64, key: &str, value: u32) {
-    let range = if key == LIMIT { LIMIT_RANGE } else { WINDOW_RANGE };
-    let value = value.clamp(range.0, range.1);
-    ctx.settings.set_value(chat, key, &value.to_string()).await;
-}
-
 pub async fn on_participant_update(ctx: &Ctx, update: &tl::types::UpdateChannelParticipant) {
-    let Some(chat) = PeerId::channel(update.channel_id).and_then(|id| id.bot_api_dialog_id()) else {
+    let Some(chat) = PeerId::channel(update.channel_id).and_then(|id| id.bot_api_dialog_id())
+    else {
         return;
     };
     if !ctx.settings.is_locked(chat, MODE) {
@@ -75,28 +69,41 @@ pub async fn on_participant_update(ctx: &Ctx, update: &tl::types::UpdateChannelP
         return;
     }
 
-    let Some(chat_ref) = ctx.chat_ref(chat).or_else(|| {
-        PeerId::channel(update.channel_id).map(PeerId::to_ambient_ref)
-    }) else {
+    let Some(chat_ref) = ctx
+        .chat_ref(chat)
+        .or_else(|| PeerId::channel(update.channel_id).map(PeerId::to_ambient_ref))
+    else {
         return;
     };
     punish(ctx, chat_ref, chat, actor, count).await;
 }
 
 async fn punish(ctx: &Ctx, chat_ref: PeerRef, chat: i64, actor: i64, count: usize) {
+    let count = if count > LIMIT_RANGE.1 as usize {
+        format!("{count}+")
+    } else {
+        count.to_string()
+    };
     let Some((peer, name)) = super::admin_ref(ctx, chat_ref, actor).await else {
         eprintln!("betrayal: {chat}: no ref for admin {actor}");
         return;
     };
 
-    if let Err(e) = ctx.client.set_admin_rights(chat_ref, peer).await {
+    if let Err(e) = super::restrict::set_member_admin_rights(
+        ctx,
+        chat_ref,
+        peer,
+        super::restrict::AdminRightsSpec::default(),
+    )
+    .await
+    {
         eprintln!("betrayal: {chat}: could not demote {actor}: {e}");
         return;
     }
     ctx.forget_admins(chat);
 
     let banned = if bans(ctx, chat) {
-        match ctx.client.kick_participant(chat_ref, peer).await {
+        match super::restrict::kick_member(ctx, chat_ref, peer).await {
             Ok(()) => true,
             Err(e) => {
                 eprintln!("betrayal: {chat}: could not ban {actor}: {e}");
@@ -116,7 +123,7 @@ async fn punish(ctx: &Ctx, chat_ref: PeerRef, chat: i64, actor: i64, count: usiz
         .client
         .send_message(
             chat_ref,
-            InputMessage::new().html(format!(
+            super::premium::icon_html(Some(if banned { super::premium::Icon::ModerationHammer } else { super::premium::Icon::User }), format!(
                 "<b>ضد خیانت ادمین</b>\n\n<b>{}</b> در مدت کوتاهی {count} نفر را حذف کرد و {what}.",
                 esc(&name)
             )),

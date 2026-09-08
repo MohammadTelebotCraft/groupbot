@@ -1,3 +1,4 @@
+
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -5,6 +6,25 @@ use grammers_client::message::Message;
 
 use super::Ctx;
 use super::locks::{self, View};
+
+struct PendingDrops<'a> {
+    ctx: &'a Ctx,
+    rows: Option<Vec<(i64, i32)>>,
+}
+
+impl PendingDrops<'_> {
+    fn complete(&mut self) {
+        self.rows = None;
+    }
+}
+
+impl Drop for PendingDrops<'_> {
+    fn drop(&mut self) {
+        if let Some(rows) = self.rows.take() {
+            self.ctx.retry_pending_drops(&rows);
+        }
+    }
+}
 
 pub const MODE: &str = "tmed";
 
@@ -33,6 +53,12 @@ pub fn unix_now() -> i64 {
 pub fn due_from_unix(due_at: i64) -> Instant {
     let left = due_at.saturating_sub(unix_now()).max(0) as u64;
     Instant::now() + Duration::from_secs(left)
+}
+
+pub fn due_at_unix(due: Instant) -> i64 {
+    let seconds = due.saturating_duration_since(Instant::now()).as_secs();
+    let seconds = i64::try_from(seconds).unwrap_or(i64::MAX);
+    unix_now().saturating_add(seconds)
 }
 
 pub struct Kind {
@@ -145,15 +171,11 @@ pub async fn sweep_deferred(ctx: &std::sync::Arc<Ctx>) {
 
 async fn process_deferred(ctx: &std::sync::Arc<Ctx>) {
     let mut deletes: HashMap<i64, Vec<i32>> = HashMap::new();
-    let mut captchas = Vec::new();
     for action in ctx.take_due_actions(MAX_DEFERRED_PER_SWEEP) {
         match action {
-            super::DeferredAction::Delete { chat, message, .. } => {
+            super::DeferredAction::Delete { chat, message } => {
                 deletes.entry(chat).or_default().push(message);
             }
-            super::DeferredAction::Captcha {
-                chat, user, target, ..
-            } => captchas.push((chat, user, target)),
         }
     }
 
@@ -164,49 +186,67 @@ async fn process_deferred(ctx: &std::sync::Arc<Ctx>) {
         move |(chat, ids)| {
             let ctx = std::sync::Arc::clone(&owner);
             async move {
-                let Some(chat_ref) = ctx.chat_ref(chat) else {
-                    return;
-                };
-                for chunk in ids.chunks(CHUNK) {
-                    if let Err(e) = ctx.client.delete_messages(chat_ref, chunk).await {
-                        eprintln!("delayed delete: could not delete in {chat}: {e}");
-                        break;
+                let mut completed = 0;
+                if let Some(chat_ref) = ctx.chat_ref(chat) {
+                    for chunk in ids.chunks(CHUNK) {
+                        if let Err(e) = ctx.client.delete_messages(chat_ref, chunk).await {
+                            eprintln!("delayed delete: could not delete in {chat}: {e}");
+                            break;
+                        }
+                        completed += chunk.len();
                     }
                 }
-            }
-        },
-    )
-    .await;
-
-    let owner = std::sync::Arc::clone(ctx);
-    super::bounded(
-        captchas,
-        super::FLEET_CAMPAIGNS,
-        move |(chat, user, target)| {
-            let ctx = std::sync::Arc::clone(&owner);
-            async move {
-                let Some(chat_ref) = ctx.chat_ref(chat) else {
-                    ctx.captcha_done(chat, user);
-                    return;
-                };
-                super::captcha::expire(&ctx, chat_ref, chat, user, target).await;
+                for id in &ids[..completed] {
+                    ctx.remember_pending_drop(chat, *id);
+                }
+                for id in &ids[completed..] {
+                    ctx.schedule_delete(chat, *id, Instant::now() + RETRY_AFTER);
+                }
             }
         },
     )
     .await;
 }
 
-pub async fn sweep(ctx: &std::sync::Arc<Ctx>) {
-    let writes = ctx.take_pending_writes();
-    if !writes.is_empty() {
-        ctx.settings.save_pending(writes).await;
+pub async fn flush_pending(ctx: &Ctx) -> bool {
+    let mut writes = ctx.media_pending.lock().await;
+    if writes.is_empty() {
+        *writes = ctx.take_pending_writes();
     }
-    let drops = ctx.take_pending_drops();
-    if !drops.is_empty() {
-        let failed = ctx.settings.drop_pending_rows(&drops).await;
-        if !failed.is_empty() {
-            ctx.retry_pending_drops(&failed);
+    if !writes.is_empty() {
+        if let Err(error) = ctx.settings.save_pending(&writes).await {
+            log::error!(
+                "temp media: retaining {} pending writes for retry: {error}",
+                writes.len()
+            );
+            return false;
         }
+        writes.clear();
+    }
+    let mut drops = PendingDrops {
+        ctx,
+        rows: Some(ctx.take_pending_drops()),
+    };
+    let rows = drops
+        .rows
+        .as_ref()
+        .expect("an incomplete pending-delete batch retains its rows");
+    if !rows.is_empty()
+        && let Err(error) = ctx.settings.drop_pending_rows(rows).await
+    {
+        log::warn!(
+            "temp media: overflow cleanup failed; retaining {} rows for retry: {error}",
+            rows.len()
+        );
+        return false;
+    }
+    drops.complete();
+    true
+}
+
+pub async fn sweep(ctx: &std::sync::Arc<Ctx>) {
+    if !flush_pending(ctx).await {
+        return;
     }
 
     let owner = std::sync::Arc::clone(ctx);
@@ -227,8 +267,16 @@ pub async fn sweep(ctx: &std::sync::Arc<Ctx>) {
                     }
                     attempted += chunk.len();
                 }
-
-                ctx.settings.drop_pending(chat, &ids[..attempted]).await;
+                if let Err(error) = ctx.settings.drop_pending(chat, &ids[..attempted]).await {
+                    log::warn!(
+                        "temp media: durable cleanup for {attempted} deleted messages in {chat} failed; queued for database retry: {error}"
+                    );
+                    let retry: Vec<_> = ids[..attempted]
+                        .iter()
+                        .map(|message| (chat, *message))
+                        .collect();
+                    ctx.retry_pending_drops(&retry);
+                }
                 for id in &ids[attempted..] {
                     ctx.restore_temp_media(chat, *id, Instant::now() + RETRY_AFTER);
                 }
@@ -238,10 +286,10 @@ pub async fn sweep(ctx: &std::sync::Arc<Ctx>) {
     .await;
 }
 
-pub async fn restore(ctx: &Ctx) {
-    let rows = ctx.settings.load_pending(unix_now()).await;
+pub async fn restore(ctx: &Ctx) -> Result<(), sqlx::Error> {
+    let rows = ctx.settings.load_pending(unix_now()).await?;
     if rows.is_empty() {
-        return;
+        return Ok(());
     }
     let count = rows.len();
     for (chat, id, due_at) in rows {
@@ -249,16 +297,17 @@ pub async fn restore(ctx: &Ctx) {
     }
     let dropped = ctx.take_pending_drops();
     if !dropped.is_empty() {
-        let failed = ctx.settings.drop_pending_rows(&dropped).await;
-        if !failed.is_empty() {
-            ctx.retry_pending_drops(&failed);
+        if let Err(error) = ctx.settings.drop_pending_rows(&dropped).await {
+            ctx.retry_pending_drops(&dropped);
+            return Err(error);
         }
         println!(
             "temp media: removed {} overflowed durable row(s)",
-            dropped.len().saturating_sub(failed.len())
+            dropped.len()
         );
     }
     println!("temp media: restored {count} pending delete(s)");
+    Ok(())
 }
 
 pub fn queue(pending: &mut VecDeque<(Instant, i32)>, id: i32, due: Instant) -> Option<i32> {

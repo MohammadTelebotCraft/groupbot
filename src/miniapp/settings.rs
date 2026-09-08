@@ -1,3 +1,4 @@
+
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -28,13 +29,51 @@ pub async fn apply(
         )
             .into_response();
     }
-
-    if setting::apply(&ctx, gate.chat, &body.action).await.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({ "error": "مقدار پذیرفته نشد." })),
-        )
-            .into_response();
+    match setting::apply(&ctx, gate.chat, &body.action).await {
+        Ok(Some((_, setting::ApplyStatus::Applied))) => {}
+        Ok(Some((_, setting::ApplyStatus::PendingRetry))) => {
+            return (StatusCode::ACCEPTED, axum::Json(json!({ "pending": true }))).into_response();
+        }
+        Ok(Some((_, setting::ApplyStatus::DeliveryUnknown))) => {
+            return (
+                StatusCode::ACCEPTED,
+                axum::Json(json!({ "pending": true, "delivery": "unknown" })),
+            )
+                .into_response();
+        }
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({ "error": "مقدار پذیرفته نشد." })),
+            )
+                .into_response();
+        }
+        Err(error) if error.invalid_night_window() => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({ "error": "شروع و پایان قفل شب نمی‌تواند یکسان باشد." })),
+            )
+                .into_response();
+        }
+        Err(error) if error.acceptance_unknown() => {
+            ::log::warn!(
+                "miniapp: settings write outcome for {} is unknown: {error}",
+                gate.chat
+            );
+            return (
+                StatusCode::ACCEPTED,
+                axum::Json(json!({ "accepted": "unknown" })),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            ::log::warn!("miniapp: settings write for {} failed: {error}", gate.chat);
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(json!({ "error": "تنظیم ذخیره نشد؛ دوباره تلاش کنید." })),
+            )
+                .into_response();
+        }
     }
-    dashboard(State(ctx), gate).await.into_response()
+    dashboard(State(ctx), gate.into()).await.into_response()
 }

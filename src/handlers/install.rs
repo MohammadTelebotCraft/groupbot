@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use grammers_client::message::{InputMessage, Message};
+use grammers_client::message::Message;
 use grammers_client::session::types::{PeerId, PeerKind, PeerRef};
 use grammers_client::tl;
 
@@ -13,7 +13,6 @@ pub const STATUS: &[&str] = &["وضعیت نصب", "بررسی نصب"];
 pub struct Need {
     pub label: &'static str,
     pub has: fn(&tl::types::ChatAdminRights) -> bool,
-
     pub for_what: &'static str,
 }
 
@@ -60,32 +59,29 @@ const ALL_MISSING: u32 = (1u32 << NEEDED.len()) - 1;
 
 const MEMBER_MARK: i64 = 1 << 40;
 const BASIC_MARK: i64 = 2 << 40;
-
 const COMPLETE_MARK: i64 = 4 << 40;
 
 pub enum Standing {
     Admin(tl::types::ChatAdminRights),
-
     Creator,
-
     Member,
-
     Basic { admin: bool },
-
     Gone,
-
     Unknown,
 }
 
 pub fn missing(standing: &Standing) -> u32 {
     match standing {
         Standing::Creator => 0,
-        Standing::Admin(rights) => NEEDED.iter().enumerate().fold(0, |mask, (bit, need)| {
-            match (need.has)(rights) {
-                true => mask,
-                false => mask | 1 << bit,
-            }
-        }),
+        Standing::Admin(rights) => {
+            NEEDED
+                .iter()
+                .enumerate()
+                .fold(0, |mask, (bit, need)| match (need.has)(rights) {
+                    true => mask,
+                    false => mask | 1 << bit,
+                })
+        }
         _ => ALL_MISSING,
     }
 }
@@ -119,7 +115,10 @@ pub async fn standing(ctx: &Ctx, chat_ref: PeerRef) -> Standing {
             from_participant(Some(&found.participant))
         }
         Err(grammers_client::InvocationError::Rpc(rpc))
-            if rpc.name.contains("USER_NOT_PARTICIPANT") =>
+            if matches!(
+                rpc.name.as_str(),
+                "USER_NOT_PARTICIPANT" | "CHANNEL_PRIVATE"
+            ) =>
         {
             Standing::Gone
         }
@@ -244,8 +243,10 @@ pub fn card(standing: &Standing, installed: bool) -> String {
         (true, 1) => "همین یکی را در تنظیمات ادمینِ ربات بدهید. «وضعیت نصب» دوباره بررسی می کند.",
         (true, _) => "این ها را در تنظیمات ادمینِ ربات بدهید. «وضعیت نصب» دوباره بررسی می کند.",
         (false, 1) => "همین یکی مانده. به محض دادنش ربات خودش فعال می شود و کلینر را هم می آورد.",
-        (false, _) => "تا کامل شدن این ها ربات فعال نمی شود. به محض دادن آخرین دسترسی، \
-                       خودش فعال می شود و کلینر را هم می آورد.",
+        (false, _) => {
+            "تا کامل شدن این ها ربات فعال نمی شود. به محض دادن آخرین دسترسی، \
+                       خودش فعال می شود و کلینر را هم می آورد."
+        }
     };
     format!(
         "<b>نصب ربات</b>\n\n\
@@ -274,10 +275,11 @@ pub async fn announce(ctx: &Ctx, chat_ref: PeerRef, chat: i64, standing: &Standi
         return;
     }
     let installed = super::owner(ctx, chat).is_some();
-    let _ = ctx
-        .client
-        .send_message(chat_ref, InputMessage::new().html(card(standing, installed)))
-        .await;
+    let mut body = super::premium::html(card(standing, installed));
+    if super::cleaner_setup::available(ctx) {
+        body = super::cleaner_setup::with_button(body, chat, true);
+    }
+    let _ = ctx.client.send_message(chat_ref, body).await;
 }
 
 pub async fn announce_complete(ctx: &Ctx, chat_ref: PeerRef, chat: i64) {
@@ -288,7 +290,7 @@ pub async fn announce_complete(ctx: &Ctx, chat_ref: PeerRef, chat: i64) {
         .client
         .send_message(
             chat_ref,
-            InputMessage::new().html(
+            super::premium::html(
                 "<b>نصب ربات</b>\n\n\
                  ✓ همه دسترسی های لازم داده شد.\n\n\
                  <i>«وضعیت نصب» وضعیت کامل را نشان می دهد.</i>",
@@ -304,29 +306,61 @@ pub async fn ensure_cleaner(ctx: &Arc<Ctx>, chat_ref: PeerRef, chat: i64) -> boo
     if ctx.settings.is_locked(chat, CLEANER_ADDED) {
         return false;
     }
-
     if !ctx.claim_cleaner_install(chat) {
         return false;
     }
     let permit = ctx.cleaner_slot().await;
     let ctx = Arc::clone(ctx);
-    tokio::spawn(async move {
+    Arc::clone(&ctx).spawn_owned(async move {
         let _permit = permit;
+        let mut retry = false;
         let told = match super::cleaner::install(&ctx, chat_ref).await {
             Ok(super::cleaner::Installed::AlreadyAdmin) => {
-                ctx.settings.set(chat, CLEANER_ADDED, true).await;
-                None
+                match ctx.settings.try_set(chat, CLEANER_ADDED, true).await {
+                    Ok(_) => {
+                        log::info!("install: cleaner already admin in {chat}");
+                        None
+                    }
+                    Err(error) => {
+                        retry = true;
+                        log::warn!("install: cleaner state for {chat} was not recorded: {error}");
+                        Some(cleaner_record_failure(&error).to_owned())
+                    }
+                }
             }
             Ok(super::cleaner::Installed::Promoted) => {
-                ctx.settings.set(chat, CLEANER_ADDED, true).await;
-                Some("✓ کلینر اضافه و ادمین شد. حالا «حذف همه» و «حذف پیام» هم کار می کنند.".to_owned())
+                match ctx.settings.try_set(chat, CLEANER_ADDED, true).await {
+                    Ok(_) => {
+                        log::info!("install: cleaner added and promoted in {chat}");
+                        Some(
+                            "✓ کلینر اضافه و ادمین شد. حالا «حذف همه» و «حذف پیام» هم کار می کنند."
+                                .to_owned(),
+                        )
+                    }
+                    Err(error) => {
+                        retry = true;
+                        log::warn!("install: cleaner state for {chat} was not recorded: {error}");
+                        Some(cleaner_record_failure(&error).to_owned())
+                    }
+                }
             }
-
             Ok(super::cleaner::Installed::JoinedNotAdmin(reason)) => {
-                ctx.settings.set(chat, CLEANER_ADDED, true).await;
-                Some(format!("کلینر وارد گروه شد ولی ادمین نشد · {reason}"))
+                retry = true;
+                match ctx.settings.try_set(chat, CLEANER_ADDED, true).await {
+                    Ok(_) => {
+                        log::warn!(
+                            "install: cleaner joined but was not promoted in {chat}: {reason}"
+                        );
+                        Some(format!("کلینر وارد گروه شد ولی ادمین نشد · {reason}"))
+                    }
+                    Err(error) => {
+                        log::warn!("install: cleaner state for {chat} was not recorded: {error}");
+                        Some(cleaner_record_failure(&error).to_owned())
+                    }
+                }
             }
             Err(reason) => {
+                retry = true;
                 eprintln!("install: cleaner not added to {chat}: {reason}");
                 Some(format!(
                     "کلینر اضافه نشد · {reason}\nبعدا «افزودن کلینر» را بفرستید."
@@ -334,11 +368,23 @@ pub async fn ensure_cleaner(ctx: &Arc<Ctx>, chat_ref: PeerRef, chat: i64) -> boo
             }
         };
         if let Some(told) = told {
-            let _ = ctx.client.send_message(chat_ref, told).await;
+            let mut body = super::premium::html(format!("<b>کلینر</b>\n\n{}", super::esc(&told)));
+            if retry {
+                body = super::cleaner_setup::with_button(body, chat, true);
+            }
+            let _ = ctx.client.send_message(chat_ref, body).await;
         }
         ctx.forget_user_chats();
     });
     true
+}
+
+fn cleaner_record_failure(error: &crate::state::SettingsWriteError) -> &'static str {
+    if error.commit_outcome_unknown() {
+        "کلینر اضافه شد، اما نتیجه ثبت راه اندازی نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+    } else {
+        "کلینر اضافه شد، اما راه اندازی در پایگاه داده ثبت نشد؛ کمی بعد دوباره بررسی کنید."
+    }
 }
 
 async fn cleaner_line(ctx: &Ctx, chat_ref: PeerRef, joining: bool) -> &'static str {
@@ -383,13 +429,19 @@ pub async fn handle(ctx: &Arc<Ctx>, message: &Message) -> bool {
     let standing = standing(ctx, chat_ref).await;
     if matches!(standing, Standing::Unknown | Standing::Gone) {
         let _ = message
-            .reply("نتوانستم دسترسی های خودم را بخوانم. چند لحظه بعد دوباره بفرستید.")
+            .reply(super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "نتوانستم دسترسی های خودم را بخوانم. چند لحظه بعد دوباره بفرستید.",
+            ))
             .await;
         return true;
     }
     if !ready(&standing) {
         let _ = message
-            .reply(InputMessage::new().html(card(&standing, super::owner(ctx, chat).is_some())))
+            .reply(super::premium::html(card(
+                &standing,
+                super::owner(ctx, chat).is_some(),
+            )))
             .await;
         return true;
     }
@@ -399,7 +451,6 @@ pub async fn handle(ctx: &Arc<Ctx>, message: &Message) -> bool {
             ensure_cleaner(ctx, chat_ref, chat).await;
             return true;
         }
-
         if super::owner(ctx, chat).is_none() {
             let _ = message
                 .reply(
@@ -413,7 +464,7 @@ pub async fn handle(ctx: &Arc<Ctx>, message: &Message) -> bool {
 
     let joining = ensure_cleaner(ctx, chat_ref, chat).await;
     let _ = message
-        .reply(InputMessage::new().html(format!(
+        .reply(super::premium::html(format!(
             "<b>نصب ربات</b>\n\n\
              ✓ نصب کامل است.\n\n\
              <b>دسترسی ها</b>\n\
@@ -524,7 +575,6 @@ mod tests {
         assert_eq!(missing(&Standing::Admin(rights(false))), ALL_MISSING);
         assert_eq!(missing(&Standing::Member), ALL_MISSING);
         assert!(NEEDED.len() < 32, "the mask cannot hold the table");
-
         assert!(
             NEEDED.len() <= 6,
             "how_many has no word for {} rights",

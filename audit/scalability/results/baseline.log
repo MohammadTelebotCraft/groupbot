@@ -1,0 +1,17 @@
+   Compiling groupbot v0.1.0 (/mnt/c/Users/moh/Desktop/GroupManagement/groupbot)
+    Finished `release` profile [optimized] target(s) in 39.49s
+     Running unittests src/main.rs (target/release/deps/groupbot-e0fabec816ad445f)
+
+running 4 tests
+test handlers::scalability_tests::flood_window_cost ... PERF {"iterations":20000,"kind":"flood_window","ns_per_update":687.31365,"occupancy":32}
+PERF {"iterations":20000,"kind":"flood_window","ns_per_update":81447.30975000001,"occupancy":4096}
+ok
+test handlers::scalability_tests::replay_dispatch ... PERF {"active":1000,"active_fixture_delta_kib":12668,"allocated_bytes_per_update":0.0,"allocations_per_update":0.0,"chat_state_bytes":928,"counted":100000,"cpu_percent":323.49525608242203,"cpu_seconds":1.8900000000000001,"db_queries":0,"groups":10000,"kind":"dispatch","max_joinset":144,"mirror_delta_kib":3136,"p50_us":34.496,"p95_us":80.147,"p99_us":188.663,"rss_kib":39384,"seconds":0.584243498,"telegram":"disconnected; non-action workload","telegram_calls":0,"updates":100000,"updates_per_second":171161.51115472065}
+ok
+test handlers::scalability_tests::scan_allocations ... PERF {"allocations_per_scan":1.0,"iterations":500000,"kind":"lock_scan","ns_per_scan":1404.808062,"seconds":0.702404031}
+ok
+test handlers::scalability_tests::voice_worker_parallelism ... PERF {"jobs":16,"kind":"voice_workers","seconds":1.826116378,"stub_delay_ms":100,"workers":4}
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 343 filtered out; finished in 6.01s
+

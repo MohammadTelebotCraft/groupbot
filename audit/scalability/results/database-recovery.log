@@ -1,0 +1,7 @@
+
+running 1 test
+test state::scalability_tests::database_recovery ... PERF {"committed_setting_survives_reload":true,"duplicate_owner_rejected":true,"kind":"database_recovery","old_owner_can_write_after_lock_loss":true,"replacement_ms":2.2559989999999996,"replacement_timeouts":["100ms","50ms"],"successor_mirror_is_stale":true}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 356 filtered out; finished in 0.35s
+

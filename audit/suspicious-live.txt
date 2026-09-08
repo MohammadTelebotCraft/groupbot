@@ -1,0 +1,1527 @@
+src\main.rs:41:                    let micros = value.as_micros().min(u32::MAX as u128) as u32;
+src\main.rs:42:                    let bucket = (u32::BITS - micros.max(1).leading_zeros()).min(31) as usize;
+src\main.rs:70:            u32::MAX as u64
+src\main.rs:153:            .store(tasks.active() as u64, Ordering::Relaxed);
+src\main.rs:156:            .store(tasks.pending() as u64, Ordering::Relaxed);
+src\main.rs:226:    std::time::Duration::from_secs(DEFERRED_SWEEP_SECS as u64);
+src\main.rs:238:const UPDATES_CHANNEL_CAPACITY: std::num::NonZeroUsize = std::num::NonZeroUsize::new(4096).unwrap();
+src\main.rs:409:    let owner_monitor = tokio::spawn(Arc::clone(&settings).monitor_ownership());
+src\main.rs:541:        .ok()
+src\main.rs:544:        .ok()
+src\main.rs:584:    let pool_task = tokio::spawn(runner.run());
+src\main.rs:614:    let mut bot_worker = tokio::spawn(run_bot_updates(
+src\main.rs:646:    let user_task = tokio::spawn(user_runner.run());
+src\main.rs:680:    let mut cleaner_worker = tokio::spawn(async move {
+src\main.rs:708:                .store(tasks.active() as u64, Ordering::Relaxed);
+src\main.rs:711:                .store(tasks.pending() as u64, Ordering::Relaxed);
+src\main.rs:1160:        fs::write(&path, "# shard\n-100\n-200\n").unwrap();
+src\main.rs:1161:        let loaded = load_owned_chats(path.to_str().unwrap(), 2).unwrap();
+src\main.rs:1164:        fs::remove_file(path).unwrap();
+src\main.rs:1174:        fs::write(&path, "-100\talpha\n-100\n").unwrap();
+src\main.rs:1175:        assert!(load_owned_chats(path.to_str().unwrap(), 10).is_err());
+src\main.rs:1176:        fs::remove_file(path).unwrap();
+src\dispatcher\load_tests.rs:15:#[ignore = "open-loop synthetic queue benchmark"]
+src\dispatcher\load_tests.rs:31:            let producer = tokio::spawn(async move {
+src\dispatcher\load_tests.rs:54:                        key: key as i64,
+src\dispatcher\load_tests.rs:68:                let state = states[job.key as usize].clone();
+src\dispatcher\load_tests.rs:76:                        .unwrap()
+src\dispatcher\load_tests.rs:77:                        .push((job.key, job.received.elapsed().as_micros() as u64));
+src\dispatcher\load_tests.rs:87:                        completion.result.unwrap();
+src\dispatcher\load_tests.rs:99:                        done = dispatcher.join_next(), if dispatcher.active() > 0 => { done.unwrap().result.unwrap(); }
+src\dispatcher\load_tests.rs:108:                        result.unwrap();
+src\dispatcher\load_tests.rs:110:                    let permit = permits.clone().acquire_owned().await.unwrap();
+src\dispatcher\load_tests.rs:122:                    result.unwrap();
+src\dispatcher\load_tests.rs:125:            let offered = producer.await.unwrap();
+src\dispatcher\load_tests.rs:127:            let results = delivered.lock().unwrap();
+src\dispatcher.rs:90:            let lane = self.lanes.get_mut(&key).expect("ready lane exists");
+src\dispatcher.rs:92:            let item = lane.pending.pop_front().expect("ready lane has work");
+src\dispatcher.rs:117:        let key = self.active.remove(&id).expect("completed task is tracked");
+src\dispatcher.rs:118:        let lane = self.lanes.get_mut(&key).expect("active lane exists");
+src\dispatcher.rs:171:                    let _ = barrier.acquire().await.unwrap();
+src\dispatcher.rs:173:                done.lock().unwrap().push((peer, sequence));
+src\dispatcher.rs:180:                dispatcher.join_next().await.unwrap().result.unwrap();
+src\dispatcher.rs:185:        .unwrap();
+src\dispatcher.rs:189:            dispatcher.join_next().await.unwrap().result.unwrap();
+src\dispatcher.rs:194:            .unwrap()
+src\dispatcher.rs:213:        assert!(dispatcher.join_next().await.unwrap().result.is_err());
+src\dispatcher.rs:215:        dispatcher.join_next().await.unwrap().result.unwrap();
+src\handlers\answers.rs:125:    let _ = message
+src\handlers\answers.rs:161:        let _ = message
+src\handlers\answers.rs:175:            let _ = message
+src\handlers\answers.rs:183:        let _ = message
+src\handlers\answers.rs:203:                .unwrap_or_default(),
+src\handlers\answers.rs:208:                let _ = message
+src\handlers\answers.rs:220:                    .unwrap_or_default(),
+src\handlers\answers.rs:226:        let _ = message
+src\handlers\answers.rs:234:        let _ = message.reply("آن پیام محتوایی برای فرستادن ندارد.").await;
+src\handlers\answers.rs:239:        let _ = message
+src\handlers\answers.rs:246:        let _ = message.reply("رسانه یا متن پاسخ بیش از حد بزرگ است.").await;
+src\handlers\answers.rs:252:        let _ = message
+src\handlers\answers.rs:259:        let _ = message
+src\handlers\answers.rs:267:    let _ = message
+src\state\scalability_tests.rs:5:#[ignore = "isolated PostgreSQL statement/lock timeout and recovery probe"]
+src\state\scalability_tests.rs:8:    let settings = std::sync::Arc::new(Settings::connect(URL).await.unwrap());
+src\state\scalability_tests.rs:12:        .unwrap();
+src\state\scalability_tests.rs:16:        .unwrap();
+src\state\scalability_tests.rs:23:    let blocker = PgPool::connect(URL).await.unwrap();
+src\state\scalability_tests.rs:24:    let mut tx = blocker.begin().await.unwrap();
+src\state\scalability_tests.rs:28:        .unwrap();
+src\state\scalability_tests.rs:29:    let release = tokio::spawn(async move {
+src\state\scalability_tests.rs:31:        tx.rollback().await.unwrap();
+src\state\scalability_tests.rs:36:    release.await.unwrap();
+src\state\scalability_tests.rs:37:    let mirror = settings.value(-999_001, "audit_probe").unwrap();
+src\state\scalability_tests.rs:43:    .unwrap();
+src\state\scalability_tests.rs:67:#[ignore = "isolated PostgreSQL connection replacement, reload, and ownership-loss probe"]
+src\state\scalability_tests.rs:70:    let settings = Settings::connect(URL).await.unwrap();
+src\state\scalability_tests.rs:76:    let control = PgPool::connect(URL).await.unwrap();
+src\state\scalability_tests.rs:80:        held.push(settings.pool.acquire().await.unwrap());
+src\state\scalability_tests.rs:82:    let mut victim = held.pop().unwrap();
+src\state\scalability_tests.rs:86:        .unwrap();
+src\state\scalability_tests.rs:91:        .unwrap();
+src\state\scalability_tests.rs:94:    let _ = victim.close().await;
+src\state\scalability_tests.rs:96:    let mut replacement = settings.pool.acquire().await.unwrap();
+src\state\scalability_tests.rs:103:    .unwrap();
+src\state\scalability_tests.rs:109:    let reloaded = Settings::connect(URL).await.unwrap();
+src\state\scalability_tests.rs:119:        .unwrap();
+src\state\scalability_tests.rs:125:        .fetch_one(&mut **owner._process_lock.lock().await.as_mut().unwrap())
+src\state\scalability_tests.rs:127:        .unwrap();
+src\state\scalability_tests.rs:132:        .unwrap();
+src\state\scalability_tests.rs:135:        .unwrap();
+src\handlers\autoconfig.rs:32:        Some(session) => session.peer(id).await.ok().flatten(),
+src\handlers\autoconfig.rs:306:        .unwrap_or_default()
+src\handlers\autoconfig.rs:357:        let id = PeerId::channel(4451811811).unwrap();
+src\handlers\autoconfig.rs:365:            .unwrap();
+src\handlers\autoconfig.rs:368:            .expect("hash from raw update envelope");
+src\handlers\autoconfig.rs:386:        let id = PeerId::channel(123).unwrap();
+src\handlers\autoconfig.rs:398:        let basic = PeerId::chat(123).unwrap();
+src\handlers\autoconfig.rs:404:            resolve_peer(None, PeerId::user(123).unwrap(), None)
+src\handlers\autoconfig.rs:413:        let id = PeerId::channel(321).unwrap();
+src\handlers\autoconfig.rs:421:            .unwrap();
+src\handlers\autoconfig.rs:435:        let id = PeerId::channel(321).unwrap();
+src\handlers\autoconfig.rs:455:                .unwrap();
+src\handlers\autoconfig.rs:492:        let (peer, standing, explicit) = setup_update(&channel, 7).unwrap();
+src\handlers\autoconfig.rs:493:        assert_eq!(peer, PeerId::channel(12).unwrap());
+src\handlers\autoconfig.rs:503:        let (_, standing, explicit) = setup_update(&promoted, 7).unwrap();
+src\state.rs:401:            .and_then(|value| value.parse().ok())
+src\state.rs:412:    _process_lock: tokio::sync::Mutex<Option<sqlx::pool::PoolConnection<sqlx::Postgres>>>,
+src\state.rs:416:    cache: RwLock<HashMap<i64, HashMap<String, String>>>,
+src\state.rs:418:    index: RwLock<HashMap<i64, ChatIndex>>,
+src\state.rs:436:    capacity_write: tokio::sync::Mutex<()>,
+src\state.rs:457:    write_slots: Box<[std::sync::Arc<tokio::sync::Mutex<()>>]>,
+src\state.rs:652:/// `as i64`. Real Telegram timestamps are many orders of magnitude below this ceiling.
+src\state.rs:1389:                    .expect("per-chat setting limit fits PostgreSQL bigint")
+src\state.rs:1755:                    count: count.max(0) as u64,
+src\state.rs:1783:            Ok(Some((sum, users))) => (sum.max(0) as u64, users.max(0) as u64),
+src\state.rs:1819:        .ok()
+src\state.rs:1825:            .map(|(user, name, quiet)| (user, name, quiet.max(0) as u64))
+src\state.rs:1827:        (idle, total.max(0) as u64)
+src\state.rs:1874:                            total: total.max(0) as u64,
+src\state.rs:1875:                            awarded: awarded.max(0) as u64,
+src\state.rs:1892:                    break acquire.await.expect("the bump semaphore is never closed");
+src\state.rs:1896:                        break permit.expect("the bump semaphore is never closed");
+src\state.rs:1982:            Ok(Some((adds,))) => adds.max(0) as u64,
+src\state.rs:2354:            .ok()
+src\state.rs:2356:            .map_or(0, |(adds,)| adds.max(0) as u64)
+src\state.rs:2383:            today: today.max(0) as u64,
+src\state.rs:2384:            total: total.max(0) as u64,
+src\state.rs:2385:            adds: adds.max(0) as u64,
+src\state.rs:2386:            place: (today > 0).then(|| place.max(1) as u64),
+src\state.rs:2398:        .ok()
+src\state.rs:2529:            if count < STALE_BATCH as u64 {
+src\state.rs:2598:            Ok(deleted) => deleted.max(0) as u64,
+src\state.rs:2763:                .ok()??;
+src\state.rs:2860:        let cache = self.cache.read().unwrap();
+src\state.rs:2894:            let cache = self.cache.read().unwrap();
+src\state.rs:2964:            let mut cache = self.cache.write().unwrap();
+src\state.rs:3053:            let cache = self.cache.read().unwrap();
+src\state.rs:3092:            let cache = self.cache.read().unwrap();
+src\state.rs:3136:            let mut cache = self.cache.write().unwrap();
+src\state.rs:3268:        let hash = (chat as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+src\state.rs:3269:        let stripe_mask = u64::try_from(WRITE_SLOTS).expect("stripe count fits u64") - 1;
+src\state.rs:3270:        usize::try_from(hash & stripe_mask).expect("write-stripe index fits usize")
+src\state.rs:3273:    fn write_slot(&self, chat: i64) -> &tokio::sync::Mutex<()> {
+src\state.rs:3283:            .unwrap()
+src\state.rs:3292:        let index = self.index.read().unwrap();
+src\state.rs:3302:        let mut index = self.index.write().unwrap();
+src\state.rs:3318:        let cache = self.cache.read().unwrap();
+src\state.rs:3362:                    break acquire.await.expect("the tally semaphore is never closed");
+src\state.rs:3366:                        break permit.expect("the tally semaphore is never closed");
+src\state.rs:3421:            .map(|(counter, count)| (counter, count.max(0) as u64))
+src\state.rs:3617:        let at = |value: i64| value.max(0) as u64;
+src\state.rs:3644:            .map(|(chat, count)| (chat, count.max(0) as u64))
+src\state.rs:3662:            .map(|(key, count)| (key, count.max(0) as u64))
+src\state.rs:3683:            .filter_map(|(chat, key)| Some((chat, key.strip_prefix("badge:")?.parse().ok()?)))
+src\state.rs:3730:        sqlx::query("SELECT 1").execute(&self.pool).await.ok()?;
+src\state.rs:4187:            .unwrap()
+src\state.rs:4197:        let cache = self.cache.read().unwrap();
+src\state.rs:4216:        let cache = self.cache.read().unwrap();
+src\state.rs:4233:            .unwrap()
+src\state.rs:4237:            .ok()
+src\state.rs:4260:            let cache = self.cache.read().unwrap();
+src\state.rs:4323:            .unwrap()
+src\state.rs:4468:    #[ignore]
+src\state.rs:4470:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:4471:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:4483:            .unwrap();
+src\state.rs:4533:            .unwrap();
+src\state.rs:4566:        assert_eq!(parse_bounded_usize("ROWS", None, 8, 2, 10).unwrap(), 8);
+src\state.rs:4567:        assert_eq!(parse_bounded_usize("ROWS", Some("7"), 8, 2, 10).unwrap(), 7);
+src\state.rs:4572:        assert_eq!(parse_bounded_i64("ROWS", None, 8, 2, 10).unwrap(), 8);
+src\state.rs:4573:        assert_eq!(parse_bounded_i64("ROWS", Some("2"), 8, 2, 10).unwrap(), 2);
+src\state.rs:4588:    #[ignore]
+src\state.rs:4590:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:4593:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:4598:            .unwrap();
+src\state.rs:4599:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:4618:        let reloaded = Settings::connect(&url).await.unwrap();
+src\state.rs:4635:            .unwrap();
+src\state.rs:4639:    #[ignore = "isolated PostgreSQL import failure and retry-path probe"]
+src\state.rs:4641:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:4643:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:4648:            .unwrap();
+src\state.rs:4659:        .unwrap();
+src\state.rs:4666:        std::fs::write(&path, format!("{chat} durable=first\n")).unwrap();
+src\state.rs:4667:        assert_eq!(settings.import_file(&path_text).await.unwrap(), 1);
+src\state.rs:4670:            settings.import_file(&path_text).await.unwrap(),
+src\state.rs:4674:        std::fs::remove_file(format!("{path_text}.imported")).unwrap();
+src\state.rs:4679:            .unwrap();
+src\state.rs:4686:    #[ignore]
+src\state.rs:4688:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:4691:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:4698:            .unwrap();
+src\state.rs:4726:            .unwrap();
+src\state.rs:4732:    #[ignore]
+src\state.rs:4734:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:4737:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:4742:            .unwrap();
+src\state.rs:4750:        assert_eq!(settings.set_flags(&all, "gate_on", true).await.unwrap(), 1);
+src\state.rs:4753:        assert_eq!(settings.set_flags(&all, "gate_on", true).await.unwrap(), 0);
+src\state.rs:4761:        .unwrap();
+src\state.rs:4764:        assert_eq!(settings.set_flags(&all, "gate_on", false).await.unwrap(), 2);
+src\state.rs:4771:            .unwrap();
+src\state.rs:4779:    #[ignore]
+src\state.rs:4781:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:4786:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:4793:            .unwrap();
+src\state.rs:4823:            .unwrap();
+src\state.rs:4830:    #[ignore]
+src\state.rs:4835:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:4838:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:4844:            .unwrap();
+src\state.rs:4855:        assert_eq!(folded.len() as i64, ROWS, "every chunk has to come back");
+src\state.rs:4858:        assert_eq!(members as i64, ROWS);
+src\state.rs:4859:        assert_eq!(total as i64, ROWS * 2);
+src\state.rs:4873:            settings.board_totals(chat, Period::Total, 0).await.0 as i64,
+src\state.rs:4882:            .unwrap();
+src\state.rs:4890:    #[ignore]
+src\state.rs:4892:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:4895:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:4902:            .unwrap();
+src\state.rs:4924:                    .unwrap()
+src\state.rs:4944:            .unwrap();
+src\state.rs:4950:    #[ignore]
+src\state.rs:4952:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:4956:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:4962:            .unwrap();
+src\state.rs:4992:            .unwrap();
+src\state.rs:4998:    #[ignore]
+src\state.rs:5000:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:5002:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:5007:            .unwrap();
+src\state.rs:5009:        settings.set_note(chat, 7, "برای بعد").await.unwrap();
+src\state.rs:5011:            settings.note(chat, 7).await.unwrap().as_deref(),
+src\state.rs:5015:        settings.set_note(chat, 7, "").await.unwrap();
+src\state.rs:5016:        assert!(settings.note(chat, 7).await.unwrap().is_none());
+src\state.rs:5023:                .unwrap();
+src\state.rs:5027:        let reloaded = Settings::connect(&url).await.unwrap();
+src\state.rs:5028:        assert!(reloaded.note(chat, 7).await.unwrap().is_none());
+src\state.rs:5034:            .unwrap();
+src\state.rs:5044:    #[ignore]
+src\state.rs:5046:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:5050:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:5059:                .unwrap();
+src\state.rs:5122:                .unwrap();
+src\state.rs:5135:    #[ignore]
+src\state.rs:5137:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:5141:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:5147:            .unwrap();
+src\state.rs:5232:            .unwrap();
+src\state.rs:5239:    #[ignore]
+src\state.rs:5241:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:5245:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:5251:            .unwrap();
+src\state.rs:5268:        assert_eq!(settings.warns_of(chat, user).await.unwrap(), 0);
+src\state.rs:5269:        settings.set_warns(chat, user, 3).await.unwrap();
+src\state.rs:5270:        assert_eq!(settings.warns_of(chat, user).await.unwrap(), 3);
+src\state.rs:5271:        settings.set_warns(chat, user, 0).await.unwrap();
+src\state.rs:5272:        assert_eq!(settings.warns_of(chat, user).await.unwrap(), 0);
+src\state.rs:5278:            .unwrap();
+src\state.rs:5283:        let mut counts = [first.unwrap().count, second.unwrap().count];
+src\state.rs:5294:            .unwrap()
+src\state.rs:5295:            .expect("threshold action is claimable");
+src\state.rs:5300:                .unwrap()
+src\state.rs:5307:            .unwrap()
+src\state.rs:5308:            .expect("an expired lease is recoverable");
+src\state.rs:5310:            !settings.complete_warning_action(&stale).await.unwrap(),
+src\state.rs:5317:                .unwrap(),
+src\state.rs:5320:        assert!(settings.complete_warning_action(&current).await.unwrap());
+src\state.rs:5321:        assert_eq!(settings.warns_of(chat, user).await.unwrap(), 0);
+src\state.rs:5326:            .unwrap();
+src\state.rs:5331:            .unwrap()
+src\state.rs:5332:            .expect("replacement lifecycle is claimable");
+src\state.rs:5334:            !settings.complete_warning_action(&current).await.unwrap(),
+src\state.rs:5341:                .unwrap()
+src\state.rs:5347:            .unwrap();
+src\state.rs:5352:            .unwrap()
+src\state.rs:5353:            .expect("terminal lifecycle is claimable");
+src\state.rs:5354:        assert!(settings.terminate_warning_action(&terminal).await.unwrap());
+src\state.rs:5356:            settings.warns_of(chat, user).await.unwrap(),
+src\state.rs:5362:        assert_eq!(settings.warns_of(chat, 12_345).await.unwrap(), 0);
+src\state.rs:5368:            .unwrap();
+src\state.rs:5375:    #[ignore]
+src\state.rs:5377:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:5378:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:5387:            .unwrap();
+src\state.rs:5414:            .unwrap();
+src\state.rs:5421:    #[ignore = "isolated PostgreSQL night-state recovery probe"]
+src\state.rs:5423:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:5424:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:5430:            .unwrap();
+src\state.rs:5435:            .unwrap();
+src\state.rs:5439:            .unwrap();
+src\state.rs:5444:        let due = settings.night_due(&["999".to_owned()]).await.unwrap();
+src\state.rs:5454:            .unwrap();
+src\state.rs:5458:    #[ignore]
+src\state.rs:5460:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state.rs:5461:        let settings = Settings::connect(&url).await.unwrap();
+src\state.rs:5467:            .unwrap();
+src\state.rs:5490:            .unwrap();
+src\state.rs:5491:        assert!(settings.moderation_case(other, id).await.unwrap().is_none());
+src\state.rs:5496:                .unwrap()
+src\state.rs:5513:                .unwrap()
+src\state.rs:5528:                .unwrap()
+src\state.rs:5530:        let detail = settings.moderation_case(chat, id).await.unwrap().unwrap();
+src\state.rs:5552:        .unwrap();
+src\state.rs:5564:        .unwrap();
+src\state.rs:5569:                .unwrap()
+src\state.rs:5570:                .unwrap()
+src\state.rs:5582:            .unwrap();
+src\state.rs:5583:        assert_eq!(settings.purge_expired_moderation_cases().await.unwrap(), 1);
+src\state.rs:5591:        .unwrap();
+src\state.rs:5593:        assert!(settings.moderation_case(other, id).await.unwrap().is_some());
+src\state.rs:5598:            .unwrap();
+src\miniapp\overview.rs:148:    let mut days: Vec<Value> = Vec::with_capacity(DAYS as usize);
+src\handlers\cleaner_setup.rs:93:    std::array::from_fn(|back| ((now + EVERY_MINUTES - back as u64) % EVERY_MINUTES) as i64)
+src\handlers\cleaner_setup.rs:109:        .unwrap_or_default()
+src\handlers\cleaner_setup.rs:262:        .ok()
+src\handlers\cleaner_setup.rs:269:        let _ = query
+src\handlers\cleaner_setup.rs:280:        let _ = query
+src\handlers\cleaner_setup.rs:288:        let _ = query
+src\handlers\cleaner_setup.rs:296:        let _ = query.answer().alert(alert).send().await;
+src\handlers\cleaner_setup.rs:299:        let _ = query
+src\handlers\cleaner_setup.rs:383:            let payload = std::str::from_utf8(&button.data).unwrap();
+src\handlers\cleaner_setup.rs:386:                callback_chat(payload.strip_prefix("cln:").unwrap(), i64::MIN),
+src\handlers\betrayal.rs:39:        .and_then(|value| value.parse().ok())
+src\handlers\betrayal.rs:78:    if count <= limit(ctx, chat) as usize {
+src\handlers\betrayal.rs:92:    let count = if count > LIMIT_RANGE.1 as usize {
+src\handlers\betrayal.rs:125:    let _ = ctx
+src\state\ownership.rs:106:    #[ignore = "isolated PostgreSQL ownership fence and request gate fault test"]
+src\state\ownership.rs:112:                .unwrap(),
+src\state\ownership.rs:114:        let control = PgPool::connect(URL).await.unwrap();
+src\state\ownership.rs:116:            .fetch_one(&mut **owner._process_lock.lock().await.as_mut().unwrap())
+src\state\ownership.rs:118:            .unwrap();
+src\state\ownership.rs:119:        let mut checked_out = owner.pool.acquire().await.unwrap();
+src\state\ownership.rs:120:        let monitor = tokio::spawn(owner.clone().monitor_ownership());
+src\state\ownership.rs:125:            .unwrap();
+src\state\ownership.rs:128:            .unwrap();
+src\state\ownership.rs:132:            .unwrap();
+src\state\ownership.rs:136:            error.as_database_error().unwrap().code().as_deref(),
+src\state\ownership.rs:144:        monitor.await.unwrap();
+src\handlers\biolink.rs:231:            .expect("the action is declared in the settings table");
+src\miniapp\mod.rs:117:        assert_eq!(parse_concurrency(None).unwrap(), 64);
+src\miniapp\mod.rs:118:        assert_eq!(parse_concurrency(Some("32")).unwrap(), 32);
+src\handlers\filters.rs:116:        let _ = message
+src\handlers\filters.rs:136:            .ok()
+src\handlers\filters.rs:154:        let _ = message
+src\handlers\filters.rs:168:        let _ = message
+src\handlers\filters.rs:177:        let _ = message
+src\handlers\filters.rs:202:    let _ = message
+src\handlers\filters.rs:247:    let _ = message
+src\handlers\filters.rs:273:        let _ = query
+src\handlers\filters.rs:291:    let _ = query.answer().alert(answer).send().await;
+src\handlers\captcha.rs:47:const DUE_PAGE: i64 = super::FLEET_CAMPAIGNS as i64;
+src\handlers\captcha.rs:83:    let _ = message
+src\handlers\captcha.rs:102:        .and_then(|value| value.parse().ok())
+src\handlers\captcha.rs:104:        .clamp(CHOICES_RANGE.0, CHOICES_RANGE.1) as usize
+src\handlers\captcha.rs:110:        .and_then(|value| value.parse().ok())
+src\handlers\captcha.rs:351:        let _ = query
+src\handlers\captcha.rs:382:                let _ = query
+src\handlers\captcha.rs:392:                let _ = query
+src\handlers\captcha.rs:403:            let _ = query
+src\handlers\captcha.rs:413:            let _ = query
+src\handlers\captcha.rs:423:            let _ = query
+src\handlers\captcha.rs:434:            let _ = query
+src\handlers\captcha.rs:468:        handled += count as i64;
+src\handlers\captcha.rs:475:        if count < page as usize {
+src\handlers\captcha.rs:831:        .ok()
+src\handlers\captcha.rs:852:        let candidate = (step >> 33) as usize % EMOJI.len();
+src\handlers\captcha.rs:857:    let answer = choices[(seed as usize) % count];
+src\handlers\captcha.rs:906:            let count = 2 + (user as usize % 5);
+src\handlers\cleaner.rs:48:    std::env::var("SUDO_ID").ok()?.parse().ok()
+src\handlers\cleaner.rs:130:        let _ = message
+src\handlers\cleaner.rs:147:        let _ = message.reply(body).await;
+src\handlers\cleaner.rs:151:    let _ = message
+src\handlers\cleaner.rs:158:    let _ = message.reply(body).await;
+src\handlers\cleaner.rs:274:                Ok(()) => return Ok(max_id as usize),
+src\handlers\cleaner.rs:349:        let _ = message
+src\handlers\cleaner.rs:355:        let _ = message
+src\handlers\cleaner.rs:361:    let _ = message
+src\handlers\cleaner.rs:381:        let _ = message
+src\handlers\cleaner.rs:390:        let _ = message
+src\handlers\cleaner.rs:401:                let _ = message
+src\handlers\cleaner.rs:408:    let _ = message
+src\handlers\cleaner.rs:435:        let _ = message
+src\handlers\cleaner.rs:448:        let _ = message
+src\handlers\cleaner.rs:461:        let _ = message
+src\handlers\cleaner.rs:466:    let _ = match done {
+src\handlers\cleaner.rs:550:            return participant.user()?.to_ref().await.ok().flatten();
+src\handlers\cleaner.rs:606:            seconds: seconds as i32,
+src\handlers\cleaner.rs:719:        let _ = message
+src\handlers\cleaner.rs:728:        let _ = message.reply("ورود کلینر همین حالا در حال انجام است.").await;
+src\handlers\cleaner.rs:735:                    let _ = message.reply("شناسه حساب کلینر معتبر نیست.").await;
+src\handlers\cleaner.rs:739:                let _ = message
+src\handlers\cleaner.rs:745:                let _ = message
+src\handlers\cleaner.rs:753:            let _ = message
+src\handlers\cleaner.rs:792:                let _ = message
+src\handlers\cleaner.rs:800:                    let _ = message
+src\handlers\cleaner.rs:805:                let _ = match user.check_password(token, password.trim()).await {
+src\handlers\cleaner.rs:808:                            let _ = message.reply("شناسه حساب کلینر معتبر نیست.").await;
+src\handlers\cleaner.rs:832:                    let _ = message.reply("شناسه حساب کلینر معتبر نیست.").await;
+src\handlers\cleaner.rs:836:                let _ = message
+src\handlers\cleaner.rs:845:                let _ = message
+src\handlers\cleaner.rs:851:                let _ = message
+src\handlers\cleaner.rs:861:    let _ = message
+src\handlers\cleaner.rs:880:    let _ = message.delete().await;
+src\handlers\cleaner.rs:905:    let _ = message.reply(card).await;
+src\handlers\cleaner.rs:909:    let code = qrcode::QrCode::new(url.as_bytes()).ok()?;
+src\handlers\cleaner.rs:917:        .ok()?;
+src\handlers\cases.rs:76:        Some(Media::Document(document)) => match document.mime_type().unwrap_or_default() {
+src\handlers\cases.rs:196:        let _ = ctx
+src\handlers\cases.rs:255:        let _ = ctx
+src\handlers\cases.rs:282:        .ok()
+src\handlers\cases.rs:383:            let _ = message.reply("مثال: بستن پرونده ۱۲۳ [یادداشت]").await;
+src\handlers\cases.rs:387:        let _ = message.reply(reply).await;
+src\handlers\cases.rs:390:            let _ = message.reply("مثال: لغو پرونده ۱۲۳ [یادداشت]").await;
+src\handlers\cases.rs:394:        let _ = message.reply(reply).await;
+src\handlers\cases.rs:399:                let _ = message.reply("مثال: پرونده ۱۲۳").await;
+src\handlers\cases.rs:408:            let _ = message
+src\handlers\cases.rs:414:            let _ = message
+src\handlers\cases.rs:434:            let _ = message.reply("پرونده‌ای پیدا نشد.").await;
+src\handlers\cases.rs:438:            let _ = message
+src\handlers\cases.rs:447:            let _ = message
+src\handlers\cases.rs:460:            let _ = message
+src\handlers\cases.rs:468:            let _ = message.reply("پرونده پیدا نشد.").await;
+src\handlers\cases.rs:472:            let _ = message
+src\handlers\cases.rs:510:    let _ = query.answer().edit(answer).await;
+src\handlers\cases.rs:556:        let _ = ctx
+src\handlers\cases.rs:680:        let _ = ctx
+src\handlers\cases.rs:729:    let id = parts.next()?.parse().ok()?;
+src\state\durable.rs:12:static SPOOL_IO_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+src\state\durable.rs:729:        let _ = sync_directory(directory);
+src\state\durable.rs:948:        let _ = std::fs::remove_file(&source);
+src\state\durable.rs:949:        let _ = sync_directory(directory);
+src\state\durable.rs:1043:        std::fs::create_dir(&directory).unwrap();
+src\state\durable.rs:1045:        stage_spool_file(&directory, &path, b"first").unwrap();
+src\state\durable.rs:1046:        stage_spool_file(&directory, &path, b"first").unwrap();
+src\state\durable.rs:1048:        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+src\state\durable.rs:1049:        std::fs::write(directory.join("crash.tmp"), vec![0; 1024]).unwrap();
+src\state\durable.rs:1050:        let before = std::fs::metadata(&path).unwrap().len();
+src\state\durable.rs:1053:        stage_spool_file(&directory, &next, b"next").unwrap();
+src\state\durable.rs:1054:        assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
+src\state\durable.rs:1055:        std::fs::remove_dir_all(directory).unwrap();
+src\state\durable.rs:1061:        std::fs::create_dir(&directory).unwrap();
+src\state\durable.rs:1064:        std::fs::write(&temporary, b"durable").unwrap();
+src\state\durable.rs:1069:        .unwrap();
+src\state\durable.rs:1081:        assert_eq!(std::fs::read(final_path).unwrap(), b"durable");
+src\state\durable.rs:1082:        std::fs::remove_dir_all(directory).unwrap();
+src\state\durable.rs:1088:        std::fs::create_dir(&directory).unwrap();
+src\state\durable.rs:1090:        let bytes = batch.encoded().unwrap();
+src\state\durable.rs:1092:        std::fs::write(&complete, &bytes).unwrap();
+src\state\durable.rs:1094:            .unwrap()
+src\state\durable.rs:1095:            .unwrap();
+src\state\durable.rs:1097:        assert_eq!(std::fs::read(recovered).unwrap(), bytes);
+src\state\durable.rs:1101:        std::fs::write(&partial, b"{\"id\":").unwrap();
+src\state\durable.rs:1104:                .unwrap()
+src\state\durable.rs:1108:        std::fs::remove_dir_all(directory).unwrap();
+src\state\durable.rs:1114:        std::fs::create_dir(&directory).unwrap();
+src\state\durable.rs:1116:        let bytes = batch.encoded().unwrap();
+src\state\durable.rs:1119:        std::fs::write(&temporary, &bytes).unwrap();
+src\state\durable.rs:1120:        stage_spool_file(&directory, &path, &bytes).unwrap();
+src\state\durable.rs:1123:        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+src\state\durable.rs:1124:        std::fs::remove_dir_all(directory).unwrap();
+src\state\durable.rs:1130:        std::fs::create_dir(&directory).unwrap();
+src\state\durable.rs:1133:        std::fs::write(&temporary, batch.encoded().unwrap()).unwrap();
+src\state\durable.rs:1137:            "unsafe replay candidate must fail closed"
+src\state\durable.rs:1139:        std::fs::remove_dir_all(directory).unwrap();
+src\state\durable.rs:1145:        std::fs::create_dir(&directory).unwrap();
+src\state\durable.rs:1146:        preflight_hard_links(&directory).unwrap();
+src\state\durable.rs:1147:        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+src\state\durable.rs:1148:        std::fs::remove_dir_all(directory).unwrap();
+src\state\durable.rs:1154:        std::fs::create_dir(&directory).unwrap();
+src\state\durable.rs:1155:        std::fs::write(directory.join("one.json"), b"12").unwrap();
+src\state\durable.rs:1156:        std::fs::write(directory.join("two.tmp"), b"345").unwrap();
+src\state\durable.rs:1157:        let inventory = inspect_spool(&directory, 5, 2).unwrap();
+src\state\durable.rs:1160:        std::fs::write(directory.join("unknown"), b"").unwrap();
+src\state\durable.rs:1162:        std::fs::remove_dir_all(directory).unwrap();
+src\state\durable.rs:1177:    #[ignore = "isolated PostgreSQL transaction fault and disk-spool crash recovery"]
+src\state\durable.rs:1180:        let mut settings = Settings::connect(URL).await.unwrap();
+src\state\durable.rs:1198:                .unwrap();
+src\state\durable.rs:1204:            .unwrap();
+src\state\durable.rs:1205:        settings.stage_stats(&batch).await.unwrap();
+src\state\durable.rs:1206:        let control = PgPool::connect(URL).await.unwrap();
+src\state\durable.rs:1207:        let mut blocker = control.begin().await.unwrap();
+src\state\durable.rs:1211:            .unwrap();
+src\state\durable.rs:1213:        blocker.rollback().await.unwrap();
+src\state\durable.rs:1219:                .unwrap();
+src\state\durable.rs:1224:            .unwrap();
+src\state\durable.rs:1230:        assert!(settings.apply_stats(&batch, audit_rank_due).await.unwrap());
+src\state\durable.rs:1248:        let mut restarted = Settings::connect(URL).await.unwrap();
+src\state\durable.rs:1250:        restarted.recover_stats(audit_rank_due).await.unwrap();
+src\state\durable.rs:1251:        assert!(!restarted.apply_stats(&batch, audit_rank_due).await.unwrap());
+src\state\durable.rs:1252:        let mut awards = restarted.claim_rank_awards(4096).await.unwrap();
+src\state\durable.rs:1257:            .expect("the committed counter must leave a durable rank side effect");
+src\state\durable.rs:1259:        assert!(restarted.ack_rank_award(&delivery, Some(7)).await.unwrap());
+src\state\durable.rs:1266:        .unwrap();
+src\state\durable.rs:1273:                .unwrap();
+src\state\durable.rs:1280:        .unwrap();
+src\state\durable.rs:1287:                .unwrap();
+src\state\durable.rs:1291:        restarted.stage_stats(&batch).await.unwrap();
+src\state\durable.rs:1298:        .unwrap();
+src\state\durable.rs:1299:        restarted.prune_stats_receipts().await.unwrap();
+src\state\durable.rs:1305:                .unwrap();
+src\state\durable.rs:1307:        restarted.recover_stats(audit_rank_due).await.unwrap();
+src\state\durable.rs:1313:                .unwrap();
+src\state\durable.rs:1315:        std::fs::remove_dir(directory).unwrap();
+src\state\durable.rs:1323:    #[ignore = "isolated PostgreSQL outbox lease/version race"]
+src\state\durable.rs:1326:        let settings = Settings::connect(URL).await.unwrap();
+src\state\durable.rs:1331:            .unwrap();
+src\state\durable.rs:1336:            .unwrap();
+src\state\durable.rs:1353:            .unwrap();
+src\state\durable.rs:1357:            .unwrap()
+src\state\durable.rs:1360:            .expect("first delivery");
+src\state\durable.rs:1365:            .unwrap();
+src\state\durable.rs:1366:        assert!(!settings.ack_rank_award(&first, Some(1)).await.unwrap());
+src\state\durable.rs:1370:            .unwrap()
+src\state\durable.rs:1373:            .expect("newer delivery");
+src\state\durable.rs:1375:        assert!(settings.ack_rank_award(&second, Some(2)).await.unwrap());
+src\state\durable.rs:1384:        .unwrap();
+src\state\durable.rs:1389:    #[ignore = "isolated PostgreSQL rank-outbox retry retention"]
+src\state\durable.rs:1392:        let settings = Settings::connect(URL).await.unwrap();
+src\state\durable.rs:1398:                .unwrap();
+src\state\durable.rs:1410:        settings.apply_stats(&batch, audit_rank_due).await.unwrap();
+src\state\durable.rs:1411:        let delivery = settings.claim_rank_awards(1).await.unwrap().pop().unwrap();
+src\state\durable.rs:1416:                .unwrap(),
+src\state\durable.rs:1426:        .unwrap();
+src\state\durable.rs:1437:        .unwrap();
+src\state\durable.rs:1438:        let final_attempt = settings.claim_rank_awards(1).await.unwrap().pop().unwrap();
+src\state\durable.rs:1444:                .unwrap(),
+src\state\durable.rs:1454:        .unwrap();
+src\state\durable.rs:1460:            .unwrap();
+src\state\durable.rs:1465:            .unwrap();
+src\state\durable.rs:1469:    #[ignore = "isolated PostgreSQL rank-outbox eligibility"]
+src\state\durable.rs:1473:        let settings = Settings::connect(URL).await.unwrap();
+src\state\durable.rs:1479:                .unwrap();
+src\state\durable.rs:1484:                .unwrap();
+src\state\durable.rs:1513:            .unwrap();
+src\state\durable.rs:1517:            .unwrap();
+src\state\durable.rs:1523:                .unwrap();
+src\state\durable.rs:1529:            .unwrap();
+src\state\durable.rs:1533:            .unwrap();
+src\state\durable.rs:1542:        .unwrap();
+src\handlers\currency.rs:56:static CACHE: LazyLock<Mutex<Option<CachedSnapshot>>> = LazyLock::new(|| Mutex::new(None));
+src\handlers\currency.rs:57:static REFRESH: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+src\handlers\currency.rs:58:static LAST_MANUAL_REFRESH: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
+src\handlers\currency.rs:94:            let _ = message
+src\handlers\currency.rs:99:            let _ = message.reply(ERROR_MESSAGE).await;
+src\handlers\currency.rs:137:        *LAST_MANUAL_REFRESH.lock().unwrap() = Some(Instant::now());
+src\handlers\currency.rs:143:            *CACHE.lock().unwrap() = Some(CachedSnapshot {
+src\handlers\currency.rs:177:        .unwrap()
+src\handlers\currency.rs:185:        .unwrap()
+src\handlers\currency.rs:216:        if body.len() as u64 + chunk.len() as u64 > MAX_BODY_BYTES {
+src\handlers\currency.rs:258:    Selector::parse(query).expect("currency selectors are valid CSS")
+src\handlers\currency.rs:290:        let _ = query.answer().send().await;
+src\handlers\currency.rs:294:        let _ = query.answer().send().await;
+src\handlers\currency.rs:302:            let _ = query.answer().send().await;
+src\handlers\currency.rs:310:            let _ = query.answer().alert(ERROR_MESSAGE).send().await;
+src\handlers\currency.rs:318:    let _ = query
+src\handlers\currency.rs:424:            '0'..='9' => char::from_u32('۰' as u32 + (digit as u32 - '0' as u32)).unwrap_or(digit),
+src\handlers\currency.rs:458:        let snapshot = parse_page(PAGE).unwrap();
+src\handlers\config.rs:36:    let value = std::env::var(name).ok()?;
+src\handlers\config.rs:78:            .ok()
+src\handlers\config.rs:81:            .unwrap_or_default();
+src\handlers\config.rs:136:    let _ = message.reply(card).await;
+src\handlers\config.rs:154:    let _ = ctx;
+src\handlers\config.rs:155:    let _ = message
+src\handlers\config.rs:185:        let _ = message
+src\handlers\config.rs:211:        let _ = creator;
+src\handlers\config.rs:222:                let _ = message
+src\handlers\config.rs:241:            let _ = message
+src\handlers\config.rs:260:        let _ = message
+src\handlers\config.rs:291:            let _ = message
+src\handlers\config.rs:299:        let _ = message
+src\handlers\config.rs:306:        let _ = message
+src\handlers\config.rs:327:    let _ = message
+src\handlers\config.rs:359:        // Unset is covered by `link`'s `var(...).ok()?`; empty and malformed values draw no
+src\handlers\install.rs:374:    let _ = ctx.client.send_message(chat_ref, body).await;
+src\handlers\install.rs:387:    let _ = ctx
+src\handlers\install.rs:468:            let _ = ctx.client.send_message(chat_ref, body).await;
+src\handlers\install.rs:531:        let _ = message
+src\handlers\install.rs:540:        let _ = message
+src\handlers\install.rs:565:            let _ = message
+src\handlers\install.rs:576:    let _ = message
+src\handlers\install.rs:710:        for count in 1..=NEEDED.len() as u32 {
+src\handlers\extras.rs:125:    let (from, to) = (from.parse().ok()?, to.parse().ok()?);
+src\handlers\extras.rs:250:        let _ = match rules(ctx, chat) {
+src\handlers\extras.rs:282:        let _ = message
+src\handlers\extras.rs:312:                .ok()
+src\handlers\extras.rs:315:                .unwrap_or_default()
+src\handlers\extras.rs:320:            let _ = message
+src\handlers\extras.rs:341:        let _ = reply;
+src\handlers\extras.rs:378:        let _ = reply;
+src\handlers\extras.rs:400:            let _ = message.reply("روی پیام کاربر ریپلای کنید.").await;
+src\handlers\extras.rs:410:            let _ = message.reply("متن یادداشت را بعد از دستور بنویسید.").await;
+src\handlers\extras.rs:414:            let _ = match read_note(ctx, chat, user).await {
+src\handlers\extras.rs:450:        let _ = reply;
+src\handlers\extras.rs:506:        let _ = message
+src\handlers\extras.rs:544:        let _ = message
+src\handlers\extras.rs:553:        let _ = message
+src\handlers\extras.rs:560:    let _ = message
+src\handlers\extras.rs:587:        .and_then(|value| value.parse::<u32>().ok())
+src\handlers\extras.rs:589:    let _ = match (done, now) {
+src\handlers\extras.rs:617:        let _ = message.reply("روی پیام موردنظر ریپلای کنید.").await;
+src\handlers\extras.rs:630:    let _ = match result {
+src\handlers\extras.rs:681:    let now = ((super::stats::local_seconds() % 86_400) / 60) as u32;
+src\handlers\extras.rs:775:                    let _ = ctx
+src\handlers\extras.rs:805:        Some([size]) => Some((*size as usize).clamp(TAG_BATCH_RANGE.0, TAG_BATCH_RANGE.1)),
+src\handlers\extras.rs:886:        let _ = self.finish();
+src\handlers\extras.rs:934:        let _ = message
+src\handlers\extras.rs:1058:        let _ = ctx
+src\handlers\extras.rs:1118:        Some((h, m)) => (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?),
+src\handlers\extras.rs:1119:        None => (word.parse::<u32>().ok()?, 0),
+src\handlers\extras.rs:1140:            let rest = after(command, TAG_ALL).expect("the alias matches itself");
+src\handlers\invite.rs:37:        .ok()?;
+src\handlers\invite.rs:143:        let _ = match &current {
+src\handlers\invite.rs:159:    let _ = match made {
+src\state\captcha.rs:358:    #[ignore = "isolated PostgreSQL captcha lifecycle probe"]
+src\state\captcha.rs:360:        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+src\state\captcha.rs:361:        let settings = Settings::connect(&url).await.unwrap();
+src\state\captcha.rs:368:            .unwrap();
+src\state\captcha.rs:373:            .unwrap()
+src\state\captcha.rs:374:            .expect("first lifecycle is reserved");
+src\state\captcha.rs:379:                .unwrap()
+src\state\captcha.rs:387:                .unwrap(),
+src\state\captcha.rs:394:                .unwrap()
+src\state\captcha.rs:400:                .unwrap()
+src\state\captcha.rs:406:                .unwrap(),
+src\state\captcha.rs:413:        let (first, second) = (first.unwrap(), second.unwrap());
+src\state\captcha.rs:425:        let mut reclaimed = settings.claim_due_captchas(21, 40, 1).await.unwrap();
+src\state\captcha.rs:428:            .expect("expired passing lease is recoverable");
+src\state\captcha.rs:432:            !settings.finish_captcha(&passing).await.unwrap(),
+src\state\captcha.rs:436:            !settings.defer_captcha(&passing, 500).await.unwrap(),
+src\state\captcha.rs:439:        assert!(settings.finish_captcha(&current).await.unwrap());
+src\state\captcha.rs:444:            .unwrap()
+src\state\captcha.rs:445:            .expect("replacement lifecycle is reserved");
+src\state\captcha.rs:450:                .unwrap(),
+src\state\captcha.rs:454:            !settings.abandon_captcha(&first_reservation).await.unwrap(),
+src\state\captcha.rs:460:            .unwrap();
+src\state\captcha.rs:464:            .unwrap();
+src\state\captcha.rs:468:            .unwrap()
+src\state\captcha.rs:473:            !settings.finish_captcha(&current).await.unwrap(),
+src\state\captcha.rs:476:        assert!(settings.finish_captcha(&replacement).await.unwrap());
+src\state\captcha.rs:481:            .unwrap()
+src\state\captcha.rs:482:            .expect("expiry lifecycle is reserved");
+src\state\captcha.rs:486:            .unwrap();
+src\state\captcha.rs:490:            .unwrap();
+src\state\captcha.rs:494:            .unwrap()
+src\state\captcha.rs:495:            .expect("arming lifecycle is reserved");
+src\state\captcha.rs:497:        let mut due = settings.claim_due_captchas(10, 40, 10).await.unwrap();
+src\state\captcha.rs:510:            .unwrap();
+src\handlers\join.rs:195:        let _ = reply;
+src\handlers\join.rs:219:        let _ = reply;
+src\handlers\join.rs:245:            let _ = message
+src\handlers\join.rs:254:            let _ = message
+src\handlers\join.rs:266:                let _ = message
+src\handlers\join.rs:279:        let _ = message
+src\handlers\join.rs:316:                    let _ = message
+src\handlers\join.rs:323:                let _ = message
+src\handlers\join.rs:329:        let _ = message
+src\handlers\join.rs:357:        let _ = match count {
+src\handlers\join.rs:410:        let _ = message
+src\handlers\join.rs:437:        let _ = message
+src\handlers\join.rs:462:    let _ = reply;
+src\handlers\join.rs:498:            let member = is_member(ctx, name, message.sender_ref().await.ok().flatten()).await;
+src\handlers\join.rs:576:    let Some(chat) = payload.parse::<i64>().ok() else {
+src\handlers\join.rs:589:        Some(name) => is_member(ctx, &name, query.sender_ref().await.ok().flatten()).await,
+src\handlers\join.rs:595:    let _ = query
+src\handlers\join.rs:631:    let _ = answer;
+src\handlers\join.rs:659:    let peer = ctx.client.resolve_username(name).await.ok()??;
+src\handlers\join.rs:660:    let peer = peer.to_ref().await.ok()??;
+src\miniapp\cases.rs:55:        Ok(cases) => Json(json!({ "cases": cases, "has_more": cases.len() == query.limit.unwrap_or(25).clamp(1, 100) as usize })).into_response(),
+src\miniapp\cases.rs:99:                let _ = ctx
+src\handlers\emoji_image.rs:34:                let (px, py) = (x + dx as i32 + 100, y + dy as i32 + 20);
+src\handlers\emoji_image.rs:35:                if px < 0 || py < 0 || px >= SIZE.0 as i32 || py >= SIZE.1 as i32 {
+src\handlers\emoji_image.rs:39:                let base = canvas.get_pixel(px as u32, py as u32).0;
+src\handlers\emoji_image.rs:40:                let a = colour.a() as u32;
+src\handlers\emoji_image.rs:42:                    ((top as u32 * a + bottom as u32 * (255 - a)) / 255) as u8
+src\handlers\emoji_image.rs:45:                    px as u32,
+src\handlers\emoji_image.rs:46:                    py as u32,
+src\handlers\emoji_image.rs:69:        .ok()?;
+src\handlers\emoji_image.rs:79:        let png = render("🍎").expect("apple should render");
+src\handlers\intent_normalize.rs:177:                '\u{660}'..='\u{669}' => char::from_u32(c as u32 - 0x660 + 0x6f0).unwrap(),
+src\handlers\leftback.rs:52:    let _ = ctx.settings.set_value(chat, INVITE_KEY, &link).await;
+src\handlers\limits.rs:125:    let _ = message
+src\handlers\limits.rs:135:    let _ = query
+src\handlers\imgtext.rs:157:        ids.insert(unescape(line.trim_end_matches('\r')), at as u32);
+src\handlers\imgtext.rs:184:        merges.entry((left, right)).or_insert((rank as u32, merged));
+src\handlers\imgtext.rs:192:    let (ids, bytes, eos) = read_vocab(&std::fs::read_to_string(vocab).ok()?)?;
+src\handlers\imgtext.rs:193:    let merges = read_merges(&std::fs::read_to_string(merges).ok()?, &ids);
+src\handlers\imgtext.rs:232:                out.push(self.bytes[*byte as usize]);
+src\handlers\imgtext.rs:295:    let value = ort::value::Value::from_array((vec![1i64, TOKENS as i64], ids)).ok()?;
+src\handlers\imgtext.rs:296:    let mut session = session.lock().ok()?;
+src\handlers\imgtext.rs:297:    let output = session.run(ort::inputs![value]).ok()?;
+src\handlers\imgtext.rs:298:    let (_, values) = output[0].try_extract_tensor::<f32>().ok()?;
+src\handlers\imgtext.rs:356:        let (ids, bytes, eos) = read_vocab(&text).expect("the tiny vocabulary is complete");
+src\handlers\imgtext.rs:430:    /// `#[ignore]`d because it needs the two files, which are not in the repository — the same
+src\handlers\imgtext.rs:442:    #[ignore = "needs vision_text_vocab.txt and vision_text_merges.txt from an export"]
+src\handlers\imgtext.rs:448:            .expect("the exported vocabulary and merges");
+src\handlers\imgtext.rs:473:    /// `#[ignore]`d for the same reason as the one above. What it proves is the wiring nothing
+src\handlers\imgtext.rs:483:    #[ignore = "needs vision_text.onnx and its two files from an export"]
+src\handlers\imgtext.rs:485:        let vector = embed("سیگار").expect("the text tower beside the test binary");
+src\handlers\flood.rs:74:        let _ = message
+src\handlers\flood.rs:83:    let _ = message
+src\handlers\flood.rs:122:    if count <= limit as usize {
+src\handlers\flood.rs:166:        let _ = message
+src\handlers\bots.rs:49:        let _ = message
+src\handlers\bots.rs:58:        let _ = message
+src\handlers\bots.rs:75:    let _ = message
+src\handlers\bots.rs:167:    let _ = ctx
+src\handlers\bots.rs:308:        let _ = message.delete().await;
+src\handlers\bots.rs:549:    let _ = message
+src\handlers\intent.rs:149:            .and_then(|path| std::fs::read_to_string(path).ok())
+src\handlers\intent.rs:151:            .unwrap_or_default()
+src\handlers\intent.rs:193:        ids.insert(piece.into_boxed_str(), at as u32);
+src\handlers\intent.rs:194:        scores.push(score.parse::<f32>().ok()?);
+src\handlers\intent.rs:198:        scores.get(id as usize)?;
+src\handlers\intent.rs:212:        let text = std::fs::read_to_string(beside_the_binary(VOCAB_FILE)?).ok()?;
+src\handlers\intent.rs:256:                let score = best[start] + self.scores[id as usize];
+src\handlers\intent.rs:346:    let shape = vec![1i64, TOKENS as i64];
+src\handlers\intent.rs:347:    let ids = ort::value::Value::from_array((shape.clone(), ids)).ok()?;
+src\handlers\intent.rs:348:    let mask = ort::value::Value::from_array((shape, mask)).ok()?;
+src\handlers\intent.rs:350:        let mut session = session.lock().ok()?;
+src\handlers\intent.rs:351:        let output = session.run(ort::inputs![ids, mask]).ok()?;
+src\handlers\intent.rs:358:        let (_, score) = score.try_extract_tensor::<f32>().ok()?;
+src\handlers\intent.rs:359:        let (_, logits) = logits.try_extract_tensor::<f32>().ok()?;
+src\handlers\intent.rs:432:        read_vocab(&text).expect("the tiny vocabulary is complete")
+src\handlers\intent.rs:469:        let (ids, mask, share) = bpe.encode("a").expect("one word encodes");
+src\handlers\intent.rs:484:        let (ids, mask, _) = bpe.encode(&exact).expect("a complete message fits exactly");
+src\handlers\intent.rs:499:        let (_, _, share) = bpe.encode("a xyzq").expect("encodes with unknowns");
+src\handlers\intent.rs:570:    /// `#[ignore]`d because it needs `intent_vocab.txt`, which is not in the repository —
+src\handlers\intent.rs:577:    #[ignore = "needs intent_vocab.txt from an export"]
+src\handlers\intent.rs:582:        let text = std::fs::read_to_string(dir.join(VOCAB_FILE)).expect("the exported vocabulary");
+src\handlers\intent.rs:583:        let vocab = read_vocab(&text).expect("the vocabulary parses");
+src\handlers\intent.rs:585:            let (ids, _, _) = vocab.encode(case).expect("every pinned case encodes");
+src\handlers\intent.rs:634:    #[ignore = "needs intent.onnx, intent_vocab.txt and intent_frames.txt from an export"]
+src\handlers\intent.rs:637:            score("گوشی فروشی، ۲۰ میلیون، پیام بدید").expect("the model beside the binary");
+src\handlers\intent.rs:638:        let chat = score("سلام بچه ها، خوبید؟").expect("ordinary chat scores");
+src\handlers\intent.rs:658:    #[ignore = "needs shipped intent vocabulary and model"]
+src\handlers\callbacks.rs:18:            let _ = query
+src\handlers\callbacks.rs:39:        .and_then(|chat| chat.parse::<i64>().ok())
+src\handlers\callbacks.rs:89:        let _ = query
+src\handlers\help.rs:1075:            '0'..='9' => char::from_u32('۰' as u32 + (c as u32 - '0' as u32)).unwrap_or(c),
+src\handlers\help.rs:1515:            .expect("the نگهبان تصویر topic must exist");
+src\handlers\notice.rs:19:        .and_then(|value| value.parse().ok())
+src\handlers\imgfilter.rs:150:        .map(|x| ((x / scale).round().clamp(-127.0, 127.0) as i8) as u8)
+src\handlers\imgfilter.rs:156:    bytes.iter().map(|b| f32::from(*b as i8) * scale).collect()
+src\handlers\imgfilter.rs:583:            .ok()
+src\handlers\imgfilter.rs:629:    .ok()
+src\handlers\imgfilter.rs:644:            let _ = message
+src\handlers\imgfilter.rs:652:            let _ = message
+src\handlers\imgfilter.rs:660:            let _ = message
+src\handlers\imgfilter.rs:665:            let _ = message
+src\handlers\imgfilter.rs:677:        let _ = message
+src\handlers\imgfilter.rs:686:        let _ = message
+src\handlers\imgfilter.rs:692:        let _ = message
+src\handlers\imgfilter.rs:700:            let _ = message.reply(why).await;
+src\handlers\imgfilter.rs:721:            let _ = message
+src\handlers\imgfilter.rs:789:        let _ = message
+src\handlers\imgfilter.rs:810:    let _ = message
+src\handlers\imgfilter.rs:824:        let _ = message
+src\handlers\imgfilter.rs:835:    let _ = message
+src\handlers\imgfilter.rs:845:        let _ = message
+src\handlers\imgfilter.rs:857:        let _ = message
+src\handlers\imgfilter.rs:882:    let _ = message
+src\handlers\imgfilter.rs:892:        let _ = message
+src\handlers\imgfilter.rs:904:        let _ = message
+src\handlers\imgfilter.rs:929:    let _ = message
+src\handlers\imgfilter.rs:1178:        let found = calibrate(&vector, &samples, 1_000).expect("enough samples");
+src\handlers\imgfilter.rs:1217:        let full = calibrate(&vector, &many, 1_000).expect("a full reservoir");
+src\handlers\imgfilter.rs:1225:        let strict = calibrate(&vector, &samples, 10_000).expect("enough samples");
+src\handlers\imgfilter.rs:1247:        let found = calibrate(&vector, &samples, 1_000).expect("enough samples");
+src\handlers\imgfilter.rs:1320:        let small = calibrate(&direction, &draw(MIN_SAMPLES), DEFAULT_RATE).expect("at the floor");
+src\handlers\imgfilter.rs:1321:        let large = calibrate(&direction, &draw(1024), DEFAULT_RATE).expect("a full reservoir");
+src\handlers\imgfilter.rs:1433:        let found = calibrate(&vector, &samples, DEFAULT_RATE).expect("enough samples");
+src\handlers\imgfilter.rs:1465:        let (won, _) = worst(&filters, &[0.05, 0.30]).expect("one of them is over");
+src\handlers\lists.rs:57:        let _ = message
+src\handlers\lists.rs:73:    let _ = message
+src\handlers\lists.rs:592:                        Some(peer) => peer.to_ref().await.ok().flatten(),
+src\handlers\lists.rs:630:            let rest = payload.strip_prefix("p:").expect("panel prefix");
+src\handlers\lists.rs:632:            assert_eq!(parts.next().and_then(|p| p.parse().ok()), Some(opener));
+src\handlers\lists.rs:633:            assert_eq!(parts.next().and_then(|p| p.parse().ok()), Some(chat));
+src\handlers\log.rs:24:        Some((id, hash)) => (id.parse().ok()?, hash.parse().ok()),
+src\handlers\log.rs:25:        None => (stored.parse().ok()?, None),
+src\handlers\log.rs:278:        .unwrap_or_default()
+src\handlers\log.rs:293:        let _ = message
+src\handlers\log.rs:313:        let _ = message
+src\handlers\log.rs:327:        let _ = message
+src\handlers\log.rs:355:    let _ = match sent {
+src\handlers\log.rs:385:        return peer.to_ref().await.ok().flatten();
+src\handlers\log.rs:399:        None => PeerId::from_bot_api_dialog_id(super::digits(rest).parse().ok()?)?,
+src\handlers\log.rs:405:        .ok()?
+src\handlers\log.rs:408:        .ok()
+src\handlers\concepts.rs:325:        let (concept, margin) = worst(&all, &armed).expect("a winner among the armed");
+src\handlers\locks.rs:565:        let _ = message
+src\handlers\locks.rs:614:            let _ = message
+src\handlers\locks.rs:657:        let _ = message
+src\handlers\locks.rs:775:        assert!(LOCKS.len() <= u64::BITS as usize);
+src\handlers\locks.rs:942:    let _ = message
+src\handlers\locks.rs:990:        let _ = message
+src\handlers\locks.rs:1007:    let _ = message
+src\handlers\locks.rs:1049:            let _ = ctx
+src\handlers\locks.rs:1258:        !TEXT_MARKS.contains(&(c as u32))
+src\handlers\locks.rs:1259:            && matches!(c as u32,
+src\handlers\locks.rs:1276:        matches!(c as u32, 0x0600..=0x06FF | 0x0750..=0x077F | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF)
+src\handlers\locks.rs:1795:                std::thread::spawn(move || {
+src\handlers\locks.rs:1809:            .map(|attempt| attempt.join().expect("moderation test task panicked"))
+src\handlers\locks.rs:2202:            .expect("the commands lock must be in the table");
+src\handlers\ping.rs:27:    let _ = sent
+src\handlers\pinlock.rs:19:        let _ = message
+src\handlers\pinlock.rs:34:        let _ = message
+src\handlers\pinlock.rs:49:            .ok()
+src\handlers\pinlock.rs:54:        let _ = message
+src\handlers\pinlock.rs:62:        let _ = message
+src\handlers\pinlock.rs:72:    let _ = message
+src\handlers\pinlock.rs:162:    let _ = ctx
+src\handlers\packs.rs:64:        .ok()
+src\handlers\packs.rs:76:        let _ = message
+src\handlers\packs.rs:92:        let _ = message
+src\handlers\packs.rs:100:        let _ = message
+src\handlers\packs.rs:134:        .ok()?;
+src\miniapp\auth.rs:61:    // unsafe process-environment mutation.
+src\miniapp\auth.rs:112:        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+src\miniapp\auth.rs:159:        .and_then(|(_, v)| v.parse().ok())
+src\miniapp\auth.rs:174:        .and_then(|(_, v)| serde_json::from_str::<serde_json::Value>(v).ok())
+src\miniapp\auth.rs:267:            .and_then(|value| value.to_str().ok())
+src\miniapp\auth.rs:280:            .and_then(|value| value.to_str().ok())
+src\miniapp\auth.rs:281:            .and_then(|value| value.trim().parse::<i64>().ok());
+src\miniapp\auth.rs:285:                .and_then(|s| s.parse::<i64>().ok())
+src\miniapp\auth.rs:344:            .and_then(|value| value.to_str().ok())
+src\miniapp\auth.rs:351:            .and_then(|value| value.to_str().ok())
+src\miniapp\auth.rs:352:            .and_then(|value| value.trim().parse::<i64>().ok());
+src\miniapp\auth.rs:356:                .and_then(|value| value.parse().ok())
+src\miniapp\auth.rs:384:            .and_then(|value| value.to_str().ok())
+src\miniapp\auth.rs:391:            .and_then(|value| value.to_str().ok())
+src\miniapp\auth.rs:392:            .and_then(|value| value.trim().parse::<i64>().ok());
+src\miniapp\auth.rs:396:                .and_then(|value| value.parse::<i64>().ok())
+src\miniapp\auth.rs:433:            .and_then(|value| value.to_str().ok())
+src\miniapp\auth.rs:466:        let mut secret_mac = Hmac::<Sha256>::new_from_slice(b"WebAppData").unwrap();
+src\miniapp\auth.rs:470:        let mut mac = Hmac::<Sha256>::new_from_slice(&secret).expect("32-byte key");
+src\miniapp\auth.rs:485:            .expect("a correctly signed payload must validate");
+src\miniapp\auth.rs:492:        let secret = derive_secret_key("123456:test-token").unwrap();
+src\miniapp\auth.rs:505:        let secret = derive_secret_key("123456:test-token").unwrap();
+src\miniapp\auth.rs:556:        let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+src\handlers\ocr.rs:98:    let to = |value: u32| ((value as f32 * scale) as u32).max(32).div_ceil(32) * 32;
+src\handlers\ocr.rs:103:    let plane = (wide * tall) as usize;
+src\handlers\ocr.rs:117:    let (rows, columns) = (shape[2] as usize, shape[3] as usize);
+src\handlers\ocr.rs:143:                let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+src\handlers\ocr.rs:144:                if nx < 0 || ny < 0 || nx >= columns as i32 || ny >= rows as i32 {
+src\handlers\ocr.rs:147:                let next = ny as usize * columns + nx as usize;
+src\handlers\ocr.rs:164:        let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
+src\handlers\ocr.rs:166:            boxes.push((x0 as u32, y0 as u32, w, h));
+src\handlers\ocr.rs:180:    let wide = ((width as f32 * REC_HEIGHT as f32 / height.max(1) as f32) as u32).clamp(16, 1200);
+src\handlers\ocr.rs:189:    let plane = (wide * REC_HEIGHT) as usize;
+src\handlers\ocr.rs:207:    let (steps, classes) = (shape[1] as usize, shape[2] as usize);
+src\handlers\premium\tests.rs:38:            assert_eq!(id.parse::<i64>().unwrap().to_string(), *id);
+src\handlers\premium\tests.rs:188:            vec![(0, 2, Icon::Muted.document_id().unwrap())]
+src\handlers\premium\tests.rs:203:    let expected_first = prefix.encode_utf16().count() as i32;
+src\handlers\premium\tests.rs:204:    let expected_last = text[..text.rfind('📌').unwrap()].encode_utf16().count() as i32;
+src\handlers\premium\tests.rs:208:            (expected_first, 2, Icon::Muted.document_id().unwrap()),
+src\handlers\premium\tests.rs:209:            (expected_last, 2, Icon::Pin.document_id().unwrap())
+src\handlers\premium\tests.rs:224:        .insert(Icon::TelegramSend.document_id().unwrap(), "🚀".to_owned());
+src\handlers\premium\tests.rs:337:    let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&exported).unwrap();
+src\handlers\premium.rs:38:    REGISTRY.get_or_init(|| serde_json::from_str(REGISTRY_JSON).expect("invalid emoji registry"))
+src\handlers\premium.rs:52:                registry().iter().find(|entry| entry.key == self.key()).expect("unregistered icon")
+src\handlers\premium.rs:58:                    .then(|| entry.custom_emoji_id.as_deref()?.parse().ok()).flatten()
+src\handlers\premium.rs:88:    serde_json::to_string(&entries).expect("serializable icon strings")
+src\handlers\panel.rs:71:    let _ = match sent {
+src\handlers\panel.rs:110:    let found = ctx.settings.panels_for(user, PAGE as i64 + 1).await;
+src\handlers\panel.rs:125:        let _ = message
+src\handlers\panel.rs:145:    let _ = message
+src\handlers\panel.rs:180:    let _ = message
+src\handlers\panel.rs:202:    let _ = message
+src\handlers\panel.rs:292:    let _ = reply;
+src\handlers\panel.rs:305:    text.parse().ok()
+src\handlers\panel.rs:388:    let peer = query.peer_ref().await.ok().flatten().or_else(|| {
+src\handlers\panel.rs:464:        let _ = query
+src\handlers\panel.rs:591:        let _ = query
+src\handlers\panel.rs:610:        let _ = query
+src\handlers\panel.rs:627:        let _ = query
+src\handlers\panel.rs:645:            let _ = query
+src\handlers\panel.rs:685:            let _ = imgfilter::toggle_live(ctx, chat, &picked["imf:".len()..]).await;
+src\handlers\panel.rs:765:                let _ = query
+src\handlers\panel.rs:795:                    let _ = query
+src\handlers\panel.rs:816:                let _ = query
+src\handlers\panel.rs:863:                let _ = query
+src\handlers\panel.rs:883:                let _ = query
+src\handlers\panel.rs:895:            let _ = query.answer().send().await;
+src\handlers\panel.rs:897:                let _ = ctx
+src\handlers\panel.rs:910:                    let _ = query
+src\handlers\panel.rs:929:                let _ = query
+src\handlers\panel.rs:941:                let _ = query
+src\handlers\panel.rs:955:                let _ = query
+src\handlers\panel.rs:1085:    let link = std::env::var("MINIAPP_LINK").ok()?;
+src\handlers\panel.rs:1474:        .and_then(|value| value.parse::<u32>().ok())
+src\handlers\panel.rs:1492:        .and_then(|value| value.parse::<u32>().ok())
+src\handlers\panel.rs:1514:    let text = ctx.settings.value(chat, welcome::TEXT).unwrap_or_default();
+src\handlers\panel.rs:2026:            .unwrap_or_default(),
+src\handlers\panel.rs:2062:            .unwrap_or_default(),
+src\handlers\panel.rs:2080:            .unwrap_or_default(),
+src\handlers\panel.rs:2084:            .unwrap_or_default(),
+src\handlers\mod.rs:103:    peer: RwLock<Option<PeerRef>>,
+src\handlers\mod.rs:105:    admins: RwLock<Option<(Instant, HashSet<i64>)>>,
+src\handlers\mod.rs:107:    admin_fetch: tokio::sync::Mutex<()>,
+src\handlers\mod.rs:108:    configure_lock: Arc<tokio::sync::Mutex<()>>,
+src\handlers\mod.rs:111:    messages: std::sync::Mutex<HashMap<i64, VecDeque<Instant>>>,
+src\handlers\mod.rs:112:    removals: std::sync::Mutex<HashMap<i64, VecDeque<Instant>>>,
+src\handlers\mod.rs:116:    notices: std::sync::Mutex<HashMap<(u8, i64), (Instant, Duration)>>,
+src\handlers\mod.rs:117:    members: std::sync::Mutex<HashMap<i64, Instant>>,
+src\handlers\mod.rs:118:    adds: std::sync::Mutex<HashMap<i64, (Instant, u64)>>,
+src\handlers\mod.rs:119:    counts: std::sync::Mutex<HashMap<i64, (u64, String)>>,
+src\handlers\mod.rs:120:    tallies: std::sync::Mutex<HashMap<&'static str, u64>>,
+src\handlers\mod.rs:121:    logs: std::sync::Mutex<Vec<String>>,
+src\handlers\mod.rs:122:    temp_media: std::sync::Mutex<VecDeque<(Instant, i32)>>,
+src\handlers\mod.rs:129:    said: std::sync::Mutex<VecDeque<(i64, i32)>>,
+src\handlers\mod.rs:136:    roots: std::sync::Mutex<HashMap<i32, (Instant, Root)>>,
+src\handlers\mod.rs:150:    joined: std::sync::Mutex<HashMap<i32, Vec<Joined>>>,
+src\handlers\mod.rs:225:        let mut counters = self.tallies.lock().unwrap();
+src\handlers\mod.rs:238:        let mut said = self.said.lock().unwrap();
+src\handlers\mod.rs:249:        let mut said = self.said.lock().unwrap();
+src\handlers\mod.rs:263:            let mut counts = self.counts.lock().unwrap();
+src\handlers\mod.rs:272:        let mut counters = self.tallies.lock().unwrap();
+src\handlers\mod.rs:294:        let token = u64::from(command.max(0) as u32);
+src\handlers\mod.rs:354:        now.saturating_sub(self.last_seen.load(Ordering::Relaxed)) >= idle.as_millis() as u64
+src\handlers\mod.rs:387:        self.logs.lock().unwrap().is_empty()
+src\handlers\mod.rs:388:            && self.temp_media.lock().unwrap().is_empty()
+src\handlers\mod.rs:389:            && self.counts.lock().unwrap().is_empty()
+src\handlers\mod.rs:390:            && self.tallies.lock().unwrap().is_empty()
+src\handlers\mod.rs:400:        let mut roots = self.roots.lock().unwrap();
+src\handlers\mod.rs:412:        match self.roots.lock().unwrap().get(&root) {
+src\handlers\mod.rs:424:        let mut roots = self.roots.lock().unwrap();
+src\handlers\mod.rs:448:        let mut roots = self.roots.lock().unwrap();
+src\handlers\mod.rs:462:        self.roots.lock().unwrap().remove(&root);
+src\handlers\mod.rs:482:struct DirtyList(std::sync::Mutex<DirtyQueue>);
+src\handlers\mod.rs:511:        let mut queue = list.0.lock().unwrap();
+src\handlers\mod.rs:527:        let mut dirty = list.0.lock().unwrap();
+src\handlers\mod.rs:541:        let count = list.0.lock().unwrap().len();
+src\handlers\mod.rs:548:type LoadedFilters = RwLock<HashMap<i64, (Instant, Arc<Vec<imgfilter::Filter>>)>>;
+src\handlers\mod.rs:616:    pending: Mutex<Option<PendingPassword>>,
+src\handlers\mod.rs:623:        *self.pending.lock().unwrap() = Some(PendingPassword {
+src\handlers\mod.rs:632:        let Some(request) = self.pending.lock().unwrap().take() else {
+src\handlers\mod.rs:639:        let mut pending = self.pending.lock().unwrap();
+src\handlers\mod.rs:666:    chats: RwLock<HashMap<i64, Arc<ChatState>>>,
+src\handlers\mod.rs:671:    owned_tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
+src\handlers\mod.rs:675:    deleted: RwLock<HashMap<u64, (Instant, String)>>,
+src\handlers\mod.rs:680:    pending_admins: RwLock<HashMap<u64, promote::Pending>>,
+src\handlers\mod.rs:682:    user: RwLock<Option<Client>>,
+src\handlers\mod.rs:688:    user_chats: RwLock<HashMap<i64, PeerRef>>,
+src\handlers\mod.rs:695:    cleaner_login: tokio::sync::Mutex<()>,
+src\handlers\mod.rs:697:    join_refs: RwLock<HashMap<String, PeerRef>>,
+src\handlers\mod.rs:701:    pending_writes: std::sync::Mutex<Vec<(i64, i32, i64)>>,
+src\handlers\mod.rs:706:    pending_drops: std::sync::Mutex<Vec<(i64, i32)>>,
+src\handlers\mod.rs:712:    deferred_deletes: std::sync::Mutex<BinaryHeap<DeferredEntry>>,
+src\handlers\mod.rs:721:    pending_numbers: std::sync::Mutex<PendingNumbers>,
+src\handlers\mod.rs:727:    bios: RwLock<HashMap<i64, (Instant, bool)>>,
+src\handlers\mod.rs:757:    verdicts: RwLock<HashMap<i64, CachedVerdict>>,
+src\handlers\mod.rs:762:    voice_verdicts: RwLock<HashMap<(i64, u64), VoiceVerdict>>,
+src\handlers\mod.rs:767:    filtered_voices: RwLock<HashMap<u64, FilteredVoice>>,
+src\handlers\mod.rs:796:    margins: RwLock<HashMap<i64, CachedMargins>>,
+src\handlers\mod.rs:800:    adverts: RwLock<HashMap<i64, (Instant, Option<&'static str>)>>,
+src\handlers\mod.rs:807:    stats_pending: tokio::sync::Mutex<Option<crate::state::StatsBatch>>,
+src\handlers\mod.rs:808:    media_pending: tokio::sync::Mutex<Vec<(i64, i32, i64)>>,
+src\handlers\mod.rs:810:    filter_loads: [tokio::sync::Mutex<()>; 256],
+src\handlers\mod.rs:815:    custom: RwLock<HashMap<(i64, u64), CachedCustom>>,
+src\handlers\mod.rs:821:    intents: RwLock<HashMap<u64, (Instant, f32)>>,
+src\handlers\mod.rs:828:    trade_history: std::sync::Mutex<trade::context::History>,
+src\handlers\mod.rs:837:    samples: RwLock<Vec<Box<[f32]>>>,
+src\handlers\mod.rs:1008:            .expect("pending number was checked above");
+src\handlers\mod.rs:1085:const EVENTS_PER_SUBJECT_MAX: usize = raid::LIMIT_RANGE.1 as usize + 1;
+src\handlers\mod.rs:1086:const FLOOD_EVENTS_MAX: usize = flood::LIMIT_RANGE.1 as usize + 1;
+src\handlers\mod.rs:1087:const REMOVAL_EVENTS_MAX: usize = betrayal::LIMIT_RANGE.1 as usize + 1;
+src\handlers\mod.rs:1239:                break acquire.await.expect("the fleet semaphore is never closed");
+src\handlers\mod.rs:1243:                    break permit.expect("the fleet semaphore is never closed");
+src\handlers\mod.rs:1338:        let mut tasks = self.owned_tasks.lock().unwrap();
+src\handlers\mod.rs:1349:            let mut owned = self.owned_tasks.lock().unwrap();
+src\handlers\mod.rs:1361:        if let Some(state) = self.chats.read().unwrap().get(&chat) {
+src\handlers\mod.rs:1365:        Arc::clone(self.chats.write().unwrap().entry(chat).or_insert_with(|| {
+src\handlers\mod.rs:1382:        if let Some(state) = self.chats.read().unwrap().get(&chat) {
+src\handlers\mod.rs:1386:        let mut chats = self.chats.write().unwrap();
+src\handlers\mod.rs:1405:        self.chats.read().unwrap().get(&chat).map(Arc::clone)
+src\handlers\mod.rs:1409:        self.user.read().unwrap().clone()
+src\handlers\mod.rs:1413:        *self.user.write().unwrap() = Some(client);
+src\handlers\mod.rs:1421:            runtime_chats: self.chats.read().unwrap().len(),
+src\handlers\mod.rs:1425:            user_chats: self.user_chats.read().unwrap().len(),
+src\handlers\mod.rs:1426:            dirty_logs: self.dirty.logs.0.lock().unwrap().len(),
+src\handlers\mod.rs:1427:            dirty_media: self.dirty.media.0.lock().unwrap().len(),
+src\handlers\mod.rs:1428:            dirty_stats: self.dirty.stats.0.lock().unwrap().len(),
+src\handlers\mod.rs:1429:            pending_writes: self.pending_writes.lock().unwrap().len(),
+src\handlers\mod.rs:1430:            pending_drops: self.pending_drops.lock().unwrap().len(),
+src\handlers\mod.rs:1431:            deferred: self.deferred_deletes.lock().unwrap().len(),
+src\handlers\mod.rs:1432:            pending_admins: self.pending_admins.read().unwrap().len(),
+src\handlers\mod.rs:1433:            deleted: self.deleted.read().unwrap().len(),
+src\handlers\mod.rs:1434:            verdicts: self.verdicts.read().unwrap().len(),
+src\handlers\mod.rs:1435:            voice_verdicts: self.voice_verdicts.read().unwrap().len(),
+src\handlers\mod.rs:1436:            filtered_voices: self.filtered_voices.read().unwrap().len(),
+src\handlers\mod.rs:1447:                .unwrap()
+src\handlers\mod.rs:1457:        let mut members = state.members.lock().unwrap();
+src\handlers\mod.rs:1467:            state.members.lock().unwrap().remove(&user);
+src\handlers\mod.rs:1479:        let mut bios = self.bios.write().unwrap();
+src\handlers\mod.rs:1495:        let mut bios = self.bios.write().unwrap();
+src\handlers\mod.rs:1507:        self.bios.write().unwrap().remove(&user);
+src\handlers\mod.rs:1517:        .expect("the bio semaphore is never closed")
+src\handlers\mod.rs:1527:        .expect("the comment semaphore is never closed")
+src\handlers\mod.rs:1545:        let verdicts = self.verdicts.read().unwrap();
+src\handlers\mod.rs:1555:        let mut verdicts = self.verdicts.write().unwrap();
+src\handlers\mod.rs:1566:            .unwrap()
+src\handlers\mod.rs:1575:            .unwrap()
+src\handlers\mod.rs:1582:        let mut verdicts = self.voice_verdicts.write().unwrap();
+src\handlers\mod.rs:1595:        let mut voices = self.filtered_voices.write().unwrap();
+src\handlers\mod.rs:1605:        let voices = self.filtered_voices.read().unwrap();
+src\handlers\mod.rs:1622:                .ok()
+src\handlers\mod.rs:1623:                .and_then(|value| value.parse::<usize>().ok())
+src\handlers\mod.rs:1630:        .expect("the voice admission semaphore is never closed")
+src\handlers\mod.rs:1638:                .ok()
+src\handlers\mod.rs:1639:                .and_then(|value| value.parse::<usize>().ok())
+src\handlers\mod.rs:1646:        .expect("the nsfw semaphore is never closed")
+src\handlers\mod.rs:1656:        .expect("the nsfw task semaphore is never closed")
+src\handlers\mod.rs:1660:        let margins = self.margins.read().unwrap();
+src\handlers\mod.rs:1670:        let adverts = self.adverts.read().unwrap();
+src\handlers\mod.rs:1678:        let mut adverts = self.adverts.write().unwrap();
+src\handlers\mod.rs:1692:        let slot = (chat as u64 % 256) as usize;
+src\handlers\mod.rs:1697:                let cache = self.image_filters.read().unwrap();
+src\handlers\mod.rs:1729:                let mut cache = self.image_filters.write().unwrap();
+src\handlers\mod.rs:1746:        let mut cache = self.image_filters.write().unwrap();
+src\handlers\mod.rs:1747:        self.filter_versions[(chat as u64 % 256) as usize].fetch_add(1, Ordering::Release);
+src\handlers\mod.rs:1755:        let intents = self.intents.read().unwrap();
+src\handlers\mod.rs:1763:        let mut intents = self.intents.write().unwrap();
+src\handlers\mod.rs:1774:                .ok()
+src\handlers\mod.rs:1775:                .and_then(|value| value.parse::<usize>().ok())
+src\handlers\mod.rs:1782:        .expect("the intent task semaphore is never closed")
+src\handlers\mod.rs:1786:        let custom = self.custom.read().unwrap();
+src\handlers\mod.rs:1796:        let mut custom = self.custom.write().unwrap();
+src\handlers\mod.rs:1811:        let mut samples = self.samples.write().unwrap();
+src\handlers\mod.rs:1840:            .save_samples(&bytes, scale, samples.len() as u32)
+src\handlers\mod.rs:1851:        let count = (count as usize).min(SAMPLE_CAP);
+src\handlers\mod.rs:1862:        let mut samples = self.samples.write().unwrap();
+src\handlers\mod.rs:1877:        self.samples.read().unwrap().clone()
+src\handlers\mod.rs:1881:        let mut margins = self.margins.write().unwrap();
+src\handlers\mod.rs:1894:            .expect("the nsfw fetch semaphore is never closed")
+src\handlers\mod.rs:1912:        .ok()
+src\handlers\mod.rs:1925:        .expect("the sweep semaphore is never closed")
+src\handlers\mod.rs:1937:        .expect("the cleaner semaphore is never closed")
+src\handlers\mod.rs:1956:        .ok()
+src\handlers\mod.rs:1963:            .unwrap()
+src\handlers\mod.rs:1973:        let mut adds = state.adds.lock().unwrap();
+src\handlers\mod.rs:1986:        let mut entries = state.logs.lock().unwrap();
+src\handlers\mod.rs:2008:            .unwrap_or_default()
+src\handlers\mod.rs:2016:            let mut queue = state.temp_media.lock().unwrap();
+src\handlers\mod.rs:2027:        let mut writes = self.pending_writes.lock().unwrap();
+src\handlers\mod.rs:2042:        let mut queue = state.temp_media.lock().unwrap();
+src\handlers\mod.rs:2053:        let mut drops = self.pending_drops.lock().unwrap();
+src\handlers\mod.rs:2063:        let mut drops = self.pending_drops.lock().unwrap();
+src\handlers\mod.rs:2069:        std::mem::take(&mut *self.pending_writes.lock().unwrap())
+src\handlers\mod.rs:2073:        std::mem::take(&mut *self.pending_drops.lock().unwrap())
+src\handlers\mod.rs:2077:        let mut queue = self.deferred_deletes.lock().unwrap();
+src\handlers\mod.rs:2091:        let mut queue = self.deferred_deletes.lock().unwrap();
+src\handlers\mod.rs:2096:            due.push(queue.pop().expect("peeked deferred action").action);
+src\handlers\mod.rs:2127:                let mut queue = state.temp_media.lock().unwrap();
+src\handlers\mod.rs:2160:            let mut logs = state.logs.lock().unwrap();
+src\handlers\mod.rs:2188:            .unwrap()
+src\handlers\mod.rs:2198:        let mut cache = state.joined.lock().unwrap();
+src\handlers\mod.rs:2229:        self.user_chats.read().unwrap().get(&chat).copied()
+src\handlers\mod.rs:2233:        self.user_chats.write().unwrap().clear();
+src\handlers\mod.rs:2237:        let mut known = self.user_chats.write().unwrap();
+src\handlers\mod.rs:2250:        self.cleaner_login.try_lock().ok()
+src\handlers\mod.rs:2277:            .store(self.started.elapsed().as_millis() as u64, Ordering::Relaxed);
+src\handlers\mod.rs:2280:            .unwrap()
+src\handlers\mod.rs:2291:            .unwrap()
+src\handlers\mod.rs:2304:            .unwrap()
+src\handlers\mod.rs:2316:        armed != 0 && self.started.elapsed().as_millis() as u64 - armed < ARMED_WINDOW
+src\handlers\mod.rs:2320:        self.join_refs.read().unwrap().get(name).copied()
+src\handlers\mod.rs:2324:        let mut refs = self.join_refs.write().unwrap();
+src\handlers\mod.rs:2332:        let mut pendings = self.pending_admins.write().unwrap();
+src\handlers\mod.rs:2344:            .unwrap()
+src\handlers\mod.rs:2351:        if let Some(pending) = self.pending_admins.write().unwrap().get_mut(&key) {
+src\handlers\mod.rs:2357:        self.pending_admins.write().unwrap().remove(&key);
+src\handlers\mod.rs:2383:            .ok()
+src\handlers\mod.rs:2502:        let mut notices = state.notices.lock().unwrap();
+src\handlers\mod.rs:2522:        let mut deleted = self.deleted.write().unwrap();
+src\handlers\mod.rs:2532:        let deleted = self.deleted.read().unwrap();
+src\handlers\mod.rs:2543:        let mut messages = state.messages.lock().unwrap();
+src\handlers\mod.rs:2566:        let mut removals = state.removals.lock().unwrap();
+src\handlers\mod.rs:2595:        *state.peer.write().unwrap() = Some(peer);
+src\handlers\mod.rs:2608:        let admins = state.admins.read().unwrap();
+src\handlers\mod.rs:2615:        self.started.elapsed().as_millis() as u64
+src\handlers\mod.rs:2642:            let chats = self.chats.read().unwrap();
+src\handlers\mod.rs:2660:        let mut chats = self.chats.write().unwrap();
+src\handlers\mod.rs:2695:            for (counter, count) in std::mem::take(&mut *state.tallies.lock().unwrap()) {
+src\handlers\mod.rs:2702:            let mut per_user = state.counts.lock().unwrap();
+src\handlers\mod.rs:2733:            .unwrap()
+src\handlers\mod.rs:2745:        *state.peer.read().unwrap()
+src\handlers\mod.rs:2753:        let has_peer = state.peer.read().unwrap().is_some();
+src\handlers\mod.rs:2778:            *state.admins.write().unwrap() = None;
+src\handlers\mod.rs:2784:            *state.admins.write().unwrap() = Some((Instant::now(), admins));
+src\handlers\mod.rs:2790:        let admins = state.admins.read().unwrap();
+src\handlers\mod.rs:3073:            let _ = ctx.settings.set_value(chat, TITLE, title).await;
+src\handlers\mod.rs:3129:        let _ = biolink::tripped(ctx, chat, message).await;
+src\handlers\mod.rs:3190:    let _ = locks::handle(ctx, message, &view).await
+src\handlers\mod.rs:3320:        .map(|d| d.as_secs() as i64)
+src\handlers\mod.rs:3519:            let peer = ctx.client.resolve_username(username).await.ok()??;
+src\handlers\mod.rs:3521:            return Some((peer.to_ref().await.ok()??, name));
+src\handlers\mod.rs:3528:    let replied = message.get_reply().await.ok()??;
+src\handlers\mod.rs:3530:    Some((replied.sender_ref().await.ok()??, name))
+src\handlers\mod.rs:3560:        .map(|word| word.parse().ok())
+src\handlers\mod.rs:3594:                '۰'..='۹' => char::from(b'0' + (c as u32 - '۰' as u32) as u8),
+src\handlers\mod.rs:3595:                '٠'..='٩' => char::from(b'0' + (c as u32 - '٠' as u32) as u8),
+src\handlers\mod.rs:3720:        return user.to_ref().await.ok().flatten().map(|peer| (peer, name));
+src\handlers\mod.rs:3810:    ctx.client.get_permissions(chat, sender).await.ok()
+src\handlers\mod.rs:3877:        let id = PeerId::channel(123).unwrap();
+src\handlers\mod.rs:3898:                PeerId::channel(456).unwrap(),
+src\handlers\mod.rs:3903:        assert!(!super::is_group_dialog(PeerId::user(123).unwrap(), None));
+src\handlers\mod.rs:4051:        let waiter = tokio::spawn(async move {
+src\handlers\mod.rs:4053:            let _ = ready.send(());
+src\handlers\mod.rs:4064:            .expect("a released slot must wake the waiter");
+src\handlers\mod.rs:4065:        waiter.await.expect("the waiter task must finish");
+src\handlers\mod.rs:4116:        let queue: Mutex<Vec<&str>> = Mutex::new(Vec::new());
+src\handlers\mod.rs:4122:            let mut queued = queue.lock().unwrap();
+src\handlers\mod.rs:4132:                .map(|_| std::mem::take(&mut *queue.lock().unwrap()))
+src\handlers\mod.rs:4139:            dirty.0.lock().unwrap().len(),
+src\handlers\mod.rs:4166:            let parsed: i64 = stored.parse().unwrap();
+src\handlers\mod.rs:4168:                id: PeerId::from_bot_api_dialog_id(chat).unwrap(),
+src\handlers\mod.rs:4273:        let counts = state.counts.lock().unwrap();
+src\handlers\mod.rs:4276:        let tallies = state.tallies.lock().unwrap();
+src\handlers\mod.rs:4286:            state.dirty.stats.0.lock().unwrap().len() <= 2,
+src\handlers\mod.rs:4296:        for user in 0..=(PER_CHAT_MAX as i64) {
+src\handlers\mod.rs:4305:        let counts = state.counts.lock().unwrap();
+src\handlers\mod.rs:4318:        for post in 1..=(ROOTS_MAX as i32 + 10) {
+src\handlers\mod.rs:4321:        assert_eq!(state.roots.lock().unwrap().len(), ROOTS_MAX);
+src\handlers\mod.rs:4323:        assert_eq!(state.root_known(ROOTS_MAX as i32 + 10), Some(true));
+src\handlers\mod.rs:4430:        assert_eq!(list.0.lock().unwrap().len(), 7);
+src\handlers\mod.rs:4434:        assert!(list.0.lock().unwrap().is_empty());
+src\handlers\mod.rs:4458:        for id in 1..=(SAID_MAX as i32 + 10) {
+src\handlers\mod.rs:4464:        assert_eq!(kept.last(), Some(&(SAID_MAX as i32 + 10)));
+src\handlers\mod.rs:4479:        let now = (IDLE.as_millis() as u64) * 3 / 2;
+src\handlers\mod.rs:4484:        let configuring = state.configure_lock.try_lock().unwrap();
+src\handlers\mod.rs:4493:        state.logs.lock().unwrap().push("a line".to_owned());
+src\handlers\mod.rs:4495:        state.logs.lock().unwrap().clear();
+src\handlers\mod.rs:4500:            .unwrap()
+src\handlers\mod.rs:4503:        state.temp_media.lock().unwrap().clear();
+src\handlers\mod.rs:4507:        state.tallies.lock().unwrap().clear();
+src\handlers\mod.rs:4511:        state.counts.lock().unwrap().clear();
+src\handlers\mod.rs:4512:        state.tallies.lock().unwrap().clear();
+src\handlers\mod.rs:4533:        let now = (IDLE.as_millis() as u64) * 3 / 2;
+src\handlers\mod.rs:4541:            .unwrap()
+src\handlers\mod.rs:4546:            .unwrap()
+src\handlers\mod.rs:4548:        state.members.lock().unwrap().insert(7, Instant::now());
+src\handlers\mod.rs:4549:        state.adds.lock().unwrap().insert(7, (Instant::now(), 1));
+src\handlers\mod.rs:4553:            .unwrap()
+src\handlers\mod.rs:4555:        state.joined.lock().unwrap().insert(1, Vec::new());
+src\handlers\mod.rs:4563:        state.logs.lock().unwrap().push("unsent".to_owned());
+src\handlers\mod.rs:4565:        state.logs.lock().unwrap().clear();
+src\handlers\mod.rs:4569:        state.tallies.lock().unwrap().clear();
+src\handlers\mod.rs:4586:        state.tallies.lock().unwrap().clear();
+src\handlers\purge.rs:57:    let now = ((super::stats::local_seconds() % 86_400) / 60) as u32;
+src\handlers\purge.rs:112:                    let first = (last - count as i32).max(1);
+src\handlers\purge.rs:119:            let _ = marker
+src\handlers\purge.rs:158:    let _ = message
+src\handlers\purge.rs:191:        let _ = query
+src\handlers\purge.rs:202:        let _ = query
+src\handlers\purge.rs:214:    let _ = query.answer().send().await;
+src\handlers\purge.rs:227:        let _ = ctx
+src\handlers\purge.rs:253:    let _ = message
+src\handlers\nsfw.rs:116:const DETAIL_FLOOR: u32 = RESIZE as u32;
+src\handlers\nsfw.rs:389:        .ok()
+src\handlers\nsfw.rs:390:        .and_then(|value| value.parse::<usize>().ok())
+src\handlers\nsfw.rs:397:        .ok()
+src\handlers\nsfw.rs:398:        .and_then(|value| value.parse::<usize>().ok())
+src\handlers\nsfw.rs:403:pub type Session = std::sync::Mutex<ort::session::Session>;
+src\handlers\nsfw.rs:436:    let mut path = std::env::current_exe().ok()?;
+src\handlers\nsfw.rs:439:    let present = std::fs::metadata(&path).is_ok_and(|meta| meta.len() as usize == RUNTIME.len());
+src\handlers\nsfw.rs:444:        std::fs::write(&staging, RUNTIME).ok()?;
+src\handlers\nsfw.rs:445:        std::fs::rename(&staging, &path).ok()?;
+src\handlers\nsfw.rs:451:    let mut builder = ort::session::Session::builder().ok()?;
+src\handlers\nsfw.rs:452:    builder = builder.with_intra_threads(infer_threads()).ok()?;
+src\handlers\nsfw.rs:456:            .ok()
+src\handlers\nsfw.rs:457:            .and_then(|value| value.parse::<i32>().ok())
+src\handlers\nsfw.rs:464:            .ok()?;
+src\handlers\nsfw.rs:602:    let input = ort::value::Value::from_array((shape, pixels)).ok()?;
+src\handlers\nsfw.rs:603:    let mut session = session.lock().ok()?;
+src\handlers\nsfw.rs:604:    let output = session.run(ort::inputs![input]).ok()?;
+src\handlers\nsfw.rs:606:        let (_, values) = value.try_extract_tensor::<f32>().ok()?;
+src\handlers\nsfw.rs:618:    let input = ort::value::Value::from_array((shape, pixels)).ok()?;
+src\handlers\nsfw.rs:619:    let mut session = session.lock().ok()?;
+src\handlers\nsfw.rs:620:    let output = session.run(ort::inputs![input]).ok()?;
+src\handlers\nsfw.rs:622:    let (shape, values) = value.try_extract_tensor::<f32>().ok()?;
+src\handlers\nsfw.rs:700:        ((width as f32 * scale).round() as u32).max(side as u32),
+src\handlers\nsfw.rs:701:        ((height as f32 * scale).round() as u32).max(side as u32),
+src\handlers\nsfw.rs:705:    let left = (width - side as u32) / 2;
+src\handlers\nsfw.rs:706:    let top = (height - side as u32) / 2;
+src\handlers\nsfw.rs:707:    image::imageops::crop_imm(&resized, left, top, side as u32, side as u32).to_image()
+src\handlers\nsfw.rs:773:    let (width, height) = (width as usize, height as usize);
+src\handlers\nsfw.rs:821:    let shape = || vec![1, 3, SIDE as i64, SIDE as i64];
+src\handlers\nsfw.rs:991:            vec![3, GRADE_SIDE as i64, GRADE_SIDE as i64],
+src\handlers\nsfw.rs:1183:        (f64::from(width) * scale).round().max(1.0) as u32,
+src\handlers\nsfw.rs:1184:        (f64::from(height) * scale).round().max(1.0) as u32,
+src\handlers\nsfw.rs:1192:        .ok()?
+src\handlers\nsfw.rs:1200:    let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
+src\handlers\nsfw.rs:1206:        let frame = frame.ok()?;
+src\handlers\nsfw.rs:1225:        MAX_ANIMATED_FRAMES * MAX_ANIMATED_SIDE as usize * MAX_ANIMATED_SIDE as usize * 3
+src\handlers\nsfw.rs:1244:        .ok()?;
+src\handlers\nsfw.rs:1250:            pipe.take(cap as u64 + 1).read_to_end(&mut bytes).await?;
+src\handlers\nsfw.rs:1271:            let _ = child.kill().await;
+src\handlers\nsfw.rs:1272:            let _ = child.wait().await;
+src\handlers\nsfw.rs:1299:        .or_else(|| value.and_then(serde_json::Value::as_str)?.parse().ok())
+src\handlers\nsfw.rs:1309:    let _ = tokio::fs::remove_file(&path).await;
+src\handlers\nsfw.rs:1331:    let json: serde_json::Value = serde_json::from_slice(&probe.stdout).ok()?;
+src\handlers\nsfw.rs:1333:    let width = json_number(stream.get("width"))? as u32;
+src\handlers\nsfw.rs:1334:    let height = json_number(stream.get("height"))? as u32;
+src\handlers\nsfw.rs:1361:    let frame_bytes = width.checked_mul(height)?.checked_mul(3)? as usize;
+src\handlers\nsfw.rs:1484:            .map(|handle| handle.join().expect("a frame lane panicked"))
+src\handlers\nsfw.rs:1806:        .filter(|(_, (side, _))| *side >= RESIZE as i32)
+src\handlers\nsfw.rs:2037:        .ok()
+src\handlers\nsfw.rs:2151:        .ok()
+src\handlers\nsfw.rs:2278:                        let frame = image::load_from_memory(&sharper).ok()?.to_rgb8();
+src\handlers\nsfw.rs:2447:                    .ok()
+src\handlers\nsfw.rs:2449:                    .unwrap_or_default();
+src\handlers\nsfw.rs:2895:            for value in 0..=MAX_ANIMATED_FRAMES as u8 {
+src\handlers\nsfw.rs:2901:                encoder.encode_frame(frame).expect("GIF frame encodes");
+src\handlers\nsfw.rs:2904:        let frames = decode_gif_frames(bytes).expect("GIF decodes");
+src\handlers\nsfw.rs:2906:        assert_eq!(frames.first().unwrap().get_pixel(0, 0)[0], 0);
+src\handlers\nsfw.rs:2908:            frames.last().unwrap().get_pixel(0, 0)[0],
+src\handlers\nsfw.rs:2909:            MAX_ANIMATED_FRAMES as u8
+src\handlers\nsfw.rs:2938:            .expect("ffmpeg is installed for animated media");
+src\handlers\nsfw.rs:2946:            .expect("MP4 animation decodes");
+src\handlers\nsfw.rs:2976:            path.to_str().unwrap(),
+src\handlers\nsfw.rs:2982:            .expect("ffmpeg is installed for animated media");
+src\handlers\nsfw.rs:2988:        let bytes = tokio::fs::read(&path).await.expect("the muxed file exists");
+src\handlers\nsfw.rs:2989:        let _ = tokio::fs::remove_file(&path).await;
+src\handlers\nsfw.rs:2992:            .expect("a trailing-moov MP4 decodes");
+src\handlers\nsfw.rs:3317:            assert_eq!(view.dimensions(), (SIDE as u32, SIDE as u32));
+src\handlers\nsfw.rs:3327:            v.pixels().map(|p| u32::from(p.0[0])).sum::<u32>() / (SIDE * SIDE) as u32
+src\handlers\nsfw.rs:3342:        assert_eq!(out.dimensions(), (SIDE as u32, SIDE as u32));
+src\handlers\nsfw.rs:3345:        let centre = out.get_pixel(SIDE as u32 / 2, SIDE as u32 / 2).0[0];
+src\handlers\nsfw.rs:3354:            (SIDE as u32, SIDE as u32)
+src\handlers\nsfw.rs:3358:            (SIDE as u32, SIDE as u32)
+src\handlers\nsfw.rs:3635:            let v = ((x + y) / 2) as u8;
+src\handlers\nsfw.rs:3855:        let pool = grader().expect("the bundled grader must load");
+src\handlers\nsfw.rs:3856:        let view = image::RgbImage::from_fn(GRADE_SIDE as u32, GRADE_SIDE as u32, |x, y| {
+src\handlers\nsfw.rs:3857:            image::Rgb([((x + y) % 255) as u8, (x % 255) as u8, (y % 255) as u8])
+src\handlers\nsfw.rs:3864:                    vec![3, GRADE_SIDE as i64, GRADE_SIDE as i64],
+src\handlers\nsfw.rs:3868:            .expect("a forward pass");
+src\handlers\nsfw.rs:3880:        let pool = model().expect("the bundled model must load");
+src\handlers\nsfw.rs:3881:        let view = image::RgbImage::from_fn(SIDE as u32, SIDE as u32, |x, y| {
+src\handlers\nsfw.rs:3882:            let v = ((x * 3 + y) % 255) as u8;
+src\handlers\nsfw.rs:3891:                        vec![1, 3, SIDE as i64, SIDE as i64],
+src\handlers\nsfw.rs:3895:                .expect("a pass");
+src\handlers\nsfw.rs:3923:    #[ignore]
+src\handlers\nsfw.rs:3925:        let pool = model().expect("the bundled model must load");
+src\handlers\nsfw.rs:3926:        let view = image::RgbImage::from_fn(SIDE as u32, SIDE as u32, |x, y| {
+src\handlers\nsfw.rs:3927:            image::Rgb([((x * 3 + y) % 255) as u8, (x % 255) as u8, (y % 255) as u8])
+src\handlers\nsfw.rs:3931:                .expect("a forward pass")
+src\handlers\nsfw.rs:3944:                handle.join().expect("inference thread must finish");
+src\handlers\nsfw.rs:3955:    #[ignore]
+src\handlers\nsfw.rs:3957:        let pool = model().expect("the bundled model must load");
+src\handlers\nsfw.rs:3960:                image::RgbImage::from_fn(SIDE as u32, SIDE as u32, |x, y| {
+src\handlers\nsfw.rs:3962:                        ((x * 3 + y + seed) % 255) as u8,
+src\handlers\nsfw.rs:3963:                        ((x + seed * 5) % 255) as u8,
+src\handlers\nsfw.rs:3964:                        ((y + seed * 7) % 255) as u8,
+src\handlers\nsfw.rs:3976:                            .expect("a forward pass")
+src\handlers\nsfw.rs:3981:                handle.join().expect("inference thread must finish");
+src\handlers\promote.rs:62:        let _ = message
+src\handlers\promote.rs:68:        let _ = message
+src\handlers\promote.rs:75:        let _ = message
+src\handlers\promote.rs:147:    let Some((peer, _)) = super::admin_ref(ctx, chat_ref, user.unwrap_or_default()).await else {
+src\handlers\promote.rs:202:        let _ = message
+src\handlers\promote.rs:232:    let _ = message
+src\handlers\promote.rs:309:    let _ = match outcome {
+src\handlers\promote.rs:346:        let _ = query
+src\handlers\promote.rs:357:        let _ = query
+src\handlers\promote.rs:371:            let _ = query
+src\handlers\promote.rs:384:            let Some(bit) = index.parse::<usize>().ok().and_then(|i| RIGHTS.get(i)) else {
+src\handlers\promote.rs:389:            let _ = query
+src\handlers\promote.rs:420:        let _ = query
+src\handlers\promote.rs:468:    let _ = query
+src\handlers\report.rs:29:    let _ = message.delete().await;
+src\handlers\report.rs:43:        .unwrap_or_default();
+src\handlers\report.rs:60:    let _ = reported
+src\handlers\report.rs:128:    let _ = query
+src\handlers\raid.rs:154:    if fresh.is_empty() || count <= limit(ctx, chat) as usize {
+src\handlers\raid.rs:157:    let count = if count > LIMIT_RANGE.1 as usize {
+src\handlers\raid.rs:207:    let _ = ctx
+src\handlers\setting.rs:172:    captcha::choices(ctx, chat) as u32
+src\handlers\setting.rs:176:    join::required_adds(ctx, chat).min(u64::from(u32::MAX)) as u32
+src\handlers\restrict.rs:187:                deleted += done.pts_count.max(0) as usize;
+src\handlers\restrict.rs:358:        let _ = message
+src\handlers\restrict.rs:379:        .ok()
+src\handlers\restrict.rs:413:    let _ = match result {
+src\handlers\restrict.rs:851:    let amount: u64 = digits.parse().ok()?;
+src\handlers\restrict.rs:1017:        let _ = message
+src\handlers\restrict.rs:1043:        let _ = message
+src\handlers\restrict.rs:1049:        let _ = message
+src\handlers\restrict.rs:1057:        let _ = message
+src\handlers\restrict.rs:1065:        let _ = message
+src\handlers\restrict.rs:1074:        let _ = message
+src\handlers\restrict.rs:1086:        let _ = message
+src\handlers\restrict.rs:1094:    let _ = message
+src\handlers\restrict.rs:1109:        let _ = message.reply("بنویسید: «حذف دستور <کلمه یا عبارت>»").await;
+src\handlers\restrict.rs:1132:    let _ = message
+src\handlers\restrict.rs:1147:        parse(text).expect("should parse")
+src\handlers\restrict.rs:1180:        assert!(!names(p(&format!("بن {word}")).target.unwrap()));
+src\handlers\restrict.rs:1181:        assert!(names(p("بن @someone").target.unwrap()));
+src\handlers\restrict.rs:1182:        assert!(names(p("بن 12345").target.unwrap()));
+src\handlers\restrict.rs:1183:        assert!(names(p("بن ۱۲۳۴۵").target.unwrap()));
+src\handlers\restrict.rs:1331:            .expect("a two-word candidate exists");
+src\handlers\strict.rs:214:    let _ = ctx
+src\handlers\scalability_tests.rs:17:unsafe impl GlobalAlloc for Meter {
+src\handlers\scalability_tests.rs:18:    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+src\handlers\scalability_tests.rs:21:            ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+src\handlers\scalability_tests.rs:24:        unsafe { System.alloc(layout) }
+src\handlers\scalability_tests.rs:26:    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+src\handlers\scalability_tests.rs:29:        unsafe { System.dealloc(ptr, layout) }
+src\handlers\scalability_tests.rs:31:    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+src\handlers\scalability_tests.rs:34:            ALLOC_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+src\handlers\scalability_tests.rs:38:        unsafe { System.realloc(ptr, layout, size) }
+src\handlers\scalability_tests.rs:52:        fail_count: std::num::NonZeroU32::new(failures).unwrap(),
+src\handlers\scalability_tests.rs:70:        fail_count: std::num::NonZeroU32::new(failures).unwrap(),
+src\handlers\scalability_tests.rs:86:        .unwrap()
+src\handlers\scalability_tests.rs:93:                .ok()
+src\handlers\scalability_tests.rs:95:        .unwrap()
+src\handlers\scalability_tests.rs:99:    let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+src\handlers\scalability_tests.rs:102:        .unwrap()
+src\handlers\scalability_tests.rs:107:    (fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()) as f64
+src\handlers\scalability_tests.rs:109:            .unwrap()
+src\handlers\scalability_tests.rs:111:            .unwrap()
+src\handlers\scalability_tests.rs:130:            .unwrap()
+src\handlers\scalability_tests.rs:131:            .as_secs() as i32;
+src\handlers\scalability_tests.rs:135:                raw.id = sequence as i32 + 1;
+src\handlers\scalability_tests.rs:177:            .unwrap()
+src\handlers\scalability_tests.rs:178:            .as_secs() as i32,
+src\handlers\scalability_tests.rs:217:    let db = sqlx::PgPool::connect(URL).await.unwrap();
+src\handlers\scalability_tests.rs:218:    drop(Settings::connect(URL).await.unwrap());
+src\handlers\scalability_tests.rs:222:        .unwrap();
+src\handlers\scalability_tests.rs:224:        .bind(groups as i32).execute(&db).await.unwrap();
+src\handlers\scalability_tests.rs:229:            .unwrap()
+src\handlers\scalability_tests.rs:231:        Settings::connect(URL).await.unwrap()
+src\handlers\scalability_tests.rs:249:        .unwrap();
+src\handlers\scalability_tests.rs:253:        let chat = -(index as i64);
+src\handlers\scalability_tests.rs:255:        *state.peer.write().unwrap() = Some(PeerId::chat(index as i64).unwrap().to_ambient_ref());
+src\handlers\scalability_tests.rs:263:                            index as i32,
+src\handlers\scalability_tests.rs:266:                        pts: index as i32,
+src\handlers\scalability_tests.rs:274:                        id: index as i64,
+src\handlers\scalability_tests.rs:280:                seq: index as i32,
+src\handlers\scalability_tests.rs:285:        .unwrap();
+src\handlers\scalability_tests.rs:286:        let Update::NewMessage(message) = updates.next().await.unwrap() else {
+src\handlers\scalability_tests.rs:295:    while !ctx.dirty.stats.0.lock().unwrap().is_empty() {
+src\handlers\scalability_tests.rs:302:#[ignore = "offline load test; run tools/scalability_pg.sh first"]
+src\handlers\scalability_tests.rs:307:        .unwrap();
+src\handlers\scalability_tests.rs:311:        .unwrap();
+src\handlers\scalability_tests.rs:315:        .unwrap();
+src\handlers\scalability_tests.rs:320:        .unwrap();
+src\handlers\scalability_tests.rs:347:                done.result.unwrap();
+src\handlers\scalability_tests.rs:352:                    done.latency.as_nanos() as u64,
+src\handlers\scalability_tests.rs:357:                let done = dispatcher.join_next().await.unwrap();
+src\handlers\scalability_tests.rs:358:                done.result.unwrap();
+src\handlers\scalability_tests.rs:363:                    done.latency.as_nanos() as u64,
+src\handlers\scalability_tests.rs:368:                -(index as i64 % active as i64 + 1),
+src\handlers\scalability_tests.rs:377:                done.result.unwrap();
+src\handlers\scalability_tests.rs:382:                    done.latency.as_nanos() as u64,
+src\handlers\scalability_tests.rs:389:                sample_latency(&mut latency, &mut latency_seen, stride, result.unwrap());
+src\handlers\scalability_tests.rs:392:            let permit = permits.clone().acquire_owned().await.unwrap();
+src\handlers\scalability_tests.rs:398:                received.elapsed().as_nanos() as u64
+src\handlers\scalability_tests.rs:403:            sample_latency(&mut latency, &mut latency_seen, stride, result.unwrap());
+src\handlers\scalability_tests.rs:413:        .fetch_one(&db).await.unwrap();
+src\handlers\scalability_tests.rs:415:    while !ctx.dirty.stats.0.lock().unwrap().is_empty() {
+src\handlers\scalability_tests.rs:420:        counted, count as u64,
+src\handlers\scalability_tests.rs:439:#[ignore = "offline microbenchmark; run tools/scalability_pg.sh first"]
+src\handlers\scalability_tests.rs:461:#[ignore = "CPU microbenchmark of the actual flood/raid window"]
+src\handlers\scalability_tests.rs:483:#[ignore = "fresh-process measured timestamp-ring storage at fixed subject population"]
+src\handlers\scalability_tests.rs:518:#[ignore = "isolated mutex contention probe; no Telegram or database"]
+src\handlers\scalability_tests.rs:534:                            let mut counts = state.counts.lock().unwrap();
+src\handlers\scalability_tests.rs:535:                            waits.push(start.elapsed().as_nanos() as u64);
+src\handlers\scalability_tests.rs:545:                .flat_map(|worker| worker.join().unwrap())
+src\handlers\scalability_tests.rs:556:                    .unwrap()
+src\handlers\scalability_tests.rs:594:#[ignore = "set VOICE_MONITOR_SCRIPT=tools/scalability_voice_stub.py VOICE_WORKERS=4"]
+src\handlers\scalability_tests.rs:597:        std::env::var("VOICE_MONITOR_SCRIPT").unwrap(),
+src\handlers\scalability_tests.rs:605:        jobs.spawn(async move { pool.recognize("offline-fixture".into(), 1.0).await.unwrap() });
+src\handlers\scalability_tests.rs:608:        assert_eq!(result.unwrap().usable_windows, 1);
+src\handlers\scalability_tests.rs:633:        list.0.lock().unwrap().len(),
+src\handlers\scalability_tests.rs:640:#[ignore = "chat admission/eviction ownership against isolated PostgreSQL"]
+src\handlers\scalability_tests.rs:643:    let peer = PeerId::chat(1).unwrap().to_ambient_ref();
+src\handlers\scalability_tests.rs:647:        .expect("fixture chat fits the admission bound");
+src\handlers\scalability_tests.rs:661:#[ignore = "bounded stats flush against isolated PostgreSQL"]
+src\handlers\scalability_tests.rs:671:        .unwrap();
+src\handlers\scalability_tests.rs:678:        .unwrap();
+src\handlers\scalability_tests.rs:680:        .fetch_one(&db).await.unwrap();
+src\handlers\scalability_tests.rs:698:        "seconds":elapsed,"db_statements":calls,"remaining_dirty":ctx.dirty.stats.0.lock().unwrap().len(),
+src\handlers\scalability_tests.rs:704:#[ignore = "compiler layout diagnostic, no handler is polled"]
+src\handlers\rights.rs:269:        let _ = message
+src\handlers\rights.rs:299:        let _ = message
+src\handlers\rights.rs:317:    let _ = message
+src\handlers\toggles.rs:51:        let _ = message
+src\handlers\toggles.rs:59:    let _ = message
+src\handlers\toggles.rs:78:        let _ = query
+src\handlers\toggles.rs:97:    let _ = query
+src\handlers\tempmedia.rs:47:        .map_or(0, |since| since.as_secs() as i64)
+src\handlers\tempmedia.rs:53:    let left = due_at.saturating_sub(unix_now()).max(0) as u64;
+src\handlers\tempmedia.rs:175:        unix_now() + seconds as i64,
+src\handlers\tempmedia.rs:313:        .then(|| pending.pop_front().expect("a full queue has a front"))
+src\handlers\tempmedia.rs:443:        for id in 0..MAX_PENDING as i32 + 10 {
+src\handlers\tempmedia.rs:445:            if id < MAX_PENDING as i32 {
+src\handlers\tempmedia.rs:448:                assert_eq!(dropped, Some(id - MAX_PENDING as i32));
+src\handlers\premium\telegram.rs:72:    let _ = RENDERER.set(renderer);
+src\handlers\premium\telegram.rs:109:                    let start = usize::try_from(link.offset).ok()?;
+src\handlers\premium\telegram.rs:110:                    let end = start.checked_add(usize::try_from(link.length).ok()?)?;
+src\handlers\sudo.rs:61:    let _ = message
+src\handlers\sudo.rs:81:        let _ = query.answer().send().await;
+src\handlers\sudo.rs:85:    let _ = query
+src\handlers\tune.rs:50:        let _ = message.reply(usage(what)).await;
+src\handlers\tune.rs:101:    let _ = message
+src\handlers\tune.rs:154:                .expect("an alias must match itself");
+src\handlers\trade.rs:418:            run.push(d as u8);
+src\handlers\trade.rs:670:        offset += c.len_utf16() as i32;
+src\handlers\trade.rs:718:    let parent = ctx.trade_history.lock().unwrap().observe(
+src\handlers\trade.rs:749:            .unwrap()
+src\handlers\trade.rs:791:                    .ok()
+src\handlers\trade.rs:819:        .ok()
+src\handlers\trade.rs:838:            .unwrap()
+src\handlers\trade.rs:1262:    /// `#[ignore]`d because it needs the model files:
+src\handlers\trade.rs:1265:    #[ignore = "needs intent.onnx, intent_big.onnx, intent_vocab.txt and intent_frames.txt"]
+src\handlers\trade.rs:1273:        let text = std::fs::read_to_string(path).expect("the battery file");
+src\handlers\trade.rs:1280:                parts.next().unwrap(),
+src\handlers\trade.rs:1281:                parts.next().unwrap(),
+src\handlers\trade.rs:1282:                parts.next().unwrap().trim(),
+src\handlers\trade.rs:1327:    #[ignore = "needs shipped intent models; evaluates standalone and contextual regression corpus"]
+src\handlers\trade.rs:1398:    #[ignore = "invoked by tools/evaluate_intent.py with explicit input and output files"]
+src\handlers\trade.rs:1403:        let output = std::env::var("TRADE_EVAL_OUTPUT").expect("output path");
+src\handlers\trade.rs:1408:        let data = std::fs::read_to_string(input).expect("evaluation corpus");
+src\handlers\trade.rs:1441:        std::fs::write(output, serde_json::to_vec_pretty(&rows).unwrap()).expect("write report");
+src\handlers\vision.rs:118:    let mut path = std::env::current_exe().ok()?;
+src\handlers\vision.rs:130:    let session = session.lock().ok()?;
+src\handlers\vision.rs:138:    (height > 0 && height == width).then_some(height as usize)
+src\handlers\vision.rs:192:        side as u32,
+src\handlers\vision.rs:193:        side as u32,
+src\handlers\vision.rs:208:        nsfw::run_embedding(session, vec![1, 3, side as i64, side as i64], pixels)
+src\handlers\vision.rs:219:    /// `#[ignore]`d because it needs `vision.onnx`, which is not in the repository — the same
+src\handlers\vision.rs:239:    #[ignore = "needs vision.onnx from an export"]
+src\handlers\vision.rs:241:        let side = SIDE as u32;
+src\handlers\vision.rs:244:                ((x * 7 + y * 13) % 256) as u8,
+src\handlers\vision.rs:245:                ((x * 3) % 256) as u8,
+src\handlers\vision.rs:246:                ((y * 5) % 256) as u8,
+src\handlers\vision.rs:249:        let embedding = embed_of(&picture).expect("vision.onnx beside the test binary");
+src\handlers\vip.rs:36:        let _ = message
+src\handlers\vip.rs:45:        let _ = message
+src\handlers\vip.rs:62:    let _ = message
+src\handlers\stats.rs:106:    let filled = (percent as usize) * CELLS / 100;
+src\handlers\stats.rs:208:        let _ = message
+src\handlers\stats.rs:236:        let _ = message.reply(reply).await;
+src\handlers\stats.rs:254:                .ok()
+src\handlers\stats.rs:269:        let _ = match at {
+src\handlers\stats.rs:343:        let _ = query
+src\handlers\stats.rs:358:        let _ = query
+src\handlers\stats.rs:371:    let _ = query
+src\handlers\stats.rs:528:                        .unwrap_or(0) as usize;
+src\handlers\stats.rs:666:        let _ = message
+src\handlers\stats.rs:690:        .ok()
+src\handlers\stats.rs:698:            let _ = message
+src\handlers\stats.rs:746:    let _ = message.reply(card).await;
+src\handlers\stats.rs:776:        let _ = message
+src\handlers\stats.rs:812:    let _ = message
+src\handlers\stats.rs:845:        [kind_of(view), HOURS[local_hour() as usize % 24]],
+src\handlers\stats.rs:856:            let mime = doc.mime_type().unwrap_or_default();
+src\handlers\stats.rs:1055:    let before = today().saturating_sub(FORGET_DAYS) as i64;
+src\handlers\stats.rs:1387:    let now = ((local_seconds() % 86_400) / 60) as u32;
+src\handlers\stats.rs:1397:        let _ = at;
+src\handlers\stats.rs:1486:        .credit_add(chat, user, &name_of(message), added as u64)
+src\handlers\stats.rs:1611:        let top = MILESTONES.last().unwrap().0;
+src\handlers\stats.rs:1628:        assert_eq!(medal(MILESTONES.len() + 5), *MEDALS.last().unwrap());
+src\handlers\warns.rs:15:const RECOVERY_PAGE: i64 = super::FLEET_CAMPAIGNS as i64;
+src\handlers\warns.rs:27:        .and_then(|value| value.parse().ok())
+src\handlers\warns.rs:81:        let _ = message
+src\handlers\warns.rs:101:                    let _ = message
+src\handlers\warns.rs:110:            let _ = message
+src\handlers\warns.rs:125:                    let _ = message
+src\handlers\warns.rs:134:            let _ = message
+src\handlers\warns.rs:158:                    let _ = message
+src\handlers\warns.rs:204:                let _ = message
+src\handlers\warns.rs:239:        .ok()
+src\handlers\warns.rs:287:    let _ = message
+src\handlers\warns.rs:300:        let limit = RECOVERY_PAGE.min((RECOVERY_LIMIT - handled) as i64);
+src\handlers\warns.rs:323:        if count < limit as usize {
+src\handlers\voicemonitor.rs:91:    workers: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+src\handlers\voicemonitor.rs:115:            .ok()
+src\handlers\voicemonitor.rs:116:            .and_then(|value| value.parse::<usize>().ok())
+src\handlers\voicemonitor.rs:120:            .ok()
+src\handlers\voicemonitor.rs:121:            .and_then(|value| value.parse::<usize>().ok())
+src\handlers\voicemonitor.rs:127:            .map(|index| tokio::spawn(worker_loop(Arc::clone(&receiver), index)))
+src\handlers\voicemonitor.rs:187:async fn worker_loop(receiver: Arc<tokio::sync::Mutex<mpsc::Receiver<VoiceJob>>>, index: usize) {
+src\handlers\voicemonitor.rs:217:                let _ = process.child.kill().await;
+src\handlers\voicemonitor.rs:221:        let _ = job.result.send(result);
+src\handlers\voicemonitor.rs:511:        let _ = message.reply(body).await;
+src\handlers\voicemonitor.rs:528:            .ok()
+src\handlers\voicemonitor.rs:535:        let _ = message
+src\handlers\voicemonitor.rs:548:                let _ = message
+src\handlers\voicemonitor.rs:557:                let _ = message
+src\handlers\voicemonitor.rs:565:                let _ = message
+src\handlers\voicemonitor.rs:572:        let _ = message
+src\handlers\voicemonitor.rs:583:        let _ = message
+src\handlers\voicemonitor.rs:592:        let _ = message
+src\handlers\voicemonitor.rs:624:    let _ = message
+src\handlers\voicemonitor.rs:784:        let _ = query
+src\handlers\voicemonitor.rs:798:        let _ = query
+src\handlers\voicemonitor.rs:809:    let is_admin = match ctx.chat_ref(chat).or(query.peer_ref().await.ok().flatten()) {
+src\handlers\voicemonitor.rs:814:        let _ = query
+src\handlers\voicemonitor.rs:833:    let _ = query.answer().alert(answer).send().await;
+src\handlers\voicemonitor.rs:845:    let _ = tokio::fs::remove_file(path).await;
+src\handlers\voicemonitor.rs:859:            character if character.is_alphanumeric() => character.to_lowercase().next().unwrap(),
+src\handlers\welcome.rs:58:        .and_then(|value| value.parse().ok())
+src\handlers\welcome.rs:69:    text.encode_utf16().count() as i32
+src\handlers\welcome.rs:83:        let _ = message
+src\handlers\welcome.rs:99:                let _ = message.reply(help()).await;
+src\handlers\welcome.rs:125:    let replied = message.get_reply().await.ok().flatten();
+src\handlers\welcome.rs:133:                replied.fmt_entities().cloned().unwrap_or_default(),
+src\handlers\welcome.rs:148:            .unwrap_or_default();
+src\handlers\welcome.rs:157:        let _ = message.reply(help()).await;
+src\handlers\welcome.rs:163:    let stored_media = media.as_ref().and_then(encode_media).unwrap_or_default();
+src\handlers\welcome.rs:185:    let _ = message
+src\handlers\welcome.rs:365:    let text = ctx.settings.value(chat, TEXT).unwrap_or_default();
+src\handlers\welcome.rs:366:    let media = ctx.settings.value(chat, MEDIA).unwrap_or_default();
+src\handlers\welcome.rs:375:    Vec::<tl::enums::MessageEntity>::from_bytes(&unhex(&stored)?).ok()
+src\handlers\welcome.rs:416:        let input = body.clone().unwrap_or_default().media(media);
+src\handlers\welcome.rs:469:                .unwrap_or_default(),
+src\handlers\welcome.rs:565:    let source_len = u16len(template) as usize;
+src\handlers\welcome.rs:583:                let tag_units = u16len(tag) as usize;
+src\handlers\welcome.rs:611:                for step in 0..u16len(piece) as usize {
+src\handlers\welcome.rs:612:                    map[source + step] = u16len(&out) + step as i32;
+src\handlers\welcome.rs:615:                source += u16len(piece) as usize;
+src\handlers\welcome.rs:626:            let (from, to) = (offset as usize, (offset + length) as usize);
+src\handlers\welcome.rs:663:    tl::enums::InputMedia::from_bytes(&unhex(stored)?).ok()
+src\handlers\welcome.rs:701:                .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+src\handlers\welcome.rs:749:        let back = Vec::<tl::enums::MessageEntity>::from_bytes(&unhex(&stored).unwrap()).unwrap();

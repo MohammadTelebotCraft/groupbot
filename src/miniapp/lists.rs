@@ -1,3 +1,4 @@
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,7 +11,6 @@ use serde_json::json;
 use crate::handlers::{Ctx, limits, lists};
 
 use super::auth::AdminGate;
-use super::throttle::throttled;
 
 const MINIAPP_LIST_CAP: usize = 300;
 
@@ -43,14 +43,28 @@ pub async fn list(
     let Some(kind) = lists::Kind::from_action(&kind_name) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if throttled(gate.chat, &format!("lists:list:{kind_name}"), LIST_COOLDOWN) {
+    if !ctx.claim_miniapp_list_read(gate.chat, kind, LIST_COOLDOWN) {
         return too_many_requests();
     }
     let chat_ref = match gated_chat_ref(&ctx, gate, kind).await {
         Ok(chat_ref) => chat_ref,
         Err(status) => return status.into_response(),
     };
-    let all = lists::entries(&ctx, chat_ref, gate.chat, kind, MINIAPP_LIST_CAP).await;
+    let all = match lists::entries(&ctx, chat_ref, gate.chat, kind, MINIAPP_LIST_CAP).await {
+        Ok(entries) => entries,
+        Err(error) => {
+            ::log::warn!(
+                "miniapp: could not read {} for {}: {error}",
+                kind.title(),
+                gate.chat
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "لیست فعلاً در دسترس نیست؛ دوباره تلاش کنید." })),
+            )
+                .into_response();
+        }
+    };
     let truncated = all.len() >= MINIAPP_LIST_CAP;
     let entries: Vec<_> = all
         .iter()
@@ -73,16 +87,35 @@ pub async fn remove(
     let Some(kind) = lists::Kind::from_action(&kind_name) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-
-    if throttled(gate.chat, &format!("lists:remove:{kind_name}"), LIST_COOLDOWN) {
+    if !ctx.claim_miniapp_list_remove(gate.chat, kind, LIST_COOLDOWN) {
         return too_many_requests();
     }
     let chat_ref = match gated_chat_ref(&ctx, gate, kind).await {
         Ok(chat_ref) => chat_ref,
         Err(status) => return status.into_response(),
     };
-    lists::remove(&ctx, chat_ref, gate.chat, kind, &entry_key).await;
-    StatusCode::NO_CONTENT.into_response()
+    match lists::remove(&ctx, chat_ref, gate.chat, kind, &entry_key).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => {
+            ::log::warn!(
+                "miniapp: remove from {} for {} failed: {error}",
+                kind.title(),
+                gate.chat
+            );
+            let status = if error.commit_outcome_unknown() {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+            let message = if error.commit_outcome_unknown() {
+                "نتیجه حذف مورد نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+            } else {
+                "مورد حذف نشد؛ دوباره تلاش کنید."
+            };
+            (status, Json(json!({ "error": message }))).into_response()
+        }
+    }
 }
 
 pub async fn clear(
@@ -93,13 +126,32 @@ pub async fn clear(
     let Some(kind) = lists::Kind::from_action(&kind_name) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if throttled(gate.chat, &format!("lists:clear:{kind_name}"), LIST_COOLDOWN) {
+    if !ctx.claim_miniapp_list_clear(gate.chat, kind, LIST_COOLDOWN) {
         return too_many_requests();
     }
     let chat_ref = match gated_chat_ref(&ctx, gate, kind).await {
         Ok(chat_ref) => chat_ref,
         Err(status) => return status.into_response(),
     };
-    let removed = lists::clear_all(&ctx, chat_ref, gate.chat, kind).await;
-    Json(json!({ "removed": removed })).into_response()
+    match lists::clear_all(&ctx, chat_ref, gate.chat, kind).await {
+        Ok(removed) => Json(json!({ "removed": removed })).into_response(),
+        Err(error) => {
+            ::log::warn!(
+                "miniapp: clear {} for {} failed: {error}",
+                kind.title(),
+                gate.chat
+            );
+            let status = if error.commit_outcome_unknown() {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+            let message = if error.commit_outcome_unknown() {
+                "نتیجه پاکسازی نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+            } else {
+                "پاکسازی کامل نشد؛ دوباره تلاش کنید."
+            };
+            (status, Json(json!({ "error": message }))).into_response()
+        }
+    }
 }

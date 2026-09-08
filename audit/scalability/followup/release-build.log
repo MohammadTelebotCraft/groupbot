@@ -1,0 +1,23 @@
+   Compiling groupbot v0.1.0 (/mnt/c/Users/moh/Desktop/GroupManagement/groupbot)
+warning: function `record_event` is never used
+   --> src/handlers/mod.rs:998:4
+    |
+998 | fn record_event(times: &mut VecDeque<Instant>, window: Duration) -> usize {
+    |    ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `bump` and `add_tallies` are never used
+    --> src/state.rs:1336:18
+     |
+ 369 | impl Settings {
+     | ------------- methods in this implementation
+...
+1336 |     pub async fn bump(&self, bumps: Vec<Bump>, day: u64, week: u64, month: u64) -> Vec<Bumped> {
+     |                  ^^^^
+...
+2625 |     pub async fn add_tallies(&self, rows: &[(i64, &'static str, u64)], day: u64) {
+     |                  ^^^^^^^^^^^
+
+warning: `groupbot` (bin "groupbot") generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 50.89s

@@ -1,0 +1,8 @@
+
+running 1 test
+test handlers::scalability_tests::counter_lock_contention ... PERF {"groups":1,"instant_bytes":16,"kind":"counter_lock_contention","operations":160000,"seconds":0.041713475,"threads":8,"total_thread_wait_ms":187.509977,"wait_ns_p50_p95_p99":[30,1041,2775]}
+PERF {"groups":1000,"instant_bytes":16,"kind":"counter_lock_contention","operations":160000,"seconds":0.004606076,"threads":8,"total_thread_wait_ms":4.716902,"wait_ns_p50_p95_p99":[30,31,40]}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 363 filtered out; finished in 0.06s
+

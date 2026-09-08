@@ -1,8 +1,10 @@
 use std::time::Duration;
 
 use grammers_client::Client;
-use grammers_client::message::{InputMessage, Message};
+use grammers_client::message::Message;
 use grammers_client::session::types::{PeerId, PeerRef};
+
+use crate::response::ResponseKind;
 
 use super::Ctx;
 
@@ -44,15 +46,9 @@ const CHUNK: usize = 100;
 const RANGE_MAX: i32 = 10_000;
 const USER_CHATS_MAX: usize = 50_000;
 
-pub fn sudo() -> Option<i64> {
-    std::env::var("SUDO_ID").ok()?.parse().ok()
-}
-
 pub enum Installed {
     AlreadyAdmin,
-
     Promoted,
-
     JoinedNotAdmin(String),
 }
 
@@ -113,65 +109,50 @@ pub async fn add(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
     if ctx.cleaner_id().is_none() || ctx.user_client().is_none() {
-        let _ = message
-            .reply("کلینر وارد نشده است. مالک ربات باید در پیوی «ورود کلینر» را بفرستد.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::AdminTool,
+            "کلینر وارد نشده است. مالک ربات باید در پیوی «ورود کلینر» را بفرستد.",
+        )
+        .await;
         return true;
     }
     let Ok(Some(chat_ref)) = message.peer_ref().await else {
         return false;
     };
 
-    let standing = super::install::standing(ctx, chat_ref).await;
-    if !super::install::ready(&standing)
-        && !matches!(standing, super::install::Standing::Unknown)
-    {
-        let installed = message
-            .peer_id()
-            .bot_api_dialog_id()
-            .is_some_and(|chat| super::owner(ctx, chat).is_some());
-        let _ = message
-            .reply(InputMessage::new().html(super::install::card(&standing, installed)))
-            .await;
+    let Some(chat) = message
+        .peer_id()
+        .bot_api_dialog_id()
+        .filter(|chat| *chat < 0)
+    else {
+        return false;
+    };
+    if let Some((_, body)) = super::cleaner_setup::check_access(ctx, chat_ref, chat).await {
+        super::respond(ctx, message, ResponseKind::AdminTool, body).await;
         return true;
     }
 
-    let _ = message.reply("در حال افزودن کلینر...").await;
-    let done = install(ctx, chat_ref).await;
-
-    ctx.forget_user_chats();
-
-    if done.is_ok()
-        && let Some(chat) = message.peer_id().bot_api_dialog_id()
-    {
-        ctx.settings
-            .set(chat, super::install::CLEANER_ADDED, true)
-            .await;
-    }
-    let _ = message
-        .reply(match done {
-            Ok(Installed::AlreadyAdmin) => {
-                "✓ کلینر در گروه است و از قبل ادمین بود. «حذف 999» پیام های قدیمی را هم پاک می کند."
-                    .to_owned()
-            }
-            Ok(Installed::Promoted) => {
-                "✓ کلینر اضافه و ادمین شد. حالا «حذف 999» پیام های قدیمی را هم پاک می کند."
-                    .to_owned()
-            }
-            Ok(Installed::JoinedNotAdmin(reason)) => format!(
-                "کلینر وارد گروه شد ولی ادمین نشد · {reason}\n\
-                 ربات باید دسترسی «افزودن ادمین» داشته باشد."
-            ),
-            Err(reason) => reason,
-        })
-        .await;
+    super::respond(
+        ctx,
+        message,
+        ResponseKind::AdminTool,
+        super::premium::icon_text(
+            Some(super::premium::Icon::Hourglass),
+            "در حال افزودن کلینر...",
+        ),
+    )
+    .await;
+    let body = super::cleaner_setup::add(ctx, chat_ref, chat).await;
+    super::respond(ctx, message, ResponseKind::AdminTool, body).await;
     true
 }
 
 async fn join(ctx: &Ctx, user: &Client, chat_ref: PeerRef) -> std::result::Result<(), String> {
     let exported = ctx
         .client
-        .invoke_outbound(
+        .invoke_outbound_critical(
             &grammers_client::tl::functions::messages::ExportChatInvite {
                 legacy_revoke_permanent: false,
                 request_needed: false,
@@ -191,7 +172,25 @@ async fn join(ctx: &Ctx, user: &Client, chat_ref: PeerRef) -> std::result::Resul
         grammers_client::tl::enums::ExportedChatInvite::ChatInviteExported(invite) => invite.link,
         _ => return Err("لینک دعوت ساخته نشد.".to_owned()),
     };
-    match user.accept_invite_link(&link).await {
+    let mut retries = 0;
+    let joined = loop {
+        let result = user.accept_invite_link(&link).await;
+        if retries < 2
+            && let Err(error) = &result
+            && let Some(delay) = join_retry_delay(error)
+        {
+            retries += 1;
+            log::info!(
+                "cleaner: waiting {}s before retrying join in {}",
+                delay.as_secs(),
+                chat_ref.id
+            );
+            tokio::time::sleep(delay).await;
+            continue;
+        }
+        break result;
+    };
+    match joined {
         Ok(Some(_)) => Ok(()),
 
         Ok(None) => Err("درخواست عضویت فرستاده شد؛ آن را در گروه تایید کنید.".to_owned()),
@@ -210,6 +209,15 @@ async fn join(ctx: &Ctx, user: &Client, chat_ref: PeerRef) -> std::result::Resul
         }
         Err(e) => Err(format!("پیوستن کلینر انجام نشد · {e}")),
     }
+}
+
+fn join_retry_delay(error: &grammers_client::InvocationError) -> Option<Duration> {
+    let grammers_client::InvocationError::Rpc(rpc) = error else {
+        return None;
+    };
+    let seconds = rpc.value?;
+    (rpc.name == "FLOOD_WAIT" && (1..=30).contains(&seconds))
+        .then(|| Duration::from_secs(u64::from(seconds) + 1))
 }
 
 pub async fn on_join(ctx: &Ctx, message: &Message) -> bool {
@@ -298,7 +306,7 @@ async fn delete_history_call(
     max_id: i32,
 ) -> std::result::Result<(), grammers_client::InvocationError> {
     client
-        .invoke_outbound(&grammers_client::tl::functions::channels::DeleteHistory {
+        .invoke_outbound_critical(&grammers_client::tl::functions::channels::DeleteHistory {
             for_everyone: true,
             channel: chat_ref.into(),
             max_id,
@@ -326,19 +334,36 @@ pub async fn sweep(ctx: &Ctx, message: &Message) -> bool {
     };
 
     let (Some(user), Some(_)) = (ctx.user_client(), ctx.cleaner_id()) else {
-        let _ = message
-            .reply("برای پاکسازی قدیمی ها کلینر لازم است. «افزودن کلینر» را بفرستید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::ModerationConfirmation,
+            "برای پاکسازی قدیمی ها کلینر لازم است. «افزودن کلینر» را بفرستید.",
+        )
+        .await;
         return true;
     };
     let Some(chat_ref) = chat_ref(ctx, &user, chat).await else {
-        let _ = message
-            .reply("کلینر در این گروه نیست. «افزودن کلینر» را بفرستید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::ModerationConfirmation,
+            "کلینر در این گروه نیست. «افزودن کلینر» را بفرستید.",
+        )
+        .await;
         return true;
     };
 
-    let _ = message.reply(format!("در حال پاکسازی {label}...")).await;
+    super::respond(
+        ctx,
+        message,
+        ResponseKind::ModerationConfirmation,
+        super::premium::icon_text(
+            Some(super::premium::Icon::Hourglass),
+            format!("در حال پاکسازی {label}..."),
+        ),
+    )
+    .await;
     let mut ids: Vec<i32> = Vec::new();
     let mut search = user.search_messages(chat_ref).filter(filter);
     let mut failed = None;
@@ -353,15 +378,26 @@ pub async fn sweep(ctx: &Ctx, message: &Message) -> bool {
         }
     }
     if let Some(e) = failed.filter(|_| ids.is_empty()) {
-        let _ = message
-            .reply(format!("انجام نشد · {e}\nکلینر باید در گروه ادمین باشد."))
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::ModerationConfirmation,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                format!("انجام نشد · {e}\nکلینر باید در گروه ادمین باشد."),
+            ),
+        )
+        .await;
         return true;
     }
     if ids.is_empty() {
-        let _ = message
-            .reply(format!("چیزی از نوع {label} پیدا نشد."))
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::ModerationConfirmation,
+            format!("چیزی از نوع {label} پیدا نشد."),
+        )
+        .await;
         return true;
     }
 
@@ -370,21 +406,29 @@ pub async fn sweep(ctx: &Ctx, message: &Message) -> bool {
         match user.delete_messages(chat_ref, chunk).await {
             Ok(n) => deleted += n,
             Err(e) => {
-                let _ = message
-                    .reply(format!("{deleted} پیام پاک شد، بعد خطا داد · {e}"))
-                    .await;
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::ModerationConfirmation,
+                    format!("{deleted} پیام پاک شد، بعد خطا داد · {e}"),
+                )
+                .await;
                 return true;
             }
         }
     }
-    let _ = message
-        .reply(match ids.len() >= SWEEP_MAX {
+    super::respond(
+        ctx,
+        message,
+        ResponseKind::ModerationConfirmation,
+        match ids.len() >= SWEEP_MAX {
             true => format!(
                 "✓ {deleted} {label} پاک شد (سقف هر بار {SWEEP_MAX} تا). برای بقیه دوباره بفرستید."
             ),
             false => format!("✓ {deleted} {label} پاک شد."),
-        })
-        .await;
+        },
+    )
+    .await;
     true
 }
 
@@ -404,9 +448,16 @@ pub async fn wipe(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
     let Some((target, name)) = super::resolve(ctx, message, named).await else {
-        let _ = message
-            .reply("کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::ModerationConfirmation,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.",
+            ),
+        )
+        .await;
         return true;
     };
     let (Some(chat), Some(user_id)) = (message.peer_id().bot_api_dialog_id(), target.id.bare_id())
@@ -414,30 +465,57 @@ pub async fn wipe(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
     if super::owner(ctx, chat) == Some(user_id) {
-        let _ = message.reply("پیام های مالک ربات پاک نمی شود.").await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::ModerationConfirmation,
+            super::premium::icon_text(
+                Some(super::premium::Icon::Locked),
+                "پیام های مالک ربات پاک نمی شود.",
+            ),
+        )
+        .await;
         return true;
     }
 
     let Some(done) = wipe_as_cleaner(ctx, chat, user_id, arg).await else {
-        let _ = message
-            .reply("برای این کار کلینر لازم است. «افزودن کلینر» را بفرستید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::ModerationConfirmation,
+            "برای این کار کلینر لازم است. «افزودن کلینر» را بفرستید.",
+        )
+        .await;
         return true;
     };
-    let _ = match done {
+    match done {
         Ok(()) => {
-            message
-                .reply(format!("✓ پیام های {name} در این گروه پاک شد."))
-                .await
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::ModerationConfirmation,
+                super::premium::icon_text(
+                    Some(super::premium::Icon::Delete),
+                    format!("پیام های {name} در این گروه پاک شد."),
+                ),
+            )
+            .await
         }
         Err(e) => {
             eprintln!("wipe: {chat}: {e}");
-            message
-                .reply(format!(
-                    "انجام نشد · {e}\n\
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::ModerationConfirmation,
+                super::premium::icon_text(
+                    Some(super::premium::Icon::ErrorRed),
+                    format!(
+                        "انجام نشد · {e}\n\
                      برای پیام های قدیمی «افزودن کلینر» را بفرستید."
-                ))
-                .await
+                    ),
+                ),
+            )
+            .await
         }
     };
     true
@@ -478,7 +556,6 @@ pub(crate) async fn member_ref(
     {
         return Some(peer_ref);
     }
-
     if let Some(id) = PeerId::user(user_id)
         && let Ok(peer) = user.resolve_peer(id.to_ambient_ref()).await
         && let Ok(Some(peer_ref)) = peer.to_ref().await
@@ -488,8 +565,8 @@ pub(crate) async fn member_ref(
     let mut participants = user.iter_participants(chat_ref);
     let mut seen = 0;
     while let Ok(Some(participant)) = participants.next().await {
-        if participant.user.id().bare_id_unchecked() == user_id {
-            return participant.user.to_ref().await.ok().flatten();
+        if participant.id().bare_id() == Some(user_id) {
+            return participant.user()?.to_ref().await.ok().flatten();
         }
         seen += 1;
         if seen >= SEARCH_LIMIT {
@@ -544,7 +621,6 @@ pub async fn set_slow(ctx: &Ctx, chat: i64, seconds: u32) -> Option<bool> {
         .await
     {
         Ok(_) => Some(true),
-
         Err(grammers_client::InvocationError::Rpc(rpc)) if rpc.name == "CHAT_NOT_MODIFIED" => {
             Some(true)
         }
@@ -559,7 +635,6 @@ pub(crate) async fn chat_ref(ctx: &Ctx, user: &Client, chat: i64) -> Option<Peer
     if let Some(peer) = ctx.user_chat(chat) {
         return Some(peer);
     }
-
     let mut found = Vec::with_capacity(USER_CHATS_MAX);
     let mut requested = None;
     let mut dialogs = user.iter_dialogs();
@@ -602,23 +677,25 @@ async fn promote(
     ctx: &Ctx,
     chat_ref: PeerRef,
     target: PeerRef,
-) -> std::result::Result<(), grammers_client::InvocationError> {
+) -> std::result::Result<(), super::restrict::MemberMutationError> {
     let mut last = None;
     for level in 0..3 {
-        let mut rights = ctx
-            .client
-            .set_admin_rights(chat_ref, target)
-            .delete_messages(true)
-            .ban_users(true)
-            .invite_users(true)
-            .pin_messages(true);
-        if level < 2 {
-            rights = rights.change_info(true).manage_call(true);
-        }
-        if level < 1 {
-            rights = rights.add_admins(true);
-        }
-        match rights.await {
+        match super::restrict::set_member_admin_rights(
+            ctx,
+            chat_ref,
+            target,
+            super::restrict::AdminRightsSpec {
+                delete_messages: true,
+                ban_users: true,
+                invite_users: true,
+                pin_messages: true,
+                change_info: level < 2,
+                manage_call: level < 2,
+                add_admins: level < 1,
+            },
+        )
+        .await
+        {
             Ok(()) => return Ok(()),
             Err(e) => {
                 let narrower_might_work = e.to_string().contains("RIGHT_FORBIDDEN");
@@ -629,7 +706,11 @@ async fn promote(
             }
         }
     }
-    Err(last.unwrap_or(grammers_client::InvocationError::Dropped))
+    Err(
+        last.unwrap_or(super::restrict::MemberMutationError::Telegram(
+            grammers_client::InvocationError::Dropped,
+        )),
+    )
 }
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
@@ -640,32 +721,80 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let sender = message
         .sender_id()
         .and_then(grammers_client::session::types::PeerId::bare_id);
-    if sender.is_none() || sender != sudo() {
+    if sender.is_none() || sender != ctx.sudo_id() {
         return true;
     }
     let Some(user) = ctx.user_client() else {
-        let _ = message
-            .reply("نشست کلینر ساخته نشد. مقدار TG_ID و TG_HASH را بررسی کنید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CleanerAuthentication,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "نشست کلینر ساخته نشد. مقدار TG_ID و TG_HASH را بررسی کنید.",
+            ),
+        )
+        .await;
         return true;
     };
-    if user.is_authorized().await.unwrap_or(false) {
-        let name = user
-            .get_me()
-            .await
-            .map(|me| me.full_name())
-            .unwrap_or_default();
-        let _ = message
-            .reply(format!("کلینر از قبل وارد شده است · {name}"))
-            .await;
+    let Some(_login) = ctx.try_cleaner_login() else {
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CleanerAuthentication,
+            "ورود کلینر همین حالا در حال انجام است.",
+        )
+        .await;
         return true;
+    };
+    match user.is_authorized().await {
+        Ok(true) => match user.get_me().await {
+            Ok(me) => {
+                let Some(id) = me.id().bare_id() else {
+                    super::respond(
+                        ctx,
+                        message,
+                        ResponseKind::CleanerAuthentication,
+                        "شناسه حساب کلینر معتبر نیست.",
+                    )
+                    .await;
+                    return true;
+                };
+                ctx.set_cleaner_id(id);
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CleanerAuthentication,
+                    format!("کلینر از قبل وارد شده است · {}", me.full_name()),
+                )
+                .await;
+                return true;
+            }
+            Err(error) => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CleanerAuthentication,
+                    format!("وضعیت حساب کلینر خوانده نشد · {error}"),
+                )
+                .await;
+                return true;
+            }
+        },
+        Ok(false) => {}
+        Err(error) => {
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CleanerAuthentication,
+                format!("وضعیت نشست کلینر خوانده نشد · {error}"),
+            )
+            .await;
+            return true;
+        }
     }
 
-    let api_hash = match std::env::var("TG_HASH") {
-        Ok(hash) => hash,
-        Err(_) => return true,
-    };
-    login(ctx, &user, message, &api_hash).await;
+    login(ctx, &user, message, ctx.api_hash()).await;
     true
 }
 
@@ -692,54 +821,133 @@ async fn login(ctx: &Ctx, user: &Client, message: &Message, api_hash: &str) {
                     Some(hint) => format!("\nراهنما · {}", super::esc(hint)),
                     None => String::new(),
                 };
-                ctx.expect_password();
-                let _ = message
-                    .reply(InputMessage::new().html(format!(
+                let password = ctx.expect_password();
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::PersonalInformation,
+                    super::premium::html(format!(
                         "<b>رمز دو مرحله ای</b>\n\n\
                          کد اسکن شد. رمز دو مرحله ای حساب را همینجا بفرستید.{hint}\n\n\
                          <i>پیام رمز بلافاصله پاک می شود.</i>"
-                    )))
+                    )),
+                )
+                .await;
+                let Some(password) = ctx.await_password(password, DEADLINE).await else {
+                    super::respond(
+                        ctx,
+                        message,
+                        ResponseKind::CleanerAuthentication,
+                        "رمزی نیامد. دوباره «ورود کلینر» را بفرستید.",
+                    )
                     .await;
-                let Some(password) = ctx.await_password(DEADLINE).await else {
-                    let _ = message
-                        .reply("رمزی نیامد. دوباره «ورود کلینر» را بفرستید.")
-                        .await;
                     return;
                 };
-                let _ = match user.check_password(token, password.trim()).await {
+                match user.check_password(token, password.trim()).await {
                     Ok(me) => {
-                        ctx.set_cleaner_id(me.id().bare_id_unchecked());
-                        message
-                            .reply(format!("✓ کلینر وارد شد · {}", super::esc(&me.full_name())))
-                            .await
+                        let Some(id) = me.id().bare_id() else {
+                            super::respond(
+                                ctx,
+                                message,
+                                ResponseKind::CleanerAuthentication,
+                                "شناسه حساب کلینر معتبر نیست.",
+                            )
+                            .await;
+                            return;
+                        };
+                        ctx.set_cleaner_id(id);
+                        super::respond(
+                            ctx,
+                            message,
+                            ResponseKind::CleanerAuthentication,
+                            super::premium::text(format!(
+                                "✓ کلینر وارد شد · {}",
+                                super::esc(&me.full_name())
+                            )),
+                        )
+                        .await;
                     }
-                    Err(e) => message.reply(format!("انجام نشد · {e}")).await,
-                };
+                    Err(e) => {
+                        super::respond(
+                            ctx,
+                            message,
+                            ResponseKind::CleanerAuthentication,
+                            super::premium::icon_text(
+                                Some(super::premium::Icon::ErrorRed),
+                                format!("انجام نشد · {e}"),
+                            ),
+                        )
+                        .await;
+                    }
+                }
                 return;
             }
             Ok(grammers_client::QrLogin::Success(me)) => {
-                ctx.set_cleaner_id(me.id().bare_id_unchecked());
-                let _ = message
-                    .reply(format!("✓ کلینر وارد شد · {}", super::esc(&me.full_name())))
+                let Some(id) = me.id().bare_id() else {
+                    super::respond(
+                        ctx,
+                        message,
+                        ResponseKind::CleanerAuthentication,
+                        "شناسه حساب کلینر معتبر نیست.",
+                    )
                     .await;
+                    return;
+                };
+                ctx.set_cleaner_id(id);
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CleanerAuthentication,
+                    super::premium::text(format!(
+                        "✓ کلینر وارد شد · {}",
+                        super::esc(&me.full_name())
+                    )),
+                )
+                .await;
+                return;
+            }
+            Ok(grammers_client::QrLogin::SignUpRequired) => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CleanerAuthentication,
+                    "این شماره هنوز حساب تلگرام ندارد؛ کلینر باید یک حساب موجود باشد.",
+                )
+                .await;
                 return;
             }
             Err(e) => {
-                let _ = message.reply(format!("انجام نشد · {e}")).await;
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CleanerAuthentication,
+                    super::premium::icon_text(
+                        Some(super::premium::Icon::ErrorRed),
+                        format!("انجام نشد · {e}"),
+                    ),
+                )
+                .await;
                 return;
             }
         }
     }
-    let _ = message
-        .reply("زمان ورود تمام شد. «ورود کلینر» را دوباره بفرستید.")
-        .await;
+    super::respond(
+        ctx,
+        message,
+        ResponseKind::CleanerAuthentication,
+        super::premium::icon_text(
+            Some(super::premium::Icon::Timer),
+            "زمان ورود تمام شد. «ورود کلینر» را دوباره بفرستید.",
+        ),
+    )
+    .await;
 }
 
 pub async fn take_password(ctx: &Ctx, message: &Message) -> bool {
     let sender = message
         .sender_id()
         .and_then(grammers_client::session::types::PeerId::bare_id);
-    if sender.is_none() || sender != sudo() {
+    if sender.is_none() || sender != ctx.sudo_id() {
         return false;
     }
     let password = message.text().trim().to_owned();
@@ -751,7 +959,7 @@ pub async fn take_password(ctx: &Ctx, message: &Message) -> bool {
 }
 
 async fn send_qr(ctx: &Ctx, message: &Message, url: &str) {
-    let mut card = InputMessage::new().html(
+    let mut card = super::premium::html(
         "<b>ورود کلینر</b>\n\n\
          در تلگرام · Settings › Devices › Link Desktop Device\n\
          و این کد را اسکن کنید.\n\n\
@@ -771,7 +979,7 @@ async fn send_qr(ctx: &Ctx, message: &Message, url: &str) {
             card = card.photo(uploaded);
         }
     }
-    let _ = message.reply(card).await;
+    super::respond(ctx, message, ResponseKind::PersonalInformation, card).await;
 }
 
 fn qr_png(url: &str) -> Option<Vec<u8>> {
@@ -785,4 +993,51 @@ fn qr_png(url: &str) -> Option<Vec<u8>> {
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .ok()?;
     Some(png)
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+
+    #[test]
+    fn history_deletion_cannot_fall_back_to_the_ordinary_outbound_lane() {
+        let source = include_str!("cleaner.rs");
+        let start = source.find("async fn delete_history_call").unwrap();
+        let end = source[start..].find("\npub async fn sweep").unwrap() + start;
+        let implementation = &source[start..end];
+        assert!(implementation.contains("invoke_outbound_critical"));
+        assert!(!implementation.contains(".invoke_outbound("));
+    }
+
+    #[test]
+    fn short_join_waits_are_honored_but_long_or_unrelated_errors_are_not_retried() {
+        let rpc = |message: &str| {
+            grammers_client::InvocationError::Rpc(
+                grammers_client::tl::types::RpcError {
+                    error_code: 420,
+                    error_message: message.to_owned(),
+                }
+                .into(),
+            )
+        };
+        assert_eq!(
+            join_retry_delay(&rpc("FLOOD_WAIT_4")),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            join_retry_delay(&rpc("FLOOD_WAIT_30")),
+            Some(Duration::from_secs(31))
+        );
+        for message in [
+            "FLOOD_WAIT_31",
+            "FLOOD_WAIT_3600",
+            "FLOOD_WAIT",
+            "FLOOD_WAIT_0",
+            "CHANNELS_TOO_MUCH",
+            "SLOWMODE_WAIT_5",
+        ] {
+            assert!(join_retry_delay(&rpc(message)).is_none(), "{message}");
+        }
+        assert!(join_retry_delay(&grammers_client::InvocationError::Dropped).is_none());
+    }
 }

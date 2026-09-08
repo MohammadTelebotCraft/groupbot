@@ -1,0 +1,123 @@
+sell	clear_sell	این اکانت رو ۸۰۰ میفروشم	
+sell	clear_sell	اکانت رو می‌فروشم، قیمت ۵۰۰	
+sell	clear_sell	گوشی آیفون فروشی، ۲۰ میلیون، پیام بدید	
+sell	clear_sell	selling my account for $500, DM me	
+sell	clear_buy	خریدار این آیتم هستم کسی داشت پیوی	
+sell	clear_buy	خریدار اکانت لول بالا هستم، بودجه ۵۰۰ تومن	
+sell	clear_buy	خریدارم گوشی تا ۱۰ میلیون	
+sell	clear_buy	looking to buy an account, budget $50, DM me	
+sell	exchange	این اکانت با اکانت لول بالا تعویض میشه؟	
+sell	exchange	trade می‌کنم با اسکین	
+sell	exchange	معاوضه میکنم گوشیمو با تبلت	
+sell	exchange	با یه اکانت بهتر عوض میکنم	
+sell	exchange	trading my account for a high level account, dm me	
+sell	implicit	برای این اکانت ۲ تومن میخوام	
+sell	implicit	کسی اینو میخواد؟ قیمت توافقی	
+sell	implicit	هرکی خریدار بود پیام بده	
+sell	implicit	پیشنهاد بالای ۵۰۰ قبول	
+sell	implicit	قیمت بده اگه خوب باشه میفروشم	
+sell	service	طراحی سایت انجام میدم، هزینه از ۲ میلیون، سفارش پیوی	
+sell	dots	ا.ک.ا.ن.ت ف.ر.و.ش.ی قیمت توافقی	
+sell	dots	این اکانت رو ۸۰۰ می.فروشم	
+sell	dots	این اکانت رو ۸۰۰ م.ی.ف.ر.و.ش.م	
+sell	dots	این اکانت رو ۸۰۰ می...فروشم	
+sell	spaced	این اکانت رو ۸۰۰ می ف ر و ش م	
+sell	spaced	s e l l my account for $500, DM me	
+sell	emoji	این اکانت رو ۸۰۰ م💰ی💰ف💰ر💰و💰ش💰م	
+sell	emoji	s💰e💰l💰l my account for $500, DM me	
+sell	joiners	این اکانت رو ۸۰۰ می‌فروشم	
+sell	joiners	این اکانت رو ۸۰۰ می‍فروشم	
+sell	joiners	این اکانت رو ۸۰۰ می⁠فروشم	
+sell	separators	این اکانت رو ۸۰۰ می/ف/ر/و/ش/م	
+sell	separators	این اکانت رو ۸۰۰ می|ف|ر|و|ش|م	
+sell	separators	s-e-l-l my account for $500, DM me	
+sell	misspelling	این اکانت رو ۸۰۰ میفورشم	
+sell	misspelling	این اکانت رو ۸۰۰ میفرووووشم	
+sell	mixed	این account رو sell میکنم، قیمت ۵۰۰ تومن پیوی	
+sell	confusable	ѕеll my account for $500, DM me	
+sell	finglish	account miforoosham gheymat 500 toman pv	
+sell	reply_sell	آره میفروشم	این اکانت رو میفروشی؟
+sell	reply_buy	میخرم	این اکانت رو ۸۰۰ میفروشم، خریدار پیام بده
+sell	reply_bid	۵۰۰	برای این اکانت چقدر میدی؟
+sell	reply_bid	۵۰۰	این اکانت رو ۸۰۰ میفروشم، خریدار پیام بده
+sell	reply_contact	بیا پیوی	این اکانت رو ۸۰۰ میفروشم، خریدار پیام بده
+safe	concept	فروش یعنی چی؟	
+safe	concept	منظورش از خرید و فروش چیه؟	
+safe	rules	خرید و فروش توی این گروه ممنوعه	
+safe	rules	فروش توی این گروه ممنوعه؟	
+safe	rules	آیا میتونم اکانتم رو اینجا بفروشم یا ممنوعه؟	
+safe	rules	selling accounts is forbidden in this group	
+safe	report	ادمین این طرف داره اکانت میفروشه	
+safe	report	طرف اومده پیوی میگه میفروشم ارزون، بلاکش کردم	
+safe	report	ادمین یکی نوشته اکانت فروشی ۵۰۰ تومن لطفا بررسی کن	
+safe	quote	«این اکانت رو ۸۰۰ میفروشم»	
+safe	quote	"selling my account for $500, DM me"	
+safe	quote	گفت «این اکانت رو ۸۰۰ میفروشم» و من گزارش دادم	
+safe	quote	> این اکانت رو ۸۰۰ میفروشم	
+safe	game	این بازی سیستم trade داره؟	
+safe	game	how does the trade system work in this game?	
+safe	past	دیروز اکانتم رو فروختم	
+safe	past	دیروز گوشی خریدم ۵۰۰ تومن	
+safe	past	I sold my account yesterday for $500	
+safe	price	قیمت دلار رفت بالا	
+safe	price	قیمت این اکانت قبلا ۵۰۰ بود الان خیلی گرونه	
+safe	price	۸۰۰	
+safe	price	قیمت ۵۰۰	
+safe	metaphor	فقط نازتو خریدارم	
+safe	metaphor	I wouldn't trade our friendship for money	
+safe	metaphor	نه میخرم نه میفروشم، فقط اومدم حرف بزنم	
+safe	refusal	این اکانت فروشی نیست	
+safe	refusal	اکانتم رو نمی‌فروشم حتی ۸۰۰ تومن	
+safe	refusal	اکانتم رو ن می ف ر و ش م حتی ۸۰۰ تومن	
+safe	refusal	I don't sell accounts, please stop asking	
+safe	refusal	don't sell my account for $500	
+safe	obfuscated_safe	ف.ر.و.ش یعنی چی؟	
+safe	obfuscated_safe	خرید و ف💰ر💰و💰ش توی این گروه ممنوعه	
+safe	obfuscated_safe	s.e.l.l means what?	
+safe	fragments	a b c	
+safe	fragments	ف ر و ش	
+safe	ambiguous	فروشی	
+safe	ambiguous	خریدار	
+safe	ambiguous	آره میفروشم	
+safe	ambiguous	چقدر میدی؟	
+safe	ambiguous	پیشنهاد بده	
+safe	ambiguous	بیا پیوی	
+safe	reply_safe	۵۰۰	امروز چند نفر آنلاین بودن؟
+safe	reply_safe	۵۰۰	چقدر میدی؟
+safe	reply_safe	ممنون	این اکانت رو ۸۰۰ میفروشم، خریدار پیام بده
+safe	reply_safe	نه	این اکانت رو ۸۰۰ میفروشم، خریدار پیام بده
+safe	reply_safe	آره	این اکانت رو ۸۰۰ میفروشم، خریدار پیام بده
+safe	reply_safe	بیا پیوی	قیمت دلار رفت بالا
+safe	reply_safe	آره میفروشم	فروش یعنی چی؟
+safe	reply_safe	۵۰۰	«این اکانت رو ۸۰۰ میفروشم»
+safe	reply_safe	۵۰۰	دیروز این اکانت رو ۸۰۰ فروختم
+safe	reply_safe	آره میفروشم	ادمین پرسید «این اکانت رو میفروشی؟»
+safe	reply_safe	«نمی» میفروشم	این اکانت رو میفروشی؟
+safe	grammar_near_miss	منظورش از «پیشنهاد بالای ۵۰۰ قبول» چیه؟	
+safe	grammar_near_miss	ادمین این طرف میگه پیشنهاد بالای ۵۰۰ قبول	
+safe	grammar_near_miss	«پیشنهاد بالای ۵۰۰ قبول»	
+safe	grammar_near_miss	پیشنهاد بالای ۵۰۰ قبول ولی شوخی کردم و چیزی برای فروش ندارم	
+safe	grammar_near_miss	منظورش از «هرکی خریدار بود پیام بده» چیه؟	
+safe	grammar_near_miss	ادمین این طرف میگه هرکی خریدار بود پیام بده	
+safe	grammar_near_miss	«هرکی خریدار بود پیام بده»	
+safe	grammar_near_miss	هرکی خریدار بود پیام بده ولی شوخی کردم و چیزی برای فروش ندارم	
+safe	grammar_near_miss	منظورش از «برای این اکانت ۲ تومن میخوام» چیه؟	
+safe	grammar_near_miss	ادمین این طرف میگه برای این اکانت ۲ تومن میخوام	
+safe	grammar_near_miss	«برای این اکانت ۲ تومن میخوام»	
+safe	grammar_near_miss	برای این اکانت ۲ تومن میخوام ولی شوخی کردم و چیزی برای فروش ندارم	
+safe	grammar_near_miss	منظورش از «قیمت بده اگه خوب باشه میفروشم» چیه؟	
+safe	grammar_near_miss	ادمین این طرف میگه قیمت بده اگه خوب باشه میفروشم	
+safe	grammar_near_miss	«قیمت بده اگه خوب باشه میفروشم»	
+safe	grammar_near_miss	قیمت بده اگه خوب باشه میفروشم ولی شوخی کردم و چیزی برای فروش ندارم	
+safe	grammar_near_miss	منظورش از «کسی اینو میخواد؟ قیمت توافقی» چیه؟	
+safe	grammar_near_miss	ادمین این طرف میگه کسی اینو میخواد؟ قیمت توافقی	
+safe	grammar_near_miss	«کسی اینو میخواد؟ قیمت توافقی»	
+safe	grammar_near_miss	کسی اینو میخواد؟ قیمت توافقی ولی شوخی کردم و چیزی برای فروش ندارم	
+safe	grammar_near_miss	منظورش از «این اکانت با اکانت لول بالا تعویض میشه؟» چیه؟	
+safe	grammar_near_miss	ادمین این طرف میگه این اکانت با اکانت لول بالا تعویض میشه؟	
+safe	grammar_near_miss	«این اکانت با اکانت لول بالا تعویض میشه؟»	
+safe	grammar_near_miss	این اکانت با اکانت لول بالا تعویض میشه؟ ولی شوخی کردم و چیزی برای فروش ندارم	
+sell	word_separators	اکانت💰فروشی قیمت توافقی	
+sell	word_separators	قیمت.بده.اگه.خوب.باشه.میفروشم	
+safe	word_separators	خرید.و.فروش.توی.این.گروه.ممنوعه	
+safe	quote	'selling my account for $500, DM me'	

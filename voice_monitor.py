@@ -5,6 +5,7 @@ import argparse
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import wave
@@ -288,15 +289,28 @@ def worker_main() -> int:
     return 0
 
 
+def check_config() -> int:
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg is required for voice recognition")
+    backend = os.environ.get("VOICE_BACKEND", "google").lower()
+    if backend in {"whisper", "faster-whisper"}:
+        import numpy  # noqa: F401
+        from faster_whisper import WhisperModel  # noqa: F401
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", action="store_true")
+    parser.add_argument("--check-config", action="store_true")
     parser.add_argument("--input")
     parser.add_argument("--duration", type=float)
     parser.add_argument("--window-seconds", type=float)
     parser.add_argument("--full-scan-seconds", type=float)
     parser.add_argument("--max-windows", type=int)
     args = parser.parse_args()
+    if args.check_config:
+        return check_config()
     if args.worker:
         return worker_main()
     required = (args.input, args.duration, args.window_seconds, args.full_scan_seconds, args.max_windows)

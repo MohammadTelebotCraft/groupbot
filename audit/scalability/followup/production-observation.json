@@ -1,0 +1,38 @@
+[
+  {
+    "ActiveState": "active",
+    "MainPID": "3147599",
+    "NRestarts": "0",
+    "MemoryCurrent": "1037422592",
+    "CPUUsageNSec": "13599884000",
+    "TasksCurrent": "10",
+    "at_utc": "2026-09-08T14:45:36.347561+00:00"
+  },
+  {
+    "ActiveState": "active",
+    "MainPID": "3147599",
+    "NRestarts": "0",
+    "MemoryCurrent": "2619736064",
+    "CPUUsageNSec": "29307649000",
+    "TasksCurrent": "17",
+    "at_utc": "2026-09-08T14:46:07.751696+00:00"
+  },
+  {
+    "ActiveState": "active",
+    "MainPID": "3147599",
+    "NRestarts": "0",
+    "MemoryCurrent": "2620375040",
+    "CPUUsageNSec": "74567068000",
+    "TasksCurrent": "16",
+    "at_utc": "2026-09-08T14:46:38.914746+00:00"
+  },
+  {
+    "ActiveState": "active",
+    "MainPID": "3147599",
+    "NRestarts": "0",
+    "MemoryCurrent": "2620497920",
+    "CPUUsageNSec": "74624681000",
+    "TasksCurrent": "16",
+    "at_utc": "2026-09-08T14:47:10.603505+00:00"
+  }
+]

@@ -8,15 +8,14 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/GroupManagement/groupbot
 EnvironmentFile=/home/ubuntu/GroupManagement/groupbot/.env
-
 LimitNOFILE=65536
 TasksMax=4096
-
 MemoryHigh=2500M
 MemoryMax=3G
 ExecStart=/home/ubuntu/GroupManagement/groupbot/target/release/groupbot
 Restart=always
 RestartSec=5
+TimeoutStopSec=120
 
 [Install]
 WantedBy=multi-user.target

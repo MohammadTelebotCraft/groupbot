@@ -1,0 +1,10 @@
+   Compiling groupbot v0.1.0 (/mnt/c/Users/moh/Desktop/GroupManagement/groupbot)
+    Finished `release` profile [optimized] target(s) in 1m 02s
+     Running unittests src/main.rs (target/release/deps/groupbot-e0fabec816ad445f)
+
+running 1 test
+PERF {"autoconfig":208,"callbacks":23664,"captcha_join":28752,"cleaner_join":3992,"cleaner_sweep":23464,"cleaner_wipe":23040,"config":23144,"dispatch":72848,"extras":33712,"flood":22872,"imgfilter":25864,"join":22424,"kind":"future_sizes","locks":23416,"nsfw":23424,"panel":25632,"private_cleaner":25400,"private_sudo":22816,"promote":23248,"purge":22920,"purge_all":22904,"raw_autoconfig":22608,"restrict":23304,"stats":23448,"trade_watch":23304,"tune":22976,"voice_watch":23208,"welcome_join":26424}
+test handlers::scalability_tests::future_sizes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 354 filtered out; finished in 0.82s
+

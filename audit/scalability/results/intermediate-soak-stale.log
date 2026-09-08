@@ -1,0 +1,17 @@
+
+running 1 test
+test handlers::scalability_tests::replay_dispatch ... 
+thread 'handlers::scalability_tests::replay_dispatch' (7820) panicked at src/handlers/scalability_tests.rs:185:5:
+assertion `left == right` failed: every replayed message must reach statistics
+  left: 9755739
+ right: 10000000
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    handlers::scalability_tests::replay_dispatch
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 353 filtered out; finished in 124.27s
+

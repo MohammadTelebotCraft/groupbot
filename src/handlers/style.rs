@@ -22,14 +22,20 @@ impl Colour {
 }
 
 pub fn paint(button: Button, colour: Colour) -> Button {
-    let style = Some(colour.style().into());
+    let style = |old: Option<tl::enums::KeyboardButtonStyle>| {
+        let mut value = colour.style();
+        if let Some(tl::enums::KeyboardButtonStyle::Style(previous)) = old {
+            value.icon = previous.icon;
+        }
+        Some(value.into())
+    };
     let raw = match button.raw {
         tl::enums::KeyboardButton::Callback(mut b) => {
-            b.style = style;
+            b.style = style(b.style);
             tl::enums::KeyboardButton::Callback(b)
         }
         tl::enums::KeyboardButton::Url(mut b) => {
-            b.style = style;
+            b.style = style(b.style);
             tl::enums::KeyboardButton::Url(b)
         }
         other => other,
@@ -43,7 +49,11 @@ pub fn data(text: impl Into<String>, payload: impl Into<Vec<u8>>, colour: Colour
 
 pub fn toggle(text: impl Into<String>, payload: impl Into<Vec<u8>>, on: bool) -> Button {
     let button = Button::data(text, payload);
-    if on { paint(button, Colour::Success) } else { button }
+    if on {
+        paint(button, Colour::Success)
+    } else {
+        button
+    }
 }
 
 pub fn choice(text: impl Into<String>, payload: impl Into<Vec<u8>>, chosen: bool) -> Button {

@@ -60,7 +60,12 @@ pub fn render(emoji: &str) -> Option<Vec<u8>> {
 
     let mut png = Vec::new();
     image::codecs::png::PngEncoder::new(&mut png)
-        .write_image(canvas.as_raw(), SIZE.0, SIZE.1, image::ExtendedColorType::Rgba8)
+        .write_image(
+            canvas.as_raw(),
+            SIZE.0,
+            SIZE.1,
+            image::ExtendedColorType::Rgba8,
+        )
         .ok()?;
     Some(png)
 }

@@ -1,0 +1,26 @@
+{
+  "started_utc": "20260908T144407Z",
+  "sha256": "c17aa0c2368387b10944bfe5823041670a32d4b553397deb11250afad16180ed",
+  "backup": "/home/ubuntu/GroupManagement/groupbot/target/release/groupbot.rollback-20260908T144407Z",
+  "target": "/home/ubuntu/GroupManagement/groupbot/target/release/groupbot",
+  "host": "groupbot-prod",
+  "old_binary": "6cf2d9345fcfdd724912665c8699e9150ef64b616ca455afc0d58ba0f3ea3c2f  /home/ubuntu/GroupManagement/groupbot/target/release/groupbot.rollback-20260908T144407Z",
+  "dynamic_dependencies": "linux-vdso.so.1 (0x00007293a7d0d000)\n\tlibgcc_s.so.1 => /usr/lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007293a7cca000)\n\tlibm.so.6 => /usr/lib/x86_64-linux-gnu/libm.so.6 (0x00007293a1ada000)\n\tlibc.so.6 => /usr/lib/x86_64-linux-gnu/libc.so.6 (0x00007293a1800000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007293a7d0f000)",
+  "latest_status": {
+    "ActiveState": "active",
+    "SubState": "running",
+    "MainPID": "3147599",
+    "NRestarts": "0",
+    "ExecMainStartTimestamp": "Tue 2026-09-08 14:44:34 UTC",
+    "MemoryCurrent": "1176354816"
+  },
+  "status": "deployed",
+  "verified_pid": 3147599,
+  "verified_utc": "2026-09-08T14:45:26.877650+00:00",
+  "final_status": {
+    "ActiveState": "active",
+    "MainPID": "3147599",
+    "NRestarts": "0",
+    "MemoryCurrent": "1053446144"
+  }
+}

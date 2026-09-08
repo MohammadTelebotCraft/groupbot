@@ -1,3 +1,4 @@
+
 use grammers_client::message::Message;
 use grammers_client::session::types::{PeerKind, PeerRef};
 use grammers_client::tl;
@@ -54,7 +55,6 @@ pub async fn tripped(ctx: &std::sync::Arc<Ctx>, chat: i64, message: &Message) ->
     if !ctx.settings.is_locked(chat, LOCK) {
         return false;
     }
-
     let Some(sender) = message.sender_id().filter(|id| id.kind() == PeerKind::User) else {
         return false;
     };
@@ -70,7 +70,7 @@ pub async fn tripped(ctx: &std::sync::Arc<Ctx>, chat: i64, message: &Message) ->
     };
     let ctx = std::sync::Arc::clone(ctx);
     let slot = ctx.bio_slot().await;
-    tokio::spawn(async move {
+    std::sync::Arc::clone(&ctx).spawn_owned(async move {
         let _slot = slot;
         if let Some(about) = fetch(&ctx, target).await {
             ctx.remember_bio(user, has_link(&about.to_lowercase()));
@@ -108,8 +108,9 @@ pub async fn punish(ctx: &Ctx, message: &Message, chat: i64) {
     };
 
     if act == Act::Kick {
-        if let Err(e) = ctx.client.kick_participant(chat_ref, target).await {
-            eprintln!("biolink: {chat}: could not kick: {e}");
+        match restrict::kick_member(ctx, chat_ref, target).await {
+            Ok(()) => {}
+            Err(e) => eprintln!("biolink: {chat}: could not kick: {e}"),
         }
         return;
     }
@@ -166,9 +167,7 @@ mod tests {
         assert!(!has_link("just a normal bio"));
 
         assert!(!has_link("@ab"));
-
         assert!(!has_link("me@example"));
-
         assert!(!has_link("@ خانه"));
     }
 

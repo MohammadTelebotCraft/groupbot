@@ -1,0 +1,132 @@
+   Compiling serde_core v1.0.229
+   Compiling glob v0.3.4
+   Compiling rustix v0.38.44
+   Compiling libc v0.2.189
+   Compiling serde v1.0.229
+   Compiling prettyplease v0.2.37
+   Compiling memchr v2.8.3
+   Compiling regex-syntax v0.8.11
+   Compiling bitflags v2.13.1
+   Compiling minimal-lexical v0.2.1
+   Compiling linux-raw-sys v0.4.15
+   Compiling libloading v0.8.9
+   Compiling syn v2.0.119
+   Compiling either v1.17.0
+   Compiling bindgen v0.66.1
+   Compiling shlex v2.0.1
+   Compiling home v0.5.12
+   Compiling once_cell v1.21.4
+   Compiling find-msvc-tools v0.1.10
+   Compiling clang-sys v1.9.1
+   Compiling shlex v1.3.0
+   Compiling lazycell v1.3.0
+   Compiling nom v7.1.3
+   Compiling cc v1.4.2
+   Compiling log v0.4.33
+   Compiling lazy_static v1.5.0
+   Compiling peeking_take_while v0.1.2
+   Compiling rustc-hash v1.1.0
+   Compiling futures-core v0.3.34
+   Compiling futures-sink v0.3.34
+   Compiling futures-macro v0.3.34
+   Compiling errno v0.3.14
+   Compiling futures-task v0.3.34
+   Compiling futures-io v0.3.34
+   Compiling futures-channel v0.3.34
+   Compiling slab v0.4.12
+   Compiling parking_lot_core v0.9.12
+   Compiling signal-hook-registry v1.4.8
+   Compiling tracing-core v0.1.36
+   Compiling scopeguard v1.2.0
+   Compiling byteorder v1.5.0
+   Compiling smallvec v1.15.2
+   Compiling cmake v0.1.58
+   Compiling lock_api v0.4.14
+   Compiling regex-automata v0.4.18
+   Compiling grammers-tl-types v0.10.0 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-tl-types)
+   Compiling glass_pumpkin v2.0.0-rc0
+   Compiling cexpr v0.6.0
+   Compiling unicase v2.9.0
+   Compiling mime v0.3.17
+   Compiling jiff-core v0.1.0
+   Compiling mime_guess v2.0.5
+   Compiling parking_lot v0.12.5
+   Compiling which v4.4.2
+   Compiling futures-util v0.3.34
+   Compiling grammers-crypto v0.10.0 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-crypto)
+   Compiling md5 v0.8.1
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling regex v1.13.1
+   Compiling toml v1.1.4+spec-1.1.0
+   Compiling jiff v0.2.35
+   Compiling bytes v1.12.1
+   Compiling thiserror-impl v1.0.69
+   Compiling tracing-attributes v0.1.31
+   Compiling zerocopy-derive v0.7.35
+   Compiling tokio v1.53.1
+   Compiling zerocopy v0.7.35
+   Compiling thiserror v1.0.69
+   Compiling tracing v0.1.44
+   Compiling futures-executor v0.3.34
+   Compiling futures v0.3.34
+   Compiling libsql-ffi v0.9.30
+   Compiling socks5-proto v0.4.1
+   Compiling socks5-server v0.10.1
+   Compiling grammers-mtproto v0.10.0 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-mtproto)
+   Compiling libsql-sys v0.9.30
+   Compiling libsql v0.9.30
+   Compiling grammers-session v0.10.0 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-session)
+   Compiling grammers-mtsender v0.10.0 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-mtsender)
+   Compiling grammers-client v0.10.0 (/mnt/c/Users/moh/Desktop/GroupManagement/grammers/grammers-client)
+    Finished `release` profile [optimized] target(s) in 1m 01s
+     Running unittests src/lib.rs (target/release/deps/grammers_client-27d965c0eab63d09)
+
+running 3 tests
+test client::outbound::tests::per_chat_reservations_are_paced_and_capped ... ok
+test client::updates::tests::ensure_next_update_future_impls_send ... ok
+test client::outbound::tests::cancelled_admission_does_not_leak_waiting_telemetry ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (target/release/deps/grammers_mtsender-e9a66e621167b1c1)
+
+running 4 tests
+test errors::tests::check_rpc_error_parsing ... ok
+test sender_pool::admission_tests::canceled_callers_do_not_release_queued_request_budget ... ok
+test sender_pool::admission_tests::body_bytes_and_liveness_gate_are_enforced ... ok
+test sender_pool::admission_tests::flood_wait_is_shared_by_other_requests ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
+
+     Running unittests src/lib.rs (target/release/deps/grammers_session-bb1377a5e66928aa)
+
+running 25 tests
+test message_box::tests::test_connect_flow_empty ... ok
+test message_box::tests::test_complete_login_flow ... ok
+test message_box::tests::test_connect_flow_with_data ... ok
+test message_box::tests::test_iter_dialogs_flow ... ok
+test message_box::tests::test_idle_channel_is_kept_when_the_flag_is_off ... ok
+test message_box::tests::test_next_raw_update_flow_channel_issues ... ok
+test message_box::tests::test_next_raw_update_flow_channel_ban ... ok
+test message_box::tests::test_next_raw_update_flow_common_timeout ... ok
+test message_box::tests::test_next_raw_update_flow_empty ... ok
+test message_box::tests::test_next_raw_update_flow_no_new_get_diff_if_already_fetching ... ok
+test message_box::tests::test_next_raw_update_flow_channel_timeout ... ok
+test message_box::tests::test_process_socket_update_for_new_channel_dispatches_first_update ... ok
+test message_box::tests::test_idle_channel_is_dropped_instead_of_fetching_its_difference ... ok
+test message_box::tests::test_process_socket_updates_flow_already_processed ... ok
+test message_box::tests::test_process_socket_updates_flow_common_already_applied ... ok
+test message_box::tests::test_gapped_channel_is_never_dropped_as_idle ... ok
+test message_box::tests::test_process_socket_updates_flow_common_difference_ok ... ok
+test message_box::tests::test_process_socket_updates_flow_common_ok ... ok
+test message_box::tests::test_process_socket_updates_flow_common_pts_gap ... ok
+test message_box::tests::test_process_socket_updates_flow_common_pts_possible_gap_resolves ... ok
+test message_box::tests::test_process_socket_updates_flow_common_seq_gap ... ok
+test message_box::tests::test_process_socket_updates_trickle_causes_gap ... ok
+test storages::sqlite::tests::exercise_sqlite_session ... ok
+test storages::sqlite::tests::peer_cache_merges_and_survives_eviction ... ok
+test storages::sqlite::tests::peer_bound_keeps_chats_and_drops_only_the_oldest_users ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+

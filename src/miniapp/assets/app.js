@@ -10,9 +10,11 @@
     chat_unknown: "ربات دیگر در این گروه نیست یا شناخته شده نیست.",
     not_admin: "شما ادمین این گروه نیستید.",
     set_denied: "دسترسی تنظیمات برای شما بسته است.",
+    case_denied: "دسترسی پرونده‌ها برای شما بسته است.",
   };
 
   const STORE_KEY = "gm.chat";
+
 
   const FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
   function fa(value) {
@@ -54,6 +56,7 @@
     }
     return h * 60 + m;
   }
+
 
   const ICONS = {
     home: '<path d="M3 11 12 3l9 8"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/>',
@@ -118,6 +121,17 @@
 
   function icon(name, size, weight) {
     size = size || 18;
+    const keys = {
+      lock: "LOCKED", unlock: "UNLOCKED", ban: "MODERATION_HAMMER", mute: "MUTED",
+      clock: "TIMER", send: "TELEGRAM_SEND", chat: "CHAT", mic: "VOICE",
+      image: "IMAGE", fileText: "DOCUMENT_ACTIVITY", alert: "WARNING", pause: "PAUSE",
+    };
+    const key = keys[name] || name;
+    const glyph = window.MODERATION_ICONS && window.MODERATION_ICONS[key];
+    if (glyph) {
+      return '<span class="semantic-icon" aria-hidden="true" data-icon="' + esc(key) +
+        '" style="font-size:' + size + 'px">' + esc(glyph) + '</span>';
+    }
     return (
       '<svg width="' + size + '" height="' + size +
       '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="' + (weight || 2) +
@@ -126,6 +140,7 @@
   }
 
   const CHEV = '<span class="chev">' + icon("chevL", 18) + "</span>";
+
 
   const S = {
     groups: null,
@@ -141,6 +156,7 @@
     pending: null,
     locksAll: false,
   };
+
 
   async function api(path, opts) {
     opts = opts || {};
@@ -204,6 +220,7 @@
     }
   }
 
+
   function section(id) {
     return (S.dash.sections || []).find((s) => s.id === id) || null;
   }
@@ -232,9 +249,10 @@
     return !!(s && s.enabled);
   }
 
+
   const FEATURES = [
     {
-      id: "fl", group: "محافظت", icon: "bolt", title: "ضد رگبار",
+      id: "fl", group: "محافظت", icon: "TIMER", title: "ضد رگبار",
       desc: "کسی که پشت سر هم پیام بفرستد متوقف می شود",
       flag: "fl_on", sections: ["fl"],
       effect: () => "بیش از " + shown("fl_lim") + " پیام در " + shown("fl_win") + " ثانیه ← " + pickLabel("fl_act"),
@@ -264,7 +282,7 @@
       effect: () => shown("wn_lim") + " اخطار ← " + pickLabel("wn_act"),
     },
     {
-      id: "s", group: "محافظت", icon: "flame", title: "حالت سختگیرانه",
+      id: "s", group: "محافظت", icon: "MODERATION_HAMMER", title: "حالت سختگیرانه",
       desc: "هر برخورد با قفل ها یک تخلف شمرده می شود و تکرارش محدودیت می آورد",
       flag: "strict", sections: ["s"],
       effect: () => shown("s_lim") + " تخلف ← " + pickLabel("s_act") + " " + shown("s_time"),
@@ -390,6 +408,7 @@
     );
   }
 
+
   async function start() {
     if (!initData) {
       app.innerHTML = '<div class="state error">' + STATE_MESSAGES.auth_failed + "</div>";
@@ -467,7 +486,6 @@
       renderChatError(new Error(S.dash.state));
       return;
     }
-
     if (S.groups && !S.groups.some((g) => g.id === chat)) {
       S.groups.unshift({ id: chat, title: S.dash.chat.title, is_owner: S.dash.viewer.is_owner, known: true });
     }
@@ -543,6 +561,7 @@
     );
   }
 
+
   function renderTop(bare) {
     const g = group();
     const title = g ? g.title : S.dash ? S.dash.chat.title : "انتخاب گروه";
@@ -608,7 +627,6 @@
       html = renderTop(false) + '<div id="main">' + renderTab() + "</div>" + renderTabs();
     }
     html += renderOverlays() + renderConfirm();
-
     const y = window.scrollY;
     app.innerHTML = html;
     window.scrollTo(0, y);
@@ -647,10 +665,17 @@
       return;
     }
     if (S.stack.length) {
+      const page = currentPage();
+      if (page && page.id === "cases" && page.data && page.data.detail) {
+        delete page.data.detail;
+        render();
+        return;
+      }
       S.stack.pop();
       render();
     }
   }
+
 
   function todayCounts() {
     if (!S.activity || S.activity === "error") return null;
@@ -704,7 +729,7 @@
       '<div class="sec" style="padding-top:4px">' + renderHero() + "</div>" +
       '<div class="sec"><div class="quick">' +
       '<button data-push="rights"><span class="q">' + icon("lock", 22) + '</span><span class="l">بستن گروه</span></button>' +
-      '<button data-apply="strict"><span class="q' + (strictOn ? " on" : "") + '">' + icon("flame", 22) + '</span><span class="l' + (strictOn ? " on" : "") + '">سختگیرانه</span></button>' +
+      '<button data-apply="strict"><span class="q' + (strictOn ? " on" : "") + '">' + icon("MODERATION_HAMMER", 22) + '</span><span class="l' + (strictOn ? " on" : "") + '">سختگیرانه</span></button>' +
       '<button data-open="ap"><span class="q">' + icon("trash", 22) + '</span><span class="l">پاکسازی</span></button>' +
       '<button data-open="ng"><span class="q' + (nightOn ? " on" : "") + '">' + icon("moon", 22) + '</span><span class="l' + (nightOn ? " on" : "") + '">قفل شب</span></button>' +
       "</div></div>" +
@@ -714,6 +739,7 @@
       '<div class="list">' + top + "</div></div>"
     );
   }
+
 
   function renderFeatures() {
     const q = (S.featureQuery || "").trim();
@@ -736,10 +762,11 @@
     return html;
   }
 
+
   const LIST_KINDS = {
     ban: ["بن شده ها", "ban", "کسانی که از گروه بیرون شده اند"],
     mute: ["سکوت شده ها", "mute", "نمی توانند پیام بدهند"],
-    vip: ["کاربران ویژه", "star", "از همه قفل ها معاف اند"],
+    vip: ["کاربران ویژه", "PREMIUM_STAR", "از همه قفل ها معاف اند"],
     free: ["معاف ها", "unlock", "از ضد رگبار و اد اجباری معاف اند"],
     filter: ["فیلتر کلمات", "funnel", "پیامی که این کلمه ها را دارد حذف می شود"],
     answer: ["پاسخ خودکار", "chat", "به این کلمه ها پاسخ آماده داده می شود"],
@@ -804,6 +831,7 @@
     if (S.tab === "members" && !S.stack.length) render();
   }
 
+
   function renderActivity() {
     const a = S.activity;
     if (!a) return '<div class="sec" style="padding-top:8px"><div class="sk" style="height:110px;border-radius:16px"></div></div>';
@@ -840,6 +868,7 @@
     return html;
   }
 
+
   const PAGE_LOADERS = {
     locks: () => api("/locks"),
     rights: () => api("/rights"),
@@ -848,6 +877,7 @@
     joingate: () => api("/join-gate"),
     imgf: () => api("/lists/imgf"),
     voice: () => api("/voice"),
+    cases: () => api("/cases?status=open").then((data) => { data.status = "open"; data.user = ""; return data; }),
     settings: () => Promise.resolve({}),
   };
 
@@ -906,6 +936,8 @@
         return renderImgfPage(page);
       case "voice":
         return renderVoicePage(page);
+      case "cases":
+        return renderCasesPage(page);
       case "settings":
         return renderSettingsPage();
       default:
@@ -915,12 +947,45 @@
 
   function pageTitle(page) {
     if (page.id.startsWith("list:")) return LIST_KINDS[page.id.slice(5)][0];
-    return { locks: "قفل ها", rights: "دسترسی اعضا", log: "لاگ", welcome: "خوشامد", joingate: "عضویت اجباری در کانال", imgf: "فیلتر تصویری", voice: "کلمه های نامناسب ویس", settings: "تنظیمات گروه" }[page.id] || "";
+    return { locks: "قفل ها", rights: "دسترسی اعضا", log: "لاگ", welcome: "خوشامد", joingate: "عضویت اجباری در کانال", imgf: "فیلتر تصویری", voice: "کلمه های نامناسب ویس", cases: "پرونده ها", settings: "تنظیمات گروه" }[page.id] || "";
   }
 
   function loadingList() {
     return '<div class="sec" style="padding-top:12px"><div class="sk" style="height:160px;border-radius:16px"></div></div>';
   }
+
+  function caseStatus(value) {
+    return { open: "باز", resolved: "بسته", reversed: "لغوشده" }[value] || value;
+  }
+
+  function caseAction(value) {
+    return { none: "بدون اقدام", delete: "حذف", warn: "اخطار", mute: "سکوت", ban: "بن", kick: "کیک" }[value] || value;
+  }
+
+  function renderCasesPage(page) {
+    const d = page.data;
+    let html = renderPageTop("پرونده ها", S.dash.chat.title) + '<div id="main" class="nobar">';
+    if (!d) return html + loadingList() + "</div>";
+    if (d.detail) {
+      const c = d.detail;
+      html += '<div class="sec"><div class="hero"><div class="glyph ' + (c.status === "open" ? "warn" : "ok") + '">' + icon("fileText", 25) + '</div><div><div class="t">پرونده ' + fa(c.id) + '</div><div class="s">' + esc(caseStatus(c.status)) + " · " + esc(caseAction(c.action)) + '</div></div></div></div>';
+      html += '<div class="sec"><div class="list"><div class="row"><span class="rt"><span class="t">' + esc(c.subject_name || "کاربر نامشخص") + '</span><span class="s">' + esc(c.reason) + '</span></span></div></div>';
+      if (c.evidence) html += '<div class="note mute" style="margin-top:10px">' + esc(c.evidence) + '</div>';
+      html += '</div><div class="sec"><div class="h"><div class="t">رویدادها</div></div><div class="list">' + (d.events || []).map((ev) => '<div class="row" style="min-height:44px"><span class="rt"><span class="t">' + esc(ev.kind) + '</span><span class="s">' + esc(ev.actor_name || "ربات") + (ev.note ? " · " + esc(ev.note) : "") + '</span></span></div>').join("") + '</div></div>';
+      html += '<div class="sec"><textarea class="text-input" id="case-note" maxlength="500" placeholder="یادداشت اختیاری" style="height:84px;padding:12px"></textarea><div style="display:flex;gap:8px;padding-top:10px">';
+      if (c.status === "open") html += '<button class="btn ghost" data-case-action="none">بررسی شد</button><button class="btn danger" data-case-action="delete">حذف پیام</button>';
+      if (c.status === "resolved" && ["warn", "mute", "ban"].includes(c.action)) html += '<button class="btn soft-danger block" data-case-action="reverse">لغو اقدام</button>';
+      html += '<button class="btn ghost" data-case-note>ثبت یادداشت</button></div></div></div>';
+      return html;
+    }
+    const status = d.status || "open";
+    html += '<div class="sec" style="padding-top:2px"><div class="chips"><button class="chip ' + (status === "open" ? "on" : "") + '" data-case-filter="open">باز</button><button class="chip ' + (status === "all" ? "on" : "") + '" data-case-filter="all">همه</button></div><label class="search" style="margin-top:10px">' + icon("search", 16) + '<input id="case-user" inputmode="numeric" placeholder="شناسه عددی کاربر" value="' + esc(d.user || "") + '" /></label></div>';
+    html += '<div class="sec"><div class="list">' + (d.cases || []).map((c) => '<button class="row" data-case="' + c.id + '"><span class="rico ' + (c.status === "open" ? "warn" : "") + '">' + icon("fileText", 15) + '</span><span class="rt"><span class="t">' + esc(c.subject_name || "کاربر نامشخص") + '</span><span class="s">#' + fa(c.id) + " · " + esc(c.reason) + '</span></span><span class="pill ' + (c.status === "open" ? "warn" : "mute") + '">' + esc(caseStatus(c.status)) + '</span>' + CHEV + '</button>').join("") + '</div>';
+    if (!(d.cases || []).length) html += '<div class="hint">پرونده ای پیدا نشد.</div>';
+    if (d.has_more && d.cases.length) html += '<button class="btn ghost block" data-case-more="' + d.cases[d.cases.length - 1].id + '">بیشتر</button>';
+    return html + '</div></div>';
+  }
+
 
   const LOCK_GROUPS = [
     ["رسانه", ["photo", "video", "gif", "sticker", "animsticker", "music", "voice", "file", "media", "spoiler", "story"]],
@@ -941,7 +1006,7 @@
     const plain = page.data.plain;
     const used = new Set();
     const chip = (l) =>
-      '<button class="chip' + (l.on ? " on" : "") + '" data-lock="' + esc(l.key) + '">' + (l.on ? icon("lock", 13, 2.4) : "") + l.label + "</button>";
+      '<button class="chip' + (l.on ? " on" : "") + '" data-lock="' + esc(l.key) + '">' + icon(l.icon || (l.on ? "LOCKED" : "UNLOCKED"), 13, 2.4) + l.label + "</button>";
     const groupHtml = (title, items) => {
       const shownItems = items.filter((l) => !q || l.label.includes(q));
       if (!shownItems.length) return "";
@@ -959,6 +1024,7 @@
     return html + "</div>";
   }
 
+
   function renderRightsPage(page) {
     let html = renderPageTop("دسترسی اعضا", S.dash.chat.title) + '<div id="main" class="nobar">';
     if (!page.data) return html + loadingList() + "</div>";
@@ -971,10 +1037,11 @@
       '<button class="chip wide" data-rights-all="1"' + (open === page.data.rights.length ? " disabled" : "") + ">" + icon("unlock", 14) + " باز کردن همه</button></div></div>";
     html += '<div class="sec"><div class="h"><div class="t">اعضای عادی می توانند</div></div><div class="list">' +
       page.data.rights.map((r) =>
-        '<div class="row"><span class="rt"><span class="t" style="font-weight:400">' + r.label + '</span></span><button class="swb" data-right="' + esc(r.key) + '"><span class="sw' + (r.open ? " on" : "") + '"></span></button></div>'
+        '<div class="row"><span class="rico">' + icon(r.icon || (r.open ? "UNLOCKED" : "LOCKED"), 16) + '</span><span class="rt"><span class="t" style="font-weight:400">' + r.label + '</span></span><button class="swb" data-right="' + esc(r.key) + '"><span class="sw' + (r.open ? " on" : "") + '"></span></button></div>'
       ).join("") + "</div></div>";
     return html + "</div>";
   }
+
 
   function renderLogPage(page) {
     let html = renderPageTop("لاگ", S.dash.chat.title) + '<div id="main" class="nobar">';
@@ -990,6 +1057,7 @@
     return html + "</div>";
   }
 
+
   function renderWelcomePage(page) {
     let html = renderPageTop("خوشامد", S.dash.chat.title) + '<div id="main" class="nobar">';
     if (!page.data) return html + loadingList() + "</div>";
@@ -1004,6 +1072,7 @@
     return html + "</div>";
   }
 
+
   function renderJoinGatePage(page) {
     let html = renderPageTop("عضویت اجباری در کانال", S.dash.chat.title) + '<div id="main" class="nobar">';
     if (!page.data) return html + loadingList() + "</div>";
@@ -1014,6 +1083,7 @@
       (d.channel ? '<button class="btn soft-danger" data-joingate-off>خاموش</button>' : "") + "</div></div>";
     return html + "</div>";
   }
+
 
   function renderImgfPage(page) {
     let html = renderPageTop("فیلتر تصویری", S.dash.chat.title) + '<div id="main" class="nobar">';
@@ -1035,6 +1105,7 @@
     return html + "</div></div>";
   }
 
+
   function renderVoicePage(page) {
     let html = renderPageTop("کلمه های نامناسب ویس", S.dash.chat.title) + '<div id="main" class="nobar">';
     if (!page.data) return html + loadingList() + "</div>";
@@ -1051,6 +1122,7 @@
     if (d.disabled_defaults.length) html += '<div class="sec" style="padding-top:16px"><button class="btn ghost block" data-voice-restore>بازگرداندن ' + fa(d.disabled_defaults.length) + " کلمه پیش فرض</button></div>";
     return html + "</div>";
   }
+
 
   const LIST_SEARCH_THRESHOLD = 8;
 
@@ -1082,6 +1154,7 @@
     return html + "</div></div>";
   }
 
+
   function renderSettingsPage() {
     const g = group();
     const health = S.health && S.health !== "error" ? S.health : null;
@@ -1108,6 +1181,7 @@
 
     html += '<div class="sec"><div class="h"><div class="t">لاگ و گزارش</div></div><div class="list">' +
       pageRow("log", "fileText", "کانال لاگ", "رویدادهای گروه کجا ثبت شود") +
+      pageRow("cases", "shield", "پرونده ها", "گزارش ها و سابقه برخوردها") +
       sheetRow("dr", "send", "گزارش روزانه", sectionEnabled("dr") ? feature("dr").effect() : "خاموش") +
       "</div></div>";
 
@@ -1120,12 +1194,14 @@
       "</div></div>";
 
     html += '<div class="sec"><div class="h"><div class="t">پاسخ ها و دستورها</div></div><div class="list">' +
+      '<button class="row" data-open="response-policy"><span class="rico">' + icon("chat", 16) + '</span><span class="rt"><span class="t">پیام های ربات</span><span class="s">خصوصی کردن اعلان ها و خوشامد</span></span>' + CHEV + "</button>" +
       pageRow("list:answer", "chat", "پاسخ خودکار", "کلمه و پاسخ آماده") +
       pageRow("list:cmd", "terminal", "دستور های سفارشی", "") +
       pageRow("list:pack", "sparkles", "پک های استیکر", "پک هایی که حذف می شوند") +
       "</div></div>";
     return html + "</div>";
   }
+
 
   function openSheet(fid) {
     const f = feature(fid) || EXTRA_SHEETS[fid];
@@ -1138,6 +1214,7 @@
     S.confirm = null;
     render();
     if (f.custom === "ai") loadSheetData("/locks");
+    if (f.custom === "response_policy") loadSheetData("/response-policy");
   }
 
   async function loadSheetData(path) {
@@ -1165,6 +1242,7 @@
   const EXTRA_SHEETS = {
     lim: { id: "lim", icon: "shieldOff", title: "محدودیت مدیران", desc: "با روشن بودن، هر ادمین فقط کارهایی را می تواند بکند که مالک به او داده", flag: "lim_on", sections: ["lim"] },
     nt: { id: "nt", icon: "bell", title: "اعلان حذف", desc: "وقتی پیامی حذف شد، به فرستنده اش گفته می شود چرا", flag: "nt_on", sections: ["nt"] },
+    "response-policy": { id: "response-policy", icon: "chat", title: "پیام های ربات", desc: "فقط اعلان های حذف و خوشامد؛ بقیه پیام ها عادی می مانند", custom: "response_policy" },
   };
 
   function drawSheet() {
@@ -1217,10 +1295,11 @@
     });
     (f.flags || []).forEach((id) => {
       const it = setting(id);
-      if (it) html += '<div class="row" style="padding-right:2px;padding-left:2px"><span class="rt"><span class="t" style="font-weight:400">' + it.label + '</span></span><button class="swb" data-apply="' + it.id + '"><span class="sw' + (it.on ? " on" : "") + '"></span></button></div>';
+      if (it) html += '<div class="row" style="padding-right:2px;padding-left:2px"><span class="rt"><span class="t" style="font-weight:400">' + (it.icon ? icon(it.icon, 14) : "") + it.label + '</span></span><button class="swb" data-apply="' + it.id + '"><span class="sw' + (it.on ? " on" : "") + '"></span></button></div>';
     });
 
     if (f.custom === "ai") html += renderAiBlock();
+    if (f.custom === "response_policy") html += renderResponsePolicyBlock();
     if (f.custom === "voice") html += '<div class="list" style="margin-top:12px"><button class="row" data-push="voice"><span class="rico">' + icon("funnel", 16) + '</span><span class="rt"><span class="t">کلمه های نامناسب</span><span class="s">فهرست را ببینید و کم و زیاد کنید</span></span>' + CHEV + "</button></div>";
     if (f.custom === "answers") html += '<div class="list" style="margin-top:12px"><button class="row" data-push="list:answer"><span class="rico">' + icon("chat", 16) + '</span><span class="rt"><span class="t">کلمه ها و پاسخ ها</span><span class="s">از داخل گروه با «تنظیم پاسخ» اضافه می شود</span></span>' + CHEV + "</button></div>";
 
@@ -1229,7 +1308,7 @@
       html += '<div class="disclose"><button class="row" data-adv="' + f.id + '"><span class="rt"><span class="t">تنظیمات پیشرفته</span><span class="s">' + adv.map((a) => a.label).join("، ") + '</span></span><span class="chev">' + icon(open ? "chevD" : "chevL", 18) + "</span></button>";
       if (open) {
         html += '<div class="list">' + adv.map((it) =>
-          '<div class="row"><span class="rt"><span class="t" style="font-weight:400">' + it.label + '</span></span><button class="swb" data-apply="' + it.id + '"><span class="sw' + (it.on ? " on" : "") + '"></span></button></div>'
+          '<div class="row"><span class="rt"><span class="t" style="font-weight:400">' + (it.icon ? icon(it.icon, 14) : "") + it.label + '</span></span><button class="swb" data-apply="' + it.id + '"><span class="sw' + (it.on ? " on" : "") + '"></span></button></div>'
         ).join("") + "</div>";
       }
       html += "</div>";
@@ -1241,29 +1320,49 @@
     const d = S.sheet && S.sheet.data;
     if (!d) return '<div class="sk" style="height:120px;border-radius:16px;margin-top:12px"></div>';
     return '<div class="h" style="padding-top:14px"><div class="t">موضوع ها</div><div class="count">' + fa(d.ai.filter((l) => l.on).length) + " از " + fa(d.ai.length) + '</div></div><div class="chips lockchips">' +
-      d.ai.map((l) => '<button class="chip' + (l.on ? " on" : "") + '" data-lock="' + esc(l.key) + '">' + (l.on ? icon("lock", 13, 2.4) : "") + l.label + "</button>").join("") + "</div>" +
+      d.ai.map((l) => '<button class="chip' + (l.on ? " on" : "") + '" data-lock="' + esc(l.key) + '">' + icon(l.icon || (l.on ? "LOCKED" : "UNLOCKED"), 13, 2.4) + l.label + "</button>").join("") + "</div>" +
       '<div class="list" style="margin-top:14px"><button class="row" data-push="imgf"><span class="rico">' + icon("image", 16) + '</span><span class="rt"><span class="t">فیلتر تصویری شما</span><span class="s">موضوع های دلخواه</span></span>' + CHEV + "</button></div>";
+  }
+
+  function policyVisibilityLabel(value) {
+    return { default: "پیش فرض", public: "عمومی", private: "خصوصی" }[value] || value;
+  }
+
+  function policyChoice(kind, id, visibility, selected) {
+    return '<button class="chip' + (selected ? " on" : "") + '" data-policy-choice="' + esc(kind + ":" + id + ":" + visibility) + '">' + policyVisibilityLabel(visibility) + "</button>";
+  }
+
+  function renderResponsePolicyBlock() {
+    const d = S.sheet && S.sheet.data;
+    if (!d) return '<div class="sk" style="height:180px;border-radius:16px;margin-top:12px"></div>';
+    let html = '<div class="note">' + icon("info", 16) + '<span>عمومی یعنی پیام عادی گروه؛ خصوصی فقط به همان کاربر نشان داده می شود.</span></div>';
+    html += '<div class="list" style="margin-top:12px">' + d.overrides.map((item) => '<div class="field"><div class="fl"><span>' + esc(item.label) + '</span><b>' + policyVisibilityLabel(item.visibility) + '</b></div><div class="chips">' +
+      policyChoice("kind", item.id, "public", item.visibility === "public") +
+      policyChoice("kind", item.id, "private", item.visibility === "private") +
+      "</div></div>").join("") + "</div>";
+    html += '<button class="btn ghost" style="margin-top:14px;width:100%" data-policy-reset>بازگشت هر دو به عمومی</button>';
+    return html;
   }
 
   function renderNumberField(it, standalone) {
     const chips = (it.presets || []).map((p) =>
       '<button class="chip' + (p.value === it.value ? " on" : "") + '" data-apply="' + it.id + ":" + p.value + '">' + fa(p.shown) + "</button>"
     ).join("");
-
     const custom = it.clock
       ? '<div class="inline-num"' + (chips ? "" : ' style="margin-top:0"') + '><input type="time" class="text-input" dir="ltr" value="' + minutesToClock(it.value) + '" data-clock-apply="' + it.id + '" data-clock-value="' + it.value + '" /></div>'
       : "";
     const numChip = it.clock
       ? ""
       : '<input type="number" class="chip-input" inputmode="numeric" min="' + it.range[0] + '" max="' + it.range[1] + '" value="' + it.value + '" data-number-apply="' + it.id + '" aria-label="دلخواه" />';
-    return '<div class="field' + (standalone ? '" style="padding-top:0' : "") + '"><div class="fl"><span>' + it.label + "</span><b>" + fa(it.shown) + "</b></div>" +
+    return '<div class="field' + (standalone ? '" style="padding-top:0' : "") + '"><div class="fl"><span>' + (it.icon ? icon(it.icon, 14) : "") + it.label + "</span><b>" + fa(it.shown) + "</b></div>" +
       '<div class="chips">' + chips + numChip + "</div>" + custom + "</div>";
   }
 
   function renderPickField(it) {
-    return '<div class="field"><div class="fl"><span>' + it.label + '</span></div><div class="chips">' +
-      it.options.map((o) => '<button class="chip' + (o.value === it.chosen ? " on" : "") + (o.danger ? " danger" : "") + '" data-apply="' + o.id + '">' + o.label + "</button>").join("") + "</div></div>";
+    return '<div class="field"><div class="fl"><span>' + (it.icon ? icon(it.icon, 14) : "") + it.label + '</span></div><div class="chips">' +
+      it.options.map((o) => '<button class="chip' + (o.value === it.chosen ? " on" : "") + (o.danger ? " danger" : "") + '" data-apply="' + o.id + '">' + (o.icon ? icon(o.icon, 14) : "") + o.label + "</button>").join("") + "</div></div>";
   }
+
 
   function openPicker() {
     S.sheet = { id: "picker", data: null };
@@ -1294,6 +1393,7 @@
     });
     syncBack();
   }
+
 
   const CONFIRMS = {
     "log-off": () => ({ title: "کانال لاگ قطع شود؟", sub: "رویدادها دیگر جایی ثبت نمی شود؛ بعدا از داخل گروه دوباره تنظیم می کنید.", label: "قطع", run: () => api("/log/off", { method: "POST" }).then(() => reloadTopPage()) }),
@@ -1343,6 +1443,7 @@
     else render();
   }
 
+
   async function afterWrite() {
     render();
   }
@@ -1357,6 +1458,16 @@
     afterWrite();
   }
 
+  async function applyPolicy(action) {
+    if (!S.sheet || S.sheet.id !== "response-policy") return;
+    const ok = await write(async () => {
+      S.sheet.data = await api("/response-policy/apply", { method: "POST", body: action });
+    });
+    if (!ok) return;
+    haptic();
+    drawSheet();
+  }
+
   async function toggleLock(key) {
     const page = currentPage();
     const ok = await write(async () => {
@@ -1364,7 +1475,6 @@
     });
     if (!ok) return;
     haptic();
-
     const flip = (arr) => arr.forEach((l) => { if (l.key === key) l.on = !l.on; });
     if (page && page.id === "locks" && page.data) {
       flip(page.data.plain);
@@ -1430,6 +1540,7 @@
     render();
   }
 
+
   app.addEventListener("click", onClick);
   app.addEventListener("keydown", onKeydown);
   app.addEventListener("focusout", onFocusOut);
@@ -1490,6 +1601,15 @@
       else S.adv.add(id);
       drawSheet();
       return;
+    }
+    if ((el = hit("[data-policy-choice]"))) {
+      const parts = el.dataset.policyChoice.split(":");
+      if (parts.length !== 3) return;
+      if (parts[0] !== "kind") return;
+      return applyPolicy({ action: "set_kind", kind: parts[1], visibility: parts[2] });
+    }
+    if (hit("[data-policy-reset]")) {
+      return applyPolicy({ action: "reset" });
     }
     if ((el = hit("[data-apply]"))) return applySetting(el.dataset.apply);
     if ((el = hit("[data-power]"))) return powerFeature(el.dataset.power);
@@ -1582,7 +1702,6 @@
         if (ok) reloadTopPage();
         return;
       }
-
       const tag = kind + ":" + key;
       if (S.pending === tag) return removeEntry(kind, key);
       S.pending = tag;
@@ -1635,6 +1754,69 @@
       if (ok) reloadTopPage();
       return;
     }
+    if ((el = hit("[data-case]"))) {
+      const page = currentPage();
+      const detail = await api("/cases/" + el.dataset.case);
+      if (page && page.id === "cases") {
+        page.data.detail = detail;
+        render();
+        window.scrollTo(0, 0);
+      }
+      return;
+    }
+    if ((el = hit("[data-case-filter]"))) {
+      const page = currentPage();
+      if (!page) return;
+      const status = el.dataset.caseFilter;
+      const data = await api("/cases?status=" + status);
+      data.status = status;
+      data.user = "";
+      page.data = data;
+      render();
+      return;
+    }
+    if ((el = hit("[data-case-more]"))) {
+      const page = currentPage();
+      if (!page || !page.data) return;
+      const status = page.data.status || "open";
+      const user = page.data.user ? "&user_id=" + encodeURIComponent(page.data.user) : "";
+      const data = await api("/cases?status=" + status + "&before_id=" + el.dataset.caseMore + user);
+      page.data.cases = page.data.cases.concat(data.cases || []);
+      page.data.has_more = data.has_more;
+      render();
+      return;
+    }
+    if ((el = hit("[data-case-action]"))) {
+      const page = currentPage();
+      if (!page || !page.data || !page.data.detail) return;
+      const id = page.data.detail.id;
+      const note = (document.getElementById("case-note") || {}).value || "";
+      const action = el.dataset.caseAction;
+      const path = action === "reverse" ? "/cases/" + id + "/reverse" : "/cases/" + id + "/resolve";
+      const body = action === "reverse" ? (note ? { note } : {}) : (note ? { action, note } : { action });
+      const ok = await write(() => api(path, { method: "POST", body }));
+      if (ok) {
+        page.data.detail = await api("/cases/" + id);
+        toast("پرونده به روز شد.", true);
+        render();
+      }
+      return;
+    }
+    if (hit("[data-case-note]")) {
+      const page = currentPage();
+      if (!page || !page.data || !page.data.detail) return;
+      const input = document.getElementById("case-note");
+      const note = input.value.trim();
+      if (!note) return;
+      const id = page.data.detail.id;
+      const ok = await write(() => api("/cases/" + id + "/notes", { method: "POST", body: { note } }));
+      if (ok) {
+        page.data.detail = await api("/cases/" + id);
+        toast("یادداشت ثبت شد.", true);
+        render();
+      }
+      return;
+    }
     if (hit("[data-welcome-save]")) {
       const text = document.getElementById("welcome-text").value;
       const ok = await write(() => api("/welcome", { method: "POST", body: { text } }));
@@ -1682,6 +1864,18 @@
     if (t.id === "filter-phrase") document.querySelector("[data-filter-add]").click();
     if (t.id === "voice-word") document.querySelector("[data-voice-add]").click();
     if (t.id === "join-gate-input") document.querySelector("[data-joingate-save]").click();
+    if (t.id === "case-user") {
+      const page = currentPage();
+      const user = t.value.trim();
+      if (!page || (user && !/^-?\d+$/.test(user))) return;
+      const status = page.data.status || "open";
+      api("/cases?status=" + status + (user ? "&user_id=" + encodeURIComponent(user) : "")).then((data) => {
+        data.status = status;
+        data.user = user;
+        page.data = data;
+        render();
+      }).catch(report);
+    }
   }
 
   function onFocusOut(e) {

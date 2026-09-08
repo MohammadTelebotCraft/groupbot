@@ -1,3 +1,4 @@
+
 use std::sync::Arc;
 
 use grammers_client::message::Message;
@@ -36,17 +37,17 @@ pub async fn on_post(ctx: &Ctx, state: &ChatState, message: &Message, chat: i64)
         return;
     }
     state.remember_post(message.id());
-    if !ctx.settings.is_locked(chat, GROUP) {
-        ctx.settings.set(chat, GROUP, true).await;
+    if !ctx.settings.is_locked(chat, GROUP)
+        && let Err(error) = ctx.settings.try_set(chat, GROUP, true).await
+    {
+        ::log::warn!("comments: could not remember linked group {chat}: {error}");
     }
     if !ctx.settings.is_locked(chat, LOCK) {
         return;
     }
-
     if !ctx.claim_comment_sign(chat, message.id()) {
         return;
     }
-
     if let Err(e) = message.reply(SIGN).await {
         eprintln!("comment: {chat}: could not post the sign: {e}");
     }
@@ -65,7 +66,6 @@ pub async fn tripped(ctx: &Arc<Ctx>, chat: i64, message: &Message) -> bool {
     if let Some(known) = state.root_known(root) {
         return known;
     }
-
     if !ctx.settings.is_locked(chat, GROUP) {
         return false;
     }
@@ -83,12 +83,11 @@ pub async fn tripped(ctx: &Arc<Ctx>, chat: i64, message: &Message) -> bool {
     };
     match state.claim_root(root, waiting) {
         RootClaim::Known(known) => known,
-
         RootClaim::Waiting => false,
         RootClaim::Mine => {
             let ctx = Arc::clone(ctx);
             let permit = ctx.comment_slot().await;
-            tokio::spawn(async move {
+            Arc::clone(&ctx).spawn_owned(async move {
                 let _permit = permit;
                 resolve(&ctx, &state, chat, chat_ref, root).await;
             });
@@ -114,7 +113,6 @@ async fn resolve(ctx: &Arc<Ctx>, state: &ChatState, chat: i64, chat_ref: PeerRef
     if !post {
         return;
     }
-
     if !ctx.settings.is_locked(chat, LOCK) {
         return;
     }
@@ -127,14 +125,24 @@ async fn act(ctx: &Arc<Ctx>, chat: i64, chat_ref: PeerRef, entry: Queued) {
     if !ctx.claim_moderation(chat, entry.message) {
         return;
     }
-    match ctx.client.delete_messages(chat_ref, &[entry.message]).await {
+    match ctx
+        .client
+        .delete_messages_critical(chat_ref, &[entry.message])
+        .await
+    {
         Ok(0) => {
-            eprintln!("comment: delete affected nothing in {chat} msg {}", entry.message);
+            eprintln!(
+                "comment: delete affected nothing in {chat} msg {}",
+                entry.message
+            );
             return;
         }
         Ok(_) => {}
         Err(e) => {
-            eprintln!("comment: could not delete in {chat} msg {}: {e}", entry.message);
+            eprintln!(
+                "comment: could not delete in {chat} msg {}: {e}",
+                entry.message
+            );
             return;
         }
     }
@@ -151,8 +159,19 @@ async fn act(ctx: &Arc<Ctx>, chat: i64, chat_ref: PeerRef, entry: Queued) {
         },
     )
     .await;
-    super::nsfw::punish_and_notify(ctx, chat, chat_ref, entry.sender, &entry.name, LOCK, REASON)
-        .await;
+    super::nsfw::punish_and_notify(
+        ctx,
+        super::nsfw::DetachedModeration {
+            chat,
+            chat_ref,
+            message_id: entry.message,
+            sender: entry.sender,
+            name: &entry.name,
+            cause: LOCK,
+            reason: REASON,
+        },
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -202,8 +221,7 @@ mod tests {
 
         let mut elsewhere = header();
         elsewhere.reply_to_msg_id = Some(7);
-        elsewhere.reply_to_peer_id =
-            Some(tl::types::PeerChannel { channel_id: 123 }.into());
+        elsewhere.reply_to_peer_id = Some(tl::types::PeerChannel { channel_id: 123 }.into());
         assert_eq!(root_of(&elsewhere), None);
     }
 

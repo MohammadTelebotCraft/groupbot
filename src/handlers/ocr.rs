@@ -1,3 +1,4 @@
+
 use super::nsfw;
 
 pub const LOCK: &str = "advert";
@@ -45,13 +46,54 @@ fn dictionary() -> &'static Vec<&'static str> {
     CELL.get_or_init(|| DICT.lines().collect())
 }
 
+fn checked_matrix(
+    shape: &[i64],
+    rows_at: usize,
+    columns_at: usize,
+    available: usize,
+    max_axis: Option<usize>,
+) -> Result<(usize, usize, usize), nsfw::ModelError> {
+    let rows = shape
+        .get(rows_at)
+        .ok_or_else(|| nsfw::ModelError::contract("tensor has no row dimension"))
+        .and_then(|value| {
+            usize::try_from(*value)
+                .map_err(|_| nsfw::ModelError::contract("tensor row dimension is negative"))
+        })?;
+    let columns = shape
+        .get(columns_at)
+        .ok_or_else(|| nsfw::ModelError::contract("tensor has no column dimension"))
+        .and_then(|value| {
+            usize::try_from(*value)
+                .map_err(|_| nsfw::ModelError::contract("tensor column dimension is negative"))
+        })?;
+    if rows == 0
+        || columns == 0
+        || max_axis.is_some_and(|maximum| rows > maximum || columns > maximum)
+    {
+        return Err(nsfw::ModelError::contract(
+            "tensor matrix dimensions are empty or exceed the supported bound",
+        ));
+    }
+    let cells = rows
+        .checked_mul(columns)
+        .ok_or_else(|| nsfw::ModelError::contract("tensor matrix dimensions overflow usize"))?;
+    if cells != available {
+        return Err(nsfw::ModelError::contract(format!(
+            "tensor shape describes {cells} values but output contains {available}"
+        )));
+    }
+    Ok((rows, columns, cells))
+}
+
 type Box = (u32, u32, u32, u32);
 
-fn detect(image: &image::RgbImage) -> Option<Vec<Box>> {
-    let pool = detector()?;
+fn detect(image: &image::RgbImage) -> Result<Vec<Box>, nsfw::ModelError> {
+    let pool = detector().ok_or_else(|| {
+        nsfw::ModelError::Runtime("embedded OCR detector is unavailable".to_owned())
+    })?;
     let (width, height) = image.dimensions();
     let scale = (DET_SIDE as f32 / width.max(height) as f32).min(1.0);
-
     let to = |value: u32| ((value as f32 * scale) as u32).max(32).div_ceil(32) * 32;
     let (wide, tall) = (to(width), to(height));
 
@@ -68,20 +110,20 @@ fn detect(image: &image::RgbImage) -> Option<Vec<Box>> {
     let (shape, probability) = pool.with(|session| {
         nsfw::run_shaped(session, vec![1, 3, i64::from(tall), i64::from(wide)], input)
     })?;
-    if shape.len() < 4 {
-        return None;
+    if shape.len() != 4 || shape[0] != 1 || shape[1] != 1 {
+        return Err(nsfw::ModelError::contract(format!(
+            "OCR detector output shape is {shape:?}, expected [1, 1, rows, columns]"
+        )));
     }
-    let (rows, columns) = (shape[2] as usize, shape[3] as usize);
-    if probability.len() < rows * columns {
-        return None;
-    }
+    let (rows, columns, cells) =
+        checked_matrix(&shape, 2, 3, probability.len(), Some(i32::MAX as usize))?;
 
     let across = width as f32 / columns as f32;
     let down = height as f32 / rows as f32;
-    let mut seen = vec![false; rows * columns];
+    let mut seen = vec![false; cells];
     let mut boxes: Vec<Box> = Vec::new();
 
-    for start in 0..rows * columns {
+    for start in 0..cells {
         if seen[start] || probability[start] < INK {
             continue;
         }
@@ -123,13 +165,62 @@ fn detect(image: &image::RgbImage) -> Option<Vec<Box>> {
             boxes.push((x0 as u32, y0 as u32, w, h));
         }
     }
-
     boxes.sort_by_key(|(x, y, ..)| (*y, *x));
-    Some(boxes)
+    Ok(boxes)
 }
 
-fn read_box(image: &image::RgbImage, at: Box) -> Option<String> {
-    let pool = reader()?;
+fn decode_reader_output(
+    shape: &[i64],
+    logits: &[f32],
+    dictionary: &[&str],
+) -> Result<String, nsfw::ModelError> {
+    if logits.iter().any(|value| !value.is_finite()) {
+        return Err(nsfw::ModelError::contract(
+            "OCR reader output contains a non-finite value",
+        ));
+    }
+    if shape.len() != 3 || shape[0] != 1 {
+        return Err(nsfw::ModelError::contract(format!(
+            "OCR reader output shape is {shape:?}, expected [1, steps, classes]"
+        )));
+    }
+    let (steps, classes, _) = checked_matrix(shape, 1, 2, logits.len(), None)?;
+    if classes != dictionary.len() + 1 {
+        return Err(nsfw::ModelError::contract(format!(
+            "OCR reader returned {classes} classes, expected {}",
+            dictionary.len() + 1
+        )));
+    }
+
+    let mut text = String::new();
+    let mut previous = usize::MAX;
+    for step in 0..steps {
+        let row = logits
+            .get(step * classes..(step + 1) * classes)
+            .ok_or_else(|| nsfw::ModelError::contract("OCR reader row is outside its tensor"))?;
+        let mut best = 0usize;
+        let mut score = f32::MIN;
+        for (index, value) in row.iter().enumerate() {
+            if *value > score {
+                score = *value;
+                best = index;
+            }
+        }
+        if best != 0
+            && best != previous
+            && let Some(character) = dictionary.get(best - 1)
+        {
+            text.push_str(character);
+        }
+        previous = best;
+    }
+    Ok(text)
+}
+
+fn read_box(image: &image::RgbImage, at: Box) -> Result<String, nsfw::ModelError> {
+    let pool = reader().ok_or_else(|| {
+        nsfw::ModelError::Runtime("embedded OCR reader is unavailable".to_owned())
+    })?;
     let crop = image::imageops::crop_imm(image, at.0, at.1, at.2, at.3).to_image();
     let (width, height) = crop.dimensions();
     let wide = ((width as f32 * REC_HEIGHT as f32 / height.max(1) as f32) as u32).clamp(16, 1200);
@@ -156,49 +247,29 @@ fn read_box(image: &image::RgbImage, at: Box) -> Option<String> {
             input,
         )
     })?;
-    if shape.len() < 3 {
-        return None;
-    }
-    let (steps, classes) = (shape[1] as usize, shape[2] as usize);
-    let dictionary = dictionary();
-
-    let mut text = String::new();
-    let mut previous = usize::MAX;
-    for step in 0..steps {
-        let row = logits.get(step * classes..(step + 1) * classes)?;
-        let mut best = 0usize;
-        let mut score = f32::MIN;
-        for (index, value) in row.iter().enumerate() {
-            if *value > score {
-                score = *value;
-                best = index;
-            }
-        }
-        if best != 0
-            && best != previous
-            && let Some(character) = dictionary.get(best - 1)
-        {
-            text.push_str(character);
-        }
-        previous = best;
-    }
-    Some(text)
+    decode_reader_output(&shape, &logits, dictionary())
 }
 
-pub fn read(image: &image::RgbImage) -> Option<String> {
-    let boxes = detect(image)?;
-    if boxes.is_empty() {
-        return Some(String::new());
-    }
+fn collect_words(
+    boxes: impl IntoIterator<Item = Box>,
+    mut recognize: impl FnMut(Box) -> Result<String, nsfw::ModelError>,
+) -> Result<String, nsfw::ModelError> {
     let mut words: Vec<String> = Vec::new();
     for at in boxes.into_iter().take(MAX_BOXES) {
-        if let Some(text) = read_box(image, at)
-            && !text.trim().is_empty()
-        {
+        let text = recognize(at)?;
+        if !text.trim().is_empty() {
             words.push(text);
         }
     }
-    Some(words.join(" "))
+    Ok(words.join(" "))
+}
+
+pub fn read(image: &image::RgbImage) -> Result<String, nsfw::ModelError> {
+    let boxes = detect(image)?;
+    if boxes.is_empty() {
+        return Ok(String::new());
+    }
+    collect_words(boxes, |at| read_box(image, at))
 }
 
 const CHROME: [&str; 6] = [
@@ -225,11 +296,9 @@ pub fn advertises(text: &str) -> Option<&'static str> {
     if handle_of(&lower).is_some() {
         return Some("آیدی کانال در تصویر");
     }
-
     if CHROME.iter().any(|marker| tight.contains(marker)) {
         return Some("تصویر کانال تبلیغاتی");
     }
-
     if tight.contains("member") && tight.contains("online") {
         return Some("تصویر گروه تبلیغاتی");
     }
@@ -277,7 +346,6 @@ fn domain_in(tight: &str) -> Option<&str> {
         let Some(suffix) = TLDS.iter().find(|tld| rest.starts_with(**tld)) else {
             continue;
         };
-
         if rest[suffix.len()..].starts_with(|c: char| c.is_ascii_alphanumeric()) {
             continue;
         }
@@ -289,6 +357,56 @@ fn domain_in(tight: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hostile_tensor_shapes_abstain_before_allocation() {
+        assert_eq!(
+            checked_matrix(&[1, 1, 12, 20], 2, 3, 240, None),
+            Ok((12, 20, 240))
+        );
+        assert!(checked_matrix(&[1, 1, -1, 20], 2, 3, usize::MAX, None).is_err());
+        assert!(checked_matrix(&[1, 1, i64::MAX, i64::MAX], 2, 3, usize::MAX, None).is_err());
+        assert!(checked_matrix(&[1, 1, 12, 20], 2, 3, 239, None).is_err());
+        assert!(checked_matrix(&[1, 0, 20], 1, 2, 0, None).is_err());
+    }
+
+    #[test]
+    fn any_failed_detected_box_rejects_the_whole_reading() {
+        let boxes = [(0, 0, 10, 10), (10, 0, 10, 10)];
+        let mut calls = 0;
+        let result = collect_words(boxes, |_| {
+            calls += 1;
+            if calls == 2 {
+                Err(nsfw::ModelError::Runtime(
+                    "injected recognition failure".to_owned(),
+                ))
+            } else {
+                Ok("t.me/example".to_owned())
+            }
+        });
+        assert!(matches!(result, Err(nsfw::ModelError::Runtime(_))));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn genuine_blank_boxes_are_a_successful_empty_reading() {
+        let boxes = [(0, 0, 10, 10), (10, 0, 10, 10)];
+        assert_eq!(
+            collect_words(boxes, |_| Ok("  ".to_owned())),
+            Ok(String::new())
+        );
+    }
+
+    #[test]
+    fn reader_output_requires_exact_classes_and_finite_logits() {
+        let dictionary = ["a", "b"];
+        assert_eq!(
+            decode_reader_output(&[1, 1, 3], &[0.0, 4.0, 1.0], &dictionary),
+            Ok("a".to_owned())
+        );
+        assert!(decode_reader_output(&[1, 1, 2], &[0.0, 4.0], &dictionary).is_err());
+        assert!(decode_reader_output(&[1, 1, 3], &[0.0, f32::NAN, 1.0], &dictionary).is_err());
+    }
 
     #[test]
     fn it_catches_the_channel_screenshots_that_got_through() {
@@ -308,12 +426,10 @@ mod tests {
             advertises("33 2:43 : ID 6,642members,539online I C Message Unmute Leave"),
             Some("تصویر کانال تبلیغاتی")
         );
-
         assert_eq!(
             advertises("33 2:43 : ID 6,642members,539online"),
             Some("تصویر گروه تبلیغاتی")
         );
-
         assert_eq!(advertises("online now"), None);
         assert_eq!(advertises("team members"), None);
     }
@@ -344,7 +460,6 @@ mod tests {
 
         assert_eq!(advertises("BLEDRC Ma"), None);
         assert_eq!(advertises(""), None);
-
         assert_eq!(advertises("@ab"), None);
         assert_eq!(advertises("price @ 20 usd"), None);
     }

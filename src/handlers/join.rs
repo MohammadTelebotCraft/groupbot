@@ -1,6 +1,8 @@
-use grammers_client::message::{Button, InputMessage, Message, ReplyMarkup};
+use grammers_client::message::{Button, Message};
 use grammers_client::session::types::{PeerId, PeerRef};
 use grammers_client::update::CallbackQuery;
+
+use crate::response::ResponseKind;
 
 use super::{Ctx, esc};
 
@@ -39,10 +41,7 @@ pub fn channel(ctx: &Ctx, chat: i64) -> Option<String> {
 }
 
 pub fn required_adds(ctx: &Ctx, chat: i64) -> u64 {
-    ctx.settings
-        .value_parsed(chat, ADD_REQUIRED)
-        .unwrap_or(0)
-        .clamp(u64::from(ADD_RANGE.0), u64::from(ADD_RANGE.1))
+    ctx.settings.value_parsed(chat, ADD_REQUIRED).unwrap_or(0)
 }
 
 pub fn exempt_key(user: i64) -> String {
@@ -53,25 +52,33 @@ pub fn is_free(ctx: &Ctx, chat: i64, user: i64) -> bool {
     ctx.settings.is_locked(chat, &exempt_key(user))
 }
 
-pub async fn set_free(ctx: &Ctx, chat: i64, user: i64, on: bool) -> bool {
-    ctx.settings.set(chat, &exempt_key(user), on).await
+pub async fn set_free(
+    ctx: &Ctx,
+    chat: i64,
+    user: i64,
+    on: bool,
+) -> Result<bool, crate::state::SettingsWriteError> {
+    ctx.settings.try_set(chat, &exempt_key(user), on).await
 }
 
 pub fn prompt_every(ctx: &Ctx, chat: i64) -> u32 {
     ctx.settings
         .value_parsed(chat, PROMPT_EVERY)
         .unwrap_or(DEFAULT_EVERY)
-        .clamp(EVERY_RANGE.0, EVERY_RANGE.1)
 }
 
 pub fn prompt_ttl(ctx: &Ctx, chat: i64) -> u32 {
     ctx.settings
         .value_parsed(chat, PROMPT_TTL)
         .unwrap_or(DEFAULT_TTL)
-        .clamp(TTL_RANGE.0, TTL_RANGE.1)
 }
 
-pub async fn set_prompt(ctx: &Ctx, chat: i64, key: &str, seconds: u32) {
+pub async fn set_prompt(
+    ctx: &Ctx,
+    chat: i64,
+    key: &str,
+    seconds: u32,
+) -> Result<(), crate::state::SettingsWriteError> {
     let range = if key == PROMPT_TTL {
         TTL_RANGE
     } else {
@@ -79,8 +86,9 @@ pub async fn set_prompt(ctx: &Ctx, chat: i64, key: &str, seconds: u32) {
     };
     let seconds = seconds.clamp(range.0, range.1);
     ctx.settings
-        .set_value(chat, key, &seconds.to_string())
-        .await;
+        .try_set_value(chat, key, &seconds.to_string())
+        .await?;
+    Ok(())
 }
 
 pub fn seconds_label(seconds: u32, off: &'static str) -> String {
@@ -91,32 +99,55 @@ pub fn seconds_label(seconds: u32, off: &'static str) -> String {
     }
 }
 
-pub async fn set_required_adds(ctx: &Ctx, chat: i64, count: u64) {
+pub async fn set_required_adds(
+    ctx: &Ctx,
+    chat: i64,
+    count: u64,
+) -> Result<(), crate::state::SettingsWriteError> {
     let count = count.clamp(u64::from(ADD_RANGE.0), u64::from(ADD_RANGE.1));
     ctx.settings
-        .set_value(chat, ADD_REQUIRED, &count.to_string())
-        .await;
-    sync_gate(ctx, chat).await;
+        .try_set_value(chat, ADD_REQUIRED, &count.to_string())
+        .await?;
+    sync_gate(ctx, chat).await
 }
 
-pub async fn set_channel(ctx: &Ctx, chat: i64, name: &str) {
+pub async fn set_channel(
+    ctx: &Ctx,
+    chat: i64,
+    name: &str,
+) -> Result<(), crate::state::SettingsWriteError> {
     if name.is_empty() {
-        ctx.settings.set(chat, CHANNEL, false).await;
+        ctx.settings.try_set(chat, CHANNEL, false).await?;
     } else {
-        ctx.settings.set_value(chat, CHANNEL, name).await;
+        ctx.settings.try_set_value(chat, CHANNEL, name).await?;
     }
-    sync_gate(ctx, chat).await;
+    sync_gate(ctx, chat).await
 }
 
-async fn sync_gate(ctx: &Ctx, chat: i64) {
+async fn sync_gate(ctx: &Ctx, chat: i64) -> Result<(), crate::state::SettingsWriteError> {
     let on = channel(ctx, chat).is_some() || required_adds(ctx, chat) > 0;
-    ctx.settings.set(chat, GATE, on).await;
+    ctx.settings.try_set(chat, GATE, on).await?;
+    Ok(())
 }
 
-pub async fn prime(ctx: &Ctx) {
-    let mut gated = ctx.settings.chats_with(CHANNEL).await;
-    gated.extend(ctx.settings.chats_with(ADD_REQUIRED).await);
-    gated.extend(ctx.settings.flagged_with(GATE).await);
+pub async fn prime(ctx: &Ctx) -> Result<(), crate::state::SettingsWriteError> {
+    let mut gated = ctx
+        .settings
+        .chats_with(CHANNEL)
+        .await
+        .map_err(crate::state::SettingsWriteError::Database)?;
+    gated.extend(
+        ctx.settings
+            .chats_with(ADD_REQUIRED)
+            .await
+            .map_err(crate::state::SettingsWriteError::Database)?,
+    );
+    gated.extend(
+        ctx.settings
+            .flagged_with(GATE)
+            .await
+            .map_err(crate::state::SettingsWriteError::Database)?,
+    );
     gated.sort_unstable();
     gated.dedup();
     let mut on = Vec::new();
@@ -128,9 +159,9 @@ pub async fn prime(ctx: &Ctx) {
             off.push(chat);
         }
     }
-
-    let _ = ctx.settings.set_flags(&on, GATE, true).await;
-    let _ = ctx.settings.set_flags(&off, GATE, false).await;
+    ctx.settings.set_flags(&on, GATE, true).await?;
+    ctx.settings.set_flags(&off, GATE, false).await?;
+    Ok(())
 }
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
@@ -143,8 +174,30 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-        set_channel(ctx, chat, "").await;
-        let _ = message.reply("✗ عضویت اجباری برداشته شد.").await;
+        match set_channel(ctx, chat, "").await {
+            Ok(()) => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::SettingsChanged,
+                    super::premium::icon_text(
+                        Some(super::premium::Icon::Unlocked),
+                        "عضویت اجباری برداشته شد.",
+                    ),
+                )
+                .await
+            }
+            Err(error) => {
+                ::log::warn!("join gate: disable for {chat} failed: {error}");
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    "عضویت اجباری برداشته نشد؛ دوباره تلاش کنید.",
+                )
+                .await
+            }
+        }
         return true;
     }
 
@@ -152,8 +205,30 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-        set_required_adds(ctx, chat, 0).await;
-        let _ = message.reply("✗ اد اجباری برداشته شد.").await;
+        match set_required_adds(ctx, chat, 0).await {
+            Ok(()) => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::SettingsChanged,
+                    super::premium::icon_text(
+                        Some(super::premium::Icon::Unlocked),
+                        "اد اجباری برداشته شد.",
+                    ),
+                )
+                .await
+            }
+            Err(error) => {
+                ::log::warn!("required adds: disable for {chat} failed: {error}");
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    "اد اجباری برداشته نشد؛ دوباره تلاش کنید.",
+                )
+                .await
+            }
+        }
         return true;
     }
 
@@ -179,16 +254,42 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             return true;
         }
         let Some((target, target_name)) = super::resolve(ctx, message, named).await else {
-            let _ = message
-                .reply("کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.")
-                .await;
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                super::premium::icon_text(
+                    Some(super::premium::Icon::ErrorRed),
+                    "کاربر پیدا نشد. روی پیام او ریپلای کنید یا @username / آیدی عددی بفرستید.",
+                ),
+            )
+            .await;
             return true;
         };
         let Some(target_id) = target.id.bare_id() else {
-            let _ = message.reply("کاربر پیدا نشد.").await;
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                super::premium::icon_text(Some(super::premium::Icon::ErrorRed), "کاربر پیدا نشد."),
+            )
+            .await;
             return true;
         };
-        let changed = set_free(ctx, chat, target_id, add).await;
+        let changed = match set_free(ctx, chat, target_id, add).await {
+            Ok(changed) => changed,
+            Err(error) => {
+                ::log::warn!("join exemption: write for {chat}/{target_id} failed: {error}");
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    "فهرست معاف ها تغییر نکرد؛ دوباره تلاش کنید.",
+                )
+                .await;
+                return true;
+            }
+        };
         let mark = if add { "✓" } else { "✗" };
         let what = match (add, changed) {
             (true, true) => "از شرط های ورود معاف شد",
@@ -196,7 +297,16 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             (false, true) => "از لیست معاف حذف شد",
             (false, false) => "در لیست معاف نبود",
         };
-        let _ = message.reply(format!("{mark} {target_name} {what}.")).await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::SettingsChanged,
+            super::premium::icon_text(
+                Some(super::premium::Icon::Unlocked),
+                format!("{mark} {target_name} {what}."),
+            ),
+        )
+        .await;
         return true;
     }
 
@@ -210,22 +320,42 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-
         match numbers[..] {
             [] => {}
             [every, ttl] => {
-                set_prompt(ctx, chat, PROMPT_EVERY, every).await;
-                set_prompt(ctx, chat, PROMPT_TTL, ttl).await;
+                let result = async {
+                    set_prompt(ctx, chat, PROMPT_EVERY, every).await?;
+                    set_prompt(ctx, chat, PROMPT_TTL, ttl).await
+                }
+                .await;
+                if let Err(error) = result {
+                    ::log::warn!("join prompt: write for {chat} failed: {error}");
+                    super::respond(
+                        ctx,
+                        message,
+                        ResponseKind::CommandError,
+                        "اعلان شرط کامل ذخیره نشد؛ دوباره تلاش کنید.",
+                    )
+                    .await;
+                    return true;
+                }
             }
             _ => {
-                let _ = message
-                    .reply("مثال: «تنظیم اعلان شرط 120 30» یعنی هر ۱۲۰ ثانیه یک بار، حذف بعد از ۳۰ ثانیه.")
-                    .await;
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    "مثال: «تنظیم اعلان شرط 120 30» یعنی هر ۱۲۰ ثانیه یک بار، حذف بعد از ۳۰ ثانیه.",
+                )
+                .await;
                 return true;
             }
         }
-        let _ = message
-            .reply(InputMessage::new().html(format!(
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::SettingsView,
+            super::premium::html(format!(
                 "<b>اعلان شرط</b>\n\n\
                  فاصله بین دو اعلان · <b>{}</b>\n\
                  حذف خودکار اعلان · <b>{}</b>\n\n\
@@ -233,7 +363,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
                 seconds_label(prompt_every(ctx, chat), "هر بار"),
                 seconds_label(prompt_ttl(ctx, chat), "بدون حذف"),
             )))
-            .await;
+        .await;
         return true;
     }
 
@@ -249,19 +379,37 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
-        let _ = match count {
-            Some(count) => {
-                set_required_adds(ctx, chat, count).await;
-                message
-                    .reply(match count {
-                        0 => "✗ اد اجباری برداشته شد.".to_owned(),
-                        n => format!("✓ اد اجباری روی {n} نفر تنظیم شد."),
-                    })
+        match count {
+            Some(count) => match set_required_adds(ctx, chat, count).await {
+                Ok(()) => {
+                    super::respond(
+                        ctx,
+                        message,
+                        ResponseKind::SettingsChanged,
+                        match count {
+                            0 => "✗ اد اجباری برداشته شد.".to_owned(),
+                            n => format!("✓ اد اجباری روی {n} نفر تنظیم شد."),
+                        },
+                    )
                     .await
-            }
+                }
+                Err(error) => {
+                    ::log::warn!("required adds: write for {chat} failed: {error}");
+                    super::respond(
+                        ctx,
+                        message,
+                        ResponseKind::CommandError,
+                        "اد اجباری ذخیره نشد؛ دوباره تلاش کنید.",
+                    )
+                    .await
+                }
+            },
             None => {
-                message
-                    .reply(InputMessage::new().html(format!(
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::SettingsView,
+                    super::premium::html(format!(
                         "<b>اد اجباری</b>\n\n\
                          {}\n\n\
                          <i>تنظیم: «تنظیم اد اجباری 5» · برداشتن: «حذف اد اجباری»</i>",
@@ -269,10 +417,11 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
                             0 => "خاموش است.".to_owned(),
                             n => format!("هر عضو باید <b>{n}</b> نفر اضافه کند."),
                         }
-                    )))
-                    .await
+                    )),
+                )
+                .await
             }
-        };
+        }
         return true;
     }
 
@@ -282,7 +431,6 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }) else {
         return false;
     };
-
     if !rest.is_empty() && !rest.starts_with('@') {
         return false;
     }
@@ -291,22 +439,24 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
 
     if rest.is_empty() {
-        let _ = message
-            .reply(
-                InputMessage::new().html(match channel(ctx, chat) {
-                    Some(name) => format!(
-                        "<b>عضویت اجباری</b>\n\n\
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::SettingsView,
+            super::premium::html(match channel(ctx, chat) {
+                Some(name) => format!(
+                    "<b>عضویت اجباری</b>\n\n\
                      کانال · @{}\n\n\
                      <i>برداشتن: «حذف عضویت اجباری»</i>",
-                        esc(&name)
-                    ),
-                    None => "<b>عضویت اجباری</b>\n\n\
+                    esc(&name)
+                ),
+                None => "<b>عضویت اجباری</b>\n\n\
                      خاموش است. «تنظیم عضویت اجباری @channel» را بفرستید.\n\n\
                      <i>ربات باید در آن کانال ادمین باشد تا بتواند عضویت را ببیند.</i>"
-                        .to_owned(),
-                }),
-            )
-            .await;
+                    .to_owned(),
+            }),
+        )
+        .await;
         return true;
     }
 
@@ -318,19 +468,43 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
 
     let Ok(Some(_)) = ctx.client.resolve_username(&name).await else {
-        let _ = message
-            .reply("کانال پیدا نشد. یوزرنیم کانال را مثل «تنظیم عضویت اجباری @channel» بفرستید.")
-            .await;
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "کانال پیدا نشد. یوزرنیم کانال را مثل «تنظیم عضویت اجباری @channel» بفرستید.",
+            ),
+        )
+        .await;
         return true;
     };
-    set_channel(ctx, chat, &name).await;
-    let _ = message
-        .reply(InputMessage::new().html(format!(
-            "✓ عضویت اجباری روی @{} فعال شد.\n\n\
-             <i>ربات باید در کانال ادمین باشد، وگرنه عضویت کسی را نمی بیند.</i>",
-            esc(&name)
-        )))
-        .await;
+    match set_channel(ctx, chat, &name).await {
+        Ok(()) => {
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::SettingsChanged,
+                super::premium::html(format!(
+                    "✓ عضویت اجباری روی @{} فعال شد.\n\n\
+                     <i>ربات باید در کانال ادمین باشد، وگرنه عضویت کسی را نمی بیند.</i>",
+                    esc(&name)
+                )),
+            )
+            .await
+        }
+        Err(error) => {
+            ::log::warn!("join gate: channel write for {chat} failed: {error}");
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                "عضویت اجباری ذخیره نشد؛ دوباره تلاش کنید.",
+            )
+            .await
+        }
+    }
     true
 }
 
@@ -361,7 +535,13 @@ pub async fn enforce(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
     if super::is_exempt(ctx, message).await {
         return false;
     }
-    let added = super::stats::adds(ctx, chat, user).await;
+    let added = match super::stats::adds(ctx, chat, user).await {
+        Ok(added) => added,
+        Err(error) => {
+            log::warn!("join gate: add-count read for {chat}/{user} failed: {error}");
+            return false;
+        }
+    };
     let owes_adds = added < needed;
     let missing_channel = match &channel {
         Some(_) if ctx.channel_member(chat, user) => false,
@@ -382,10 +562,16 @@ pub async fn enforce(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
         Ok(Some(peer)) => Some(peer),
         _ => ctx.chat_ref(chat),
     };
-    if let Err(e) = message.delete().await {
+    if let Err(e) = message.delete_critical().await {
         eprintln!("join lock: {chat}: could not delete: {e}");
         return false;
     }
+    let reason = if missing_channel {
+        "عضویت اجباری"
+    } else {
+        "اد اجباری"
+    };
+    super::cases::record_delete(ctx, message, "join_gate", reason, "delete").await;
     let every = std::time::Duration::from_secs(u64::from(prompt_every(ctx, chat)));
     if let Some(chat_ref) = chat_ref.filter(|_| ctx.may_notify_every(chat, user, every)) {
         let mut conditions = Vec::new();
@@ -413,16 +599,15 @@ pub async fn enforce(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
             .client
             .send_message(
                 chat_ref,
-                InputMessage::new()
-                    .html(format!(
-                        "<b>شرط نوشتن در گروه</b>\n\n\
+                super::premium::html(format!(
+                    "<b>شرط نوشتن در گروه</b>\n\n\
                          <a href=\"tg://user?id={user}\">{}</a> عزیز، برای نوشتن باید:\n\
                          {}\n\n\
                          <i>پس از انجام، دکمه بررسی را بزنید.</i>",
-                        esc(&super::name_of(message)),
-                        conditions.join("\n"),
-                    ))
-                    .reply_markup(ReplyMarkup::from_buttons(&rows)),
+                    esc(&super::name_of(message)),
+                    conditions.join("\n"),
+                ))
+                .reply_markup(super::premium::buttons(&rows)),
             )
             .await;
 
@@ -444,7 +629,18 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
     };
     let needed = required_adds(ctx, chat);
     let added = match query.sender_id().bare_id() {
-        Some(user) => super::stats::adds(ctx, chat, user).await,
+        Some(user) => match super::stats::adds(ctx, chat, user).await {
+            Ok(added) => added,
+            Err(error) => {
+                log::warn!("join gate: callback add-count read for {chat}/{user} failed: {error}");
+                let _ = query
+                    .answer()
+                    .alert("وضعیت عضوگیری خوانده نشد؛ دوباره تلاش کنید.")
+                    .send()
+                    .await;
+                return;
+            }
+        },
         None => 0,
     };
 
@@ -476,13 +672,25 @@ pub async fn on_exempt(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
     let (Ok(chat), Ok(user)) = (chat.parse::<i64>(), user.parse::<i64>()) else {
         return;
     };
-    set_free(ctx, chat, user, true).await;
-    let _ = query
-        .answer()
-        .edit(InputMessage::new().html(format!(
-            "✓ <a href=\"tg://user?id={user}\">این کاربر</a> از شرط های ورود معاف شد."
-        )))
-        .await;
+    let answer = match set_free(ctx, chat, user, true).await {
+        Ok(_) => {
+            query
+                .answer()
+                .edit(super::premium::html(format!(
+                    "✓ <a href=\"tg://user?id={user}\">این کاربر</a> از شرط های ورود معاف شد."
+                )))
+                .await
+        }
+        Err(error) => {
+            ::log::warn!("join exemption: callback write for {chat}/{user} failed: {error}");
+            query
+                .answer()
+                .alert("فهرست معاف ها تغییر نکرد؛ دوباره تلاش کنید.")
+                .send()
+                .await
+        }
+    };
+    let _ = answer;
 }
 
 async fn is_member(ctx: &Ctx, name: &str, user: Option<PeerRef>) -> bool {

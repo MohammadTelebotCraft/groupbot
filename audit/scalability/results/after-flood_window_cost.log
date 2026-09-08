@@ -1,0 +1,8 @@
+
+running 1 test
+test handlers::scalability_tests::flood_window_cost ... PERF {"iterations":20000,"kind":"flood_window","ns_per_update":66.0837,"occupancy":32}
+PERF {"iterations":20000,"kind":"flood_window","ns_per_update":23.13765,"occupancy":4096}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 354 filtered out; finished in 0.01s
+

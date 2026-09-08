@@ -1,0 +1,8 @@
+
+running 1 test
+test state::scalability_tests::database_recovery ... settings write failed for -999002/audit_restart: error returned from database: stale groupbot ownership epoch
+PERF {"committed_setting_survives_reload":true,"duplicate_owner_rejected":true,"kind":"database_recovery","old_owner_can_write_after_lock_loss":false,"replacement_ms":2.11639,"replacement_timeouts":["100ms","50ms"],"successor_mirror_is_stale":false}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 363 filtered out; finished in 0.38s
+

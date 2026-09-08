@@ -17,6 +17,7 @@
 
 </div>
 
+
 ---
 
 <div dir="rtl">
@@ -433,13 +434,14 @@ corpus با قالب ها ساخته می شه (هر register یه خانواد�
 دستور «فیلتر دقیق» هم به فیلتر کلمه اضافه شده که کلمه رو فقط جدا بشمره، نه داخل کلمه دیگه —
 «بت» دیگه «صحبت» رو نمی گیره.
 
-`.env` اینا رو می خواد: `TG_ID` · `TG_HASH` · `TG_BOT_TOKEN` · `DATABASE_URL`، و اختیاری
+`.env` اینا رو می خواد: `TG_ID` · `TG_HASH` · `TG_BOT_TOKEN` · `DATABASE_URL`، و هیچ کدام
+نمی توانند خالی باشند (`TG_ID` هم باید عدد مثبت ۳۲ بیتی باشد). گزینه های اختیاری:
 `SUDO_ID` · `LOG` · `CHANNEL` · `SUPPORT` · `SOURCE`.
 
 اون سه تای آخر فقط دکمه های کارت `/start` ان. هر کدوم که ست نشه دکمه اش هم اصلا کشیده
 نمی شه، پس یه deploy که هیچ کدومو ست نکنه کارتش دکمه مرده نداره. هم `@name` قبوله هم
-`name` هم کل URL؛ چیزی که به هیچ کدوم نخوره نادیده گرفته می شه، چون تلگرام پیامی که دکمه
-با URL خراب داشته باشه رو کلا رد می کنه و اون وقت `/start` هیچی جواب نمی داد. تو `.gitignore` هست و **هیچ وقت نباید کامیت شه**.
+`name` هم یک URL کامل HTTP(S). اگر متغیر حاضر ولی خالی/خراب باشد startup متوقف می شود؛ مقدار
+خراب دیگر بی صدا دکمه را حذف نمی کند. تو `.gitignore` هست و **هیچ وقت نباید کامیت شه**.
 
 بعدش: ربات رو ادمین گروه کن و **همه دسترسیا رو بده** — حذف پیام، مسدود کردن کاربران، افزودن
 کاربران، سنجاق، تغییر اطلاعات گروه و «افزودن ادمین جدید». تا این شیش تا کامل نشه ربات فعال
@@ -449,7 +451,8 @@ corpus با قالب ها ساخته می شه (هر register یه خانواد�
 می گه. بعدش `پنل` واسه تنظیمات و `دستورات` واسه لیست کامل.
 
 **داشبورد Mini App** اختیاریه و با `MINIAPP_LINK` خاموش/روشن می شه — نبودش یعنی نه سروری بالا
-میاد نه دکمه ای تو `پنل` کشیده می شه. ست کردنش یه لینک `t.me/<bot>/<shortname>` می خواد که با
+میاد نه دکمه ای تو `پنل` کشیده می شه. ست کردنش دقیقا یک لینک HTTPS به شکل
+`https://t.me/<bot_username>/<short_name>` بدون query/fragment می خواد که با
 `/newapp` تو BotFather ثبت می شه؛ دکمه پنل خودش `?startapp=<chat_id>` رو بهش اضافه می کنه.
 `MINIAPP_BIND` (پیش فرض `127.0.0.1:8787`) فقط روی loopback گوش می ده — یه ریورس پروکسی
 (nginx یا Caddy) باید جلوش TLS بزنه. `MINIAPP_CONCURRENCY` همون کاری که `UPDATE_CONCURRENCY`
@@ -726,8 +729,10 @@ python3 tools/fleet_routes.py tools/fleet.example.json \
 رد می شوند. واحد `groupbot@<name>` هم به همین دلیل بدون این فایل اصلا اجرا نمی شود. فایل باید یک id در هر خط داشته باشد و حداکثر `MAX_SHARD_CHATS` id داشته باشد؛ تغییر
 route یعنی ساختن فایل های جدید، انتقال durable rows، و سپس rolling restart هر دو shard.
 
-برای انتقال خود ردیف های durable، `tools/shard_migrate.py` فقط شش جدول chat-scoped را می بیند:
-`settings`، `counters`، `notes`، `tallies`، `pending_deletes` و `image_filters`. جدول های
+برای انتقال خود ردیف های durable، `tools/shard_migrate.py` فقط یازده جدول chat-scoped را می بیند:
+`settings`، `counters`، `notes`، `tallies`، `pending_deletes`، `pending_captchas` و
+`pending_warn_actions`، `pending_rank_awards`، `moderation_cases`،
+`moderation_case_events` و `image_filters`. جدول های
 `started_users` و `calibration` سراسری هستند و عمداً منتقل نمی شوند. DSNها را در environment بگذار؛
 ابزار secret را روی command line یا داخل manifest نمی گیرد. پیش فرض فقط preflight خواندنی است:
 
@@ -736,18 +741,29 @@ export SOURCE_DATABASE_URL='postgresql://...'
 export TARGET_DATABASE_URL='postgresql://...'
 python3 -m pip install 'psycopg[binary]>=3.1,<4'
 python3 tools/shard_migrate.py \
-  --input ownership.tsv --shard alpha --json
+  --input ownership.tsv --shard alpha \
+  --source-stats-dir /home/ubuntu/shards/source/durable-work/stats \
+  --target-stats-dir /home/ubuntu/shards/alpha/durable-work/stats --json
 ```
 
 قبل از `--apply` هر دو bot process را متوقف کن. migrator ظرفیت `MAX_SHARD_CHATS`،
 `MAX_SHARD_SETTINGS_ROWS`، `MAX_SHARD_SETTINGS_BYTES`، `MAX_SHARD_COUNTER_ROWS` و `MAX_SHARD_NOTE_ROWS` را چک می کند، هر batch را محدود نگه می دارد، مقصد را با ردیف های source
 مقایسه می کند و فقط بعد از verification ردیف های source را حذف می کند. اگر بعد از commit مقصد قطع شد،
 اجرای دوباره همان command فقط وقتی ادامه می دهد که ردیف های مقصد دقیقاً برابر source باشند؛ partial
-یا conflicting row را overwrite نمی کند:
+یا conflicting row را overwrite نمی کند. پس از copy صریح idها، sequenceهای case/event و sequence
+مشترک generation/lease نیز حداقل تا بیشترین مقدار منتقل شده جلو برده می شوند تا fencing token یا id
+بعدی با durable work واردشده تکراری نشود:
+
+خاموش کردن باید graceful باشد تا flush نهایی تمام شود. هر دو مسیر `durable-work/stats` باید وجود
+داشته و کاملاً خالی باشند؛ migrator در صورت نبودن مسیر، فایل موقت/ناشناخته یا batch مانده fail-closed
+می شود. ابتدا shutdown را کامل کن، خالی بودن هر دو مسیر را با preflight زیر ثابت کن، و فقط بعد همان
+دو مسیر را به اجرای `--apply` بده. ردیف های outbox داخل PostgreSQL همراه گروه منتقل می شوند.
 
 ```bash
 python3 tools/shard_migrate.py \
-  --input ownership.tsv --shard alpha --batch-chats 100 --apply --json
+  --input ownership.tsv --shard alpha --batch-chats 100 \
+  --source-stats-dir /home/ubuntu/shards/source/durable-work/stats \
+  --target-stats-dir /home/ubuntu/shards/alpha/durable-work/stats --apply --json
 ```
 
 این انتقال بین دو database یک تراکنش اتمیک PostgreSQL نیست؛ backup بگیر و تا پایان کار processهای
@@ -891,3 +907,180 @@ src/
 ```
 
 </div>
+
+## Semantic moderation icons
+
+`src/handlers/premium/registry.json` is the only custom-emoji ID registry. IDs are decimal
+strings in JSON and converted to `i64` only for MTProto. Each entry records its semantic key,
+Unicode fallback, original placeholder, tags, confidence, usage and provenance. The registry
+preserves 89 documents from the previous implementation and adds the red error document
+specified in the emoji task. The original message dump and screenshot were not available
+with that task; legacy-only mappings remain unclassified, and the written visual descriptions
+are the evidence for the active mappings.
+
+`premium::icon_for(Context { action, object, state, severity, scope, duration })` returns an
+optional semantic `Icon`. Rules are deterministic and language independent: mute, ban and
+warning have distinct icons; permission and anti-trade state select their allowed/blocked
+icons; severe triggered raids use fire; cooldowns use the timer. Failed, pending or paused
+operations are shown as such before selecting a completed-action icon. Unknown contexts can
+have no icon. Help topics, panel sections and Mini App permissions share these rules.
+
+```rust
+let selected = premium::icon_for(premium::Context {
+    action: "mute", object: "user", state: "active", ..Default::default()
+});
+let message = premium::icon_text(selected, "سکوت کاربر");
+let button = premium::decorate(Button::data("سکوت", b"mute_user"), selected);
+```
+
+`premium::icon_html`, `icon_text` and `badge` mark only bot-owned presentation. Ordinary
+`premium::text` is opaque. The HTML renderer converts explicit semantic badges into
+`MessageEntityCustomEmoji` entities, preserving formatting and UTF-16 offsets. It never scans
+translated labels or ordinary emoji for meaning. User-authored welcome/answer content uses
+the library's content renderer directly; captions, names, quoted evidence, filter words and
+command arguments are not rewritten.
+
+At startup one bounded, read-only `messages.getCustomEmojiDocuments` request validates the
+active documents and gets their exact `alt` strings. Missing or failed metadata falls back to
+Unicode. This distinction matters when a document's Telegram placeholder differs from its
+visual meaning, such as the send icon. Telegram requires custom entities to wrap that exact
+`alt`, as described in [Custom emojis](https://core.telegram.org/api/custom-emoji).
+
+| Surface | Rendering in this project |
+| --- | --- |
+| Direct bot messages, moderation replies, bot captions and message edits | Custom entities when enabled and metadata is available; semantic Unicode otherwise |
+| Inline callback and URL buttons | Native MTProto `KeyboardButtonStyle.icon`; Unicode label prefix when disabled or unavailable; callback bytes, URLs and colours preserved |
+| Channel moderation logs | Unicode by default; custom entities only with explicit channel eligibility enabled |
+| Callback alerts/toasts | Unicode/plain text; no entity markup |
+| Mini App | Central-registry Unicode fallbacks for matching concepts, existing SVGs for other concepts; receives semantic state keys, never document IDs |
+| Captcha choices and numeric presets | Their exact symbols/numbers, with no added decoration |
+| User-authored content and reply-keyboard command labels | Preserved without emoji substitution |
+
+The local grammers schema supports native button styles. Telegram restricts custom button
+icons to eligible bots (a purchased Fragment username or a Premium bot owner); see
+[Bot buttons](https://core.telegram.org/api/bots/buttons). Reading a document does not prove
+the bot's sending entitlement. Configure the deployment accordingly; no send attempt is
+made to probe entitlement.
+
+| Environment variable | Default | Effect |
+| --- | --- | --- |
+| `PREMIUM_EMOJI` | enabled | `0`, `false` or `off` forces Unicode for messages and buttons |
+| `PREMIUM_EMOJI_BUTTONS` | enabled | Independently disables native button icons |
+| `PREMIUM_EMOJI_CHANNELS` | disabled | `1` or `true` enables custom channel-log entities only for a bot eligible to use them there |
+
+The audit covers start/help, setup/admin and owner panels, settings, member information,
+warnings and enforcement, unmute/unban, locks, anti-trade/link/flood/raid, voice/photo/media
+permissions, filters, logs/reports/cases, scheduled operations, confirmations, errors,
+navigation, welcome/answer presentation and the Mini App. Plain instructions and unmatched
+concepts retain their appropriate Unicode/SVG/text presentation. Moderation decisions,
+database/configuration keys, commands and callback routing are unchanged.
+
+Of the 90 custom documents, 31 are active, 12 are unused for moderation and 47 require review.
+The medium-confidence visuals are `MEMBERS`, `IMAGE_PRIVATE`, `BRIEFCASE`, `NETWORK` and
+`INVISIBLE`; they are not dynamically selected for premium rendering. The unrelated money,
+shopping, gift, calculator, tag/swap and diamond assets are unused. The remaining abstract
+legacy visuals stay unclassified. The registry records every individual classification.
+
+Validation commands:
+
+```sh
+cargo test --locked handlers::premium
+cargo test --locked
+cargo clippy --all-targets --locked
+python tools/audit_premium.py
+node --check src/miniapp/assets/app.js
+node tools/test_premium_ui.cjs
+```
+
+Observed during this migration: 15 emoji tests passed; the complete non-ignored Rust run had
+305 passing tests, zero failures and 24 ignored database/external-model tests. The registry
+audit found no raw IDs outside the registry/test fixtures. The Mini App renderer test covers
+mixed Persian/English labels, permission states, fallback keys and unchanged action attributes.
+These are local construction/rendering checks. Screenshot comparison, live Telegram appearance,
+bot entitlement, sending/editing actual messages and client-specific RTL layout remain unverified.
+Deployment follow-up (2026-09-06): panel and help close actions remove their inline keyboards;
+the panel also displays a closed confirmation above its lock summary. The initial empty keyboard
+was rejected by Telegram with `REPLY_MARKUP_INVALID`. Closing now omits `reply_markup`, following
+[TDLib's edit implementation](https://github.com/tdlib/td/blob/master/td/telegram/MessagesManager.cpp)
+and its conversion of an empty inline keyboard to null. All 329 Rust
+tests passed with ignored tests enabled against an isolated local PostgreSQL database and the
+production image and text models. Clippy, UI checks and the
+locked release build passed. The binary was deployed to `groupbot-prod` with a recoverable backup,
+its running checksum was verified, and `groupbot.service` remained active with zero restarts.
+Startup validated 31 custom emoji documents and the Mini App served the new semantic registry.
+
+### Cleaner recommendations
+
+Groups with a missing or non-admin cleaner receive a Persian recommendation with an inline
+«افزودن کلینر» / «بررسی دسترسی و افزودن کلینر» button about every six hours. Each known group has
+a fixed minute within that interval; the indexed `hash` rows select only due groups, and
+bounded workers check live Telegram membership before sending. `cln_checked_slot` remembers
+completed checks across restarts. Failed membership checks or sends remain eligible in the
+three-minute delivery window. No recommendations run while the shard's cleaner is signed out.
+
+The `cln:<chat>` callback is bound to its original group and uses the same admin and `CLEAN`
+capability checks as «افزودن کلینر». Every press checks the management bot's current required
+permissions. Missing access produces an alert, a checklist, the path to Telegram's admin
+settings, and a retry button. Unknown permissions never start a join. Successful setup replaces
+the recommendation with confirmation and removes its button. The text command shares this flow;
+manual joins also share the automatic flow's concurrency limit and per-group duplicate guard.
+The durable `cln_added` flag continues to prevent automatic re-adding after deliberate removal;
+an administrator can explicitly restore the cleaner with the recommendation button.
+
+Deployed to `groupbot-prod` on 2026-09-06 at 19:29 UTC. All 335 Rust tests passed with
+ignored tests enabled against an isolated local PostgreSQL database and verified production
+models (`VISION_FILES=target/cleaner-deploy/models`); Clippy and the locked release build passed.
+The older models in local `target/release` are not the production vision exports.
+The running executable matched SHA256
+`10ccbc8372c1504abfb1153b168076ae665c814e46cde554a6daa36fa9d965bc`;
+`groupbot.service` stayed active with zero restarts, the cleaner signed in, and the reminder
+index was present. Rollback binary on production:
+`/home/ubuntu/GroupManagement/groupbot/target/release/groupbot.prev.20260906T192916Z`.
+
+### Automatic group setup recovery
+
+The first join or promotion now resolves the group's access hash from the bot's Telegram
+session before listing administrators or inviting the cleaner. Previously this path could
+fabricate a zero-hash supergroup reference, causing `CHANNEL_INVALID` and leaving setup
+incomplete even with all required admin rights.
+
+Setup handles additions, group creation, migration and permission updates before moderation.
+Known incomplete groups recover at startup, including groups with an owner whose cleaner
+has never finished joining; group activity also checks for incomplete setup
+at most once per minute. Transient failures receive bounded retries, and a per-group mutex
+prevents duplicate configuration without suppressing retries after a failed lookup. The owner
+record is written only after the default locks are saved. Existing configured groups retain
+their settings, and intentional cleaner removal still requires the explicit add button.
+That button also finishes any missing group configuration after checking admin permissions.
+Cleaner installations are serialized per account, and short Telegram join flood waits are
+honored for up to two additional retries using the same invitation. Longer waits retain the
+actionable failure card and retry button.
+
+Validation: all 341 Rust tests passed, including database and external-model tests using an
+isolated PostgreSQL database and the verified production models in `target/cleaner-deploy/models`.
+Clippy passed with `--all-targets -- -D warnings`.
+
+Deployed on 2026-09-06 at 20:15 UTC. The running executable matched SHA256
+`fd0f412968a5e5f2b0af9af80430eac9127565285a8aa24d94e8e6b101bc76aa`;
+`groupbot.service` remained active with zero restarts. Live Telegram membership checks
+confirmed that both the management bot and cleaner were administrators with all six required
+rights in the affected group. Its owner, five default locks and `cln_added` marker were present.
+The earlier recovery pass also activated four other previously unconfigured groups.
+Rollback binary on production:
+`/home/ubuntu/GroupManagement/groupbot/target/release/groupbot.prev.20260906T201506Z`.
+
+Broadcast channel exclusion: group setup, cleaner reminders and their callback handling now
+require a confirmed basic group, supergroup or gigagroup. Saved access hashes alone cannot
+identify a group. Unknown types wait for Telegram's group metadata; known broadcast channels
+are skipped at startup. New and edited channel posts are excluded from group command and
+moderation handlers before admission. The destination is checked, so linked channel posts
+and anonymous administrators inside a discussion group continue through the group flow.
+Old channel buttons answer only the presser with a group-only alert. This does not alter
+explicitly configured log channel destinations.
+
+Deployed on 2026-09-06 at 20:45 UTC after all 343 Rust tests passed (including isolated
+PostgreSQL and production-model tests), warning-free Clippy and the locked release build.
+Production startup logged all three saved broadcast channels as skipped while live group
+handling continued. The service stayed active with zero restarts and its running checksum
+matched `af34e79bf75a9731a4dc80b040dced8a6dab35568eff247edf940cefcbd03f93`.
+Rollback binary: `/home/ubuntu/GroupManagement/groupbot/target/release/groupbot.prev.20260906T204505Z`.

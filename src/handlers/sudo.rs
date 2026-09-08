@@ -1,6 +1,7 @@
+
 use std::collections::HashMap;
 
-use grammers_client::message::{Button, InputMessage, Message, ReplyMarkup};
+use grammers_client::message::{Button, Message, ReplyMarkup};
 use grammers_client::session::types::PeerId;
 use grammers_client::update::CallbackQuery;
 
@@ -12,7 +13,7 @@ const BUSIEST: i64 = 10;
 
 const SECTIONS: &[(&str, &str)] = &[
     ("sum", "📊  خلاصه"),
-    ("top", "🔥  شلوغ ترین ها"),
+    ("top", "📊  شلوغ ترین ها"),
     ("use", "🎛  امکانات"),
 ];
 
@@ -41,17 +42,22 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let Some(opener) = message.sender_id().and_then(PeerId::bare_id) else {
         return false;
     };
-    if Some(opener) != super::cleaner::sudo() {
+    if Some(opener) != ctx.sudo_id() {
         return false;
     }
 
-    let _ = message
-        .reply(
-            InputMessage::new()
-                .html(page(ctx, "sum").await)
-                .reply_markup(markup(opener, "sum")),
-        )
-        .await;
+    let card = match page(ctx, "sum").await {
+        Ok(page) => super::premium::icon_html(Some(super::premium::Icon::Settings), page)
+            .reply_markup(markup(opener, "sum")),
+        Err(error) => {
+            log::warn!("sudo dashboard: summary read failed: {error}");
+            super::premium::icon_text(
+                Some(super::premium::Icon::ErrorRed),
+                "داشبورد اکنون در دسترس نیست؛ دوباره تلاش کنید.",
+            )
+        }
+    };
+    let _ = message.reply(card).await;
     true
 }
 
@@ -62,45 +68,58 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
     let Ok(opener) = opener.parse::<i64>() else {
         return;
     };
-
-    if query.sender_id().bare_id() != Some(opener) || Some(opener) != super::cleaner::sudo() {
+    if query.sender_id().bare_id() != Some(opener) || Some(opener) != ctx.sudo_id() {
         let _ = query.answer().send().await;
         return;
     }
 
-    let _ = query
-        .answer()
-        .edit(
-            InputMessage::new()
-                .html(page(ctx, section).await)
-                .reply_markup(markup(opener, section)),
-        )
-        .await;
+    match page(ctx, section).await {
+        Ok(page) => {
+            let _ = query
+                .answer()
+                .edit(
+                    super::premium::icon_html(Some(super::premium::Icon::Settings), page)
+                        .reply_markup(markup(opener, section)),
+                )
+                .await;
+        }
+        Err(error) => {
+            log::warn!("sudo dashboard: {section} read failed: {error}");
+            let _ = query
+                .answer()
+                .alert("داشبورد اکنون در دسترس نیست؛ دوباره تلاش کنید.")
+                .send()
+                .await;
+        }
+    }
 }
 
-async fn page(ctx: &Ctx, section: &str) -> String {
+async fn page(ctx: &Ctx, section: &str) -> Result<String, sqlx::Error> {
     let day = super::stats::today();
-    let fleet = ctx.settings.fleet(day).await;
+    let fleet = ctx.settings.fleet(day).await?;
 
     let head = "<b>داشبورد کل</b>";
     match section {
         "top" => {
-            let busiest = ctx.settings.busiest(day, BUSIEST).await;
-            format!("{head} › <b>شلوغ ترین ها</b>\n\n{}", board(ctx, &busiest))
+            let busiest = ctx.settings.busiest(day, BUSIEST).await?;
+            Ok(format!(
+                "{head} › <b>شلوغ ترین ها</b>\n\n{}",
+                board(ctx, &busiest)
+            ))
         }
         "use" => {
             let tracked = tracked();
             let keys: Vec<&str> = tracked.iter().map(|(key, _)| *key).collect();
-            let counts = ctx.settings.adoption(&keys).await;
-            format!(
+            let counts = ctx.settings.adoption(&keys).await?;
+            Ok(format!(
                 "{head} › <b>امکانات</b>\n\n{}\n\n<i>از {} گروه.</i>",
                 uptake(&tracked, &counts, fleet.chats),
                 fleet.chats
-            )
+            ))
         }
         _ => {
             let quiet = fleet.chats.saturating_sub(fleet.active_today);
-            format!(
+            Ok(format!(
                 "{head} › <b>خلاصه</b>\n\n\
                  👥  گروه ها · <b>{}</b>\n\
                  ⚙️  کانفیگ شده · <b>{}</b>\n\
@@ -126,7 +145,7 @@ async fn page(ctx: &Ctx, section: &str) -> String {
                     true => "وارد شده",
                     false => "وارد نشده",
                 },
-            )
+            ))
         }
     }
 }
@@ -180,7 +199,7 @@ fn markup(opener: i64, current: &str) -> ReplyMarkup {
         "↻  تازه سازی",
         format!("sd:{opener}:{current}").into_bytes(),
     )]);
-    ReplyMarkup::from_buttons(&rows)
+    super::premium::buttons(&rows)
 }
 
 #[cfg(test)]

@@ -1,0 +1,47 @@
+{
+  "date": "2026-09-08",
+  "environment": {
+    "os": "WSL2 Ubuntu 24.04, Linux 6.18.33.2",
+    "cpu": "AMD Ryzen 7 7745HX, 8 cores / 16 threads exposed",
+    "memory_kib": 9940000,
+    "rust": "1.98.0",
+    "postgresql": "16.15"
+  },
+  "idle": [
+    {"groups": 1, "rss_kib": 12760, "mirror_delta_kib": 52, "runtime_chats": 0, "threads": 6, "idle_cpu_seconds": 0.0},
+    {"groups": 100, "rss_kib": 12828, "mirror_delta_kib": 132, "runtime_chats": 0, "threads": 6, "idle_cpu_seconds": 0.0},
+    {"groups": 1000, "rss_kib": 13496, "mirror_delta_kib": 736, "runtime_chats": 0, "threads": 6, "idle_cpu_seconds": 0.0},
+    {"groups": 5000, "rss_kib": 16504, "mirror_delta_kib": 2904, "runtime_chats": 0, "threads": 6, "idle_cpu_seconds": 0.0},
+    {"groups": 10000, "rss_kib": 20136, "mirror_delta_kib": 3680, "runtime_chats": 0, "threads": 6, "idle_cpu_seconds": 0.0}
+  ],
+  "hot_path_before_after": {
+    "workload": {"groups": 10000, "active": 1000, "updates": 1000000, "db_queries": 0, "telegram_calls": 0},
+    "before": {"updates_per_second": 207561.37, "cpu_percent": 335.0, "p50_us": 36.185, "p95_us": 80.437, "p99_us": 126.623, "rss_kib": 57412},
+    "after_priority_pair": {"updates_per_second": 207807.35, "cpu_percent": 335.4, "p50_us": 34.746, "p95_us": 78.223, "p99_us": 127.015, "rss_kib": 56432},
+    "final_binary_sanity": {"updates_per_second": 175484.51, "cpu_percent": 345.53, "p50_us": 37.109, "p95_us": 86.173, "p99_us": 136.557, "rss_kib": 52112, "queue_peak": 1, "counted": 1000000}
+  },
+  "current_load": [
+    {"kind": "hot_group", "groups": 10000, "active": 1, "updates": 100000, "updates_per_second": 136437.13, "cpu_percent": 306.98, "p50_us": 26816.43, "p95_us": 42776.686, "p99_us": 46364.257, "rss_kib": 28452, "queue_peak": 4096, "counted": 100000},
+    {"kind": "active_cardinality", "groups": 10000, "active": 10000, "updates": 100000, "updates_per_second": 155479.91, "cpu_percent": 345.17, "p50_us": 44.764, "p95_us": 161.257, "p99_us": 554.684, "rss_kib": 159780, "queue_peak": 1, "counted": 100000},
+    {"kind": "short_soak", "groups": 10000, "active": 1000, "updates": 15000000, "updates_per_second": 128698.16, "cpu_percent": 256.50, "p50_us": 45.602, "p95_us": 2850.846, "p99_us": 7491.434, "rss_kib": 89532, "queue_peak": 2089, "counted": 15000000}
+  ],
+  "database": {
+    "fleet_stats_flush": {"groups": 10000, "seconds": 1.118566631, "top_level_statements": 223, "remaining_dirty": 0},
+    "durable_counts": [
+      {"concurrency": 4, "operations": 200, "throughput_ops_s": 436.75, "p50_ms": 6.60, "p95_ms": 21.93, "p99_ms": 28.68},
+      {"concurrency": 8, "operations": 400, "throughput_ops_s": 427.05, "p50_ms": 5.01, "p95_ms": 58.44, "p99_ms": 90.59},
+      {"concurrency": 16, "operations": 800, "throughput_ops_s": 358.19, "p50_ms": 26.68, "p95_ms": 85.21, "p99_ms": 368.11},
+      {"concurrency": 32, "operations": 1600, "throughput_ops_s": 430.39, "p50_ms": 61.59, "p95_ms": 113.50, "p99_ms": 146.02}
+    ]
+  },
+  "outbound": {
+    "rate_per_second": 25,
+    "burst": 25,
+    "concurrency": 32,
+    "critical_reserved": 8,
+    "ordinary_concurrency": 24,
+    "group_messages_per_minute": 20,
+    "chat_cache_default_cap": 50000,
+    "chat_cache_churn": {"insertions": 100000, "test_cap": 1000, "final_len": 1000, "debug_elapsed_us": 57992}
+  }
+}
