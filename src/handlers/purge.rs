@@ -3,7 +3,16 @@ use grammers_client::update::CallbackQuery;
 
 use super::Ctx;
 
-pub const ALL: &[&str] = &["حذف همه", "پاکسازی همه", "حذف کل پیام ها"];
+pub const ALL: &[&str] = &[
+    "حذف همه",
+    "پاکسازی همه",
+    "حذف کل پیام ها",
+    "پاک سازی همه",
+    "پاکسازی کل",
+    "حذف همه پیام ها",
+    "/purgeall",
+    "/clearall",
+];
 
 pub const AUTO_AT: &str = "auto_purge_at";
 
@@ -15,7 +24,15 @@ pub const AUTO_COUNT_RANGE: (u32, u32) = (0, 100_000);
 pub const AUTO_DEFAULT_AT: u32 = 4 * 60;
 pub const AUTO_DEFAULT_COUNT: u32 = 1_000;
 
-pub const COMMANDS: &[&str] = &["حذف", "پاکسازی", "پاک کن"];
+pub const COMMANDS: &[&str] = &[
+    "پاکسازی",
+    "پاک سازی",
+    "پاک کن",
+    "حذف",
+    "/purge",
+    "/clear",
+    "/del",
+];
 
 const MAX: i32 = 1000;
 
@@ -140,7 +157,10 @@ pub async fn run_auto(ctx: &std::sync::Arc<Ctx>) {
 }
 
 pub async fn handle_all(ctx: &Ctx, message: &Message) -> bool {
-    if !ALL.contains(&message.text().trim()) {
+    if !ALL
+        .iter()
+        .any(|command| super::commands::matches(message.text(), command))
+    {
         return false;
     }
     if !super::limits::allows(ctx, message, super::limits::CLEAN).await {
@@ -277,28 +297,19 @@ async fn wipe_range(
         return deleted;
     }
     let ids: Vec<i32> = (first..=last).collect();
-    let mut deleted = 0;
-    for chunk in ids.chunks(CHUNK) {
-        match ctx.client.delete_messages(chat_ref, chunk).await {
-            Ok(n) => deleted += n,
-            Err(e) => {
-                eprintln!("purge: {chat}: could not delete messages: {e}");
-                break;
-            }
-        }
+    let (deleted, failed) = super::delete_chunks(&ctx.client, chat_ref, &ids, CHUNK, false).await;
+    if let Some(e) = failed {
+        eprintln!("purge: {chat}: could not delete messages: {e}");
     }
     deleted
 }
 
 fn parse(text: &str) -> Option<i32> {
     for command in COMMANDS {
-        let Some(rest) = text.strip_prefix(command) else {
+        let Some(rest) = super::commands::strip_prefix(text, command) else {
             continue;
         };
-        if !rest.starts_with(char::is_whitespace) {
-            continue;
-        }
-        let rest = rest.trim();
+        let rest = super::commands::normalize(rest);
         if let Ok(count) = rest.parse::<i32>()
             && count > 0
         {
@@ -324,6 +335,15 @@ mod tests {
         assert_eq!(parse("حذف ویژه 12345"), None);
         assert_eq!(parse("حذف 0"), None);
         assert_eq!(parse("حذف"), None);
+    }
+
+    #[test]
+    fn purge_aliases_accept_spacing_and_digits_without_consuming_sentences() {
+        assert_eq!(parse("پاک\u{200c}سازی ۱۰"), Some(10));
+        assert_eq!(parse("حذف  ٣"), Some(3));
+        assert_eq!(parse("/PURGE 15"), Some(15));
+        assert_eq!(parse("/clear 15 messages"), None);
+        assert_eq!(parse("پاکسازی۱۰"), None);
     }
 
     #[test]

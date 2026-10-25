@@ -15,41 +15,162 @@ pub struct View<'a> {
     message: &'a Message,
     media: Option<Media>,
     text: &'a str,
-    lower: std::sync::OnceLock<String>,
     digits: std::sync::OnceLock<std::borrow::Cow<'a, str>>,
+    command: std::sync::OnceLock<std::borrow::Cow<'a, str>>,
+    own: Shown<'a>,
+    quote: Option<Shown<'a>>,
+    rich: Option<Shown<'a>>,
+    shown_media: super::rich::Media,
+}
+
+struct Shown<'a> {
+    raw: std::borrow::Cow<'a, str>,
+    entities: std::borrow::Cow<'a, [tl::enums::MessageEntity]>,
+    parsed: bool,
+    lower: std::sync::OnceLock<String>,
     tight: std::sync::OnceLock<Option<String>>,
     ascii: std::sync::OnceLock<Option<String>>,
 }
 
-impl<'a> View<'a> {
-    pub fn new(message: &'a Message) -> Self {
+impl<'a> Shown<'a> {
+    fn new(
+        raw: impl Into<std::borrow::Cow<'a, str>>,
+        entities: impl Into<std::borrow::Cow<'a, [tl::enums::MessageEntity]>>,
+        parsed: bool,
+    ) -> Self {
         Self {
-            message,
-            media: message.media(),
-            text: message.text().trim(),
+            raw: raw.into(),
+            entities: entities.into(),
+            parsed,
             lower: std::sync::OnceLock::new(),
             tight: std::sync::OnceLock::new(),
             ascii: std::sync::OnceLock::new(),
-            digits: std::sync::OnceLock::new(),
         }
     }
 
-    pub fn lower(&self) -> &str {
-        self.lower.get_or_init(|| folded(self.message.text()))
+    fn lower(&self) -> &str {
+        self.lower.get_or_init(|| folded(&self.raw))
     }
 
-    pub fn tight(&self) -> &str {
+    fn tight(&self) -> &str {
         match self.tight.get_or_init(|| tightened(self.lower())) {
             Some(tight) => tight,
             None => self.lower(),
         }
     }
 
-    pub fn ascii(&self) -> &str {
+    fn ascii(&self) -> &str {
         match self.ascii.get_or_init(|| latinised(self.tight())) {
             Some(ascii) => ascii,
             None => self.tight(),
         }
+    }
+
+    fn has(&self, kind: impl Fn(&tl::enums::MessageEntity) -> bool) -> bool {
+        self.entities.iter().any(kind)
+    }
+
+    fn code(&self) -> impl Iterator<Item = String> + '_ {
+        let unparsed = (!self.parsed).then(|| self.ascii().to_owned());
+        self.entities
+            .iter()
+            .filter_map(|entity| match entity {
+                tl::enums::MessageEntity::Code(code) => Some((code.offset, code.length)),
+                tl::enums::MessageEntity::Pre(pre) => Some((pre.offset, pre.length)),
+                _ => None,
+            })
+            .filter_map(|(offset, length)| utf16_slice(&self.raw, offset, length))
+            .map(ascii_of)
+            .chain(unparsed)
+    }
+
+    fn disguised(&self) -> bool {
+        !matches!(
+            unicode_normalization::is_nfkc_quick(self.raw.chars()),
+            unicode_normalization::IsNormalized::Yes
+        ) || self.raw.chars().any(hides_a_link)
+    }
+}
+
+fn foreign_quote(raw: &tl::enums::Message) -> Option<(&str, &[tl::enums::MessageEntity])> {
+    let reply = foreign_reply(raw)?;
+    let text = reply
+        .quote_text
+        .as_deref()
+        .filter(|text| !text.is_empty())?;
+    Some((text, reply.quote_entities.as_deref().unwrap_or(&[])))
+}
+
+fn foreign_reply(raw: &tl::enums::Message) -> Option<&tl::types::MessageReplyHeader> {
+    let tl::enums::Message::Message(raw) = raw else {
+        return None;
+    };
+    let Some(tl::enums::MessageReplyHeader::Header(reply)) = &raw.reply_to else {
+        return None;
+    };
+    let foreign = reply.reply_from.is_some()
+        || reply
+            .reply_to_peer_id
+            .as_ref()
+            .is_some_and(|peer| *peer != raw.peer_id);
+    foreign.then_some(reply)
+}
+
+fn shown_media(raw: &tl::enums::Message, rich: super::rich::Media) -> super::rich::Media {
+    let mut shown = rich;
+    if let Some(media) = foreign_reply(raw).and_then(|reply| reply.reply_media.as_ref()) {
+        shown.merge(super::rich::Media::of(media));
+    }
+    shown
+}
+
+impl<'a> View<'a> {
+    pub fn new(message: &'a Message) -> Self {
+        let (rich, rich_media) = match super::rich::of(&message.raw) {
+            Some(super::rich::Flat {
+                text,
+                entities,
+                media,
+            }) => (Some(Shown::new(text, entities, false)), media),
+            None => (None, super::rich::Media::default()),
+        };
+        Self {
+            message,
+            media: message.media(),
+            text: message.text().trim(),
+            digits: std::sync::OnceLock::new(),
+            command: std::sync::OnceLock::new(),
+            own: Shown::new(
+                message.text(),
+                message.fmt_entities().map_or(&[][..], Vec::as_slice),
+                true,
+            ),
+            quote: foreign_quote(&message.raw)
+                .map(|(text, entities)| Shown::new(text, entities, true)),
+            rich,
+            shown_media: shown_media(&message.raw, rich_media),
+        }
+    }
+
+    fn shown(&self) -> impl Iterator<Item = &Shown<'a>> {
+        std::iter::once(&self.own)
+            .chain(self.quote.as_ref())
+            .chain(self.rich.as_ref())
+    }
+
+    fn deleted_text(&self) -> &str {
+        self.shown()
+            .map(|shown| shown.raw.as_ref())
+            .find(|text| !text.trim().is_empty())
+            .unwrap_or_default()
+    }
+
+    pub fn tight_texts(&self) -> impl Iterator<Item = &str> {
+        self.shown().map(Shown::tight)
+    }
+
+    pub fn lower(&self) -> &str {
+        self.own.lower()
     }
 
     pub fn text(&self) -> &str {
@@ -60,12 +181,13 @@ impl<'a> View<'a> {
         self.digits.get_or_init(|| super::digits(self.text))
     }
 
-    pub fn media(&self) -> Option<&Media> {
-        self.media.as_ref()
+    pub fn command(&self) -> &str {
+        self.command
+            .get_or_init(|| super::commands::normalize(self.text))
     }
 
-    fn entities(&self) -> Option<&Vec<tl::enums::MessageEntity>> {
-        self.message.fmt_entities()
+    pub fn media(&self) -> Option<&Media> {
+        self.media.as_ref()
     }
 }
 
@@ -94,246 +216,360 @@ pub async fn try_set(
     Ok(changed)
 }
 
+pub async fn try_set_many(
+    ctx: &Ctx,
+    chat: i64,
+    keys: &[&'static str],
+    on: bool,
+) -> Result<usize, crate::state::SettingsWriteError> {
+    use crate::state::SettingMutation;
+
+    let changing: Vec<&str> = keys
+        .iter()
+        .copied()
+        .filter(|key| ctx.settings.is_locked(chat, key) != on)
+        .collect();
+    let picks: Vec<String> = if ctx.settings.indexed_empty(chat, super::strict::PICK) {
+        Vec::new()
+    } else {
+        keys.iter().map(|key| super::strict::pick_key(key)).collect()
+    };
+    let mutation = |key| match on {
+        true => SettingMutation::Put { key, value: "" },
+        false => SettingMutation::Delete { key },
+    };
+    let mutations: Vec<_> = keys
+        .iter()
+        .copied()
+        .chain(picks.iter().map(String::as_str))
+        .map(mutation)
+        .collect();
+    ctx.settings.try_apply_batch(chat, &mutations).await?;
+    for key in &changing {
+        super::bots::on_lock_set(ctx, chat, key, on).await;
+    }
+    Ok(changing.len())
+}
+
 pub const LOCKS: &[Lock] = &[
     Lock {
         key: "links",
-        names: &["لینک", "لینک ها", "لینکها"],
+        names: &["لینک", "لینک ها", "لینکها", "link", "links"],
         matches: is_link,
     },
     Lock {
         key: "photo",
-        names: &["عکس", "تصویر"],
-        matches: is_photo,
+        names: &[
+            "عکس",
+            "تصویر",
+            "عکس ها",
+            "تصاویر",
+            "photo",
+            "photos",
+            "image",
+            "images",
+        ],
+        matches: photo_lock,
     },
     Lock {
         key: "video",
-        names: &["ویدیو", "فیلم", "ویدئو"],
-        matches: is_video,
+        names: &["ویدیو", "فیلم", "ویدئو", "video", "videos"],
+        matches: video_lock,
     },
     Lock {
         key: "gif",
-        names: &["گیف"],
-        matches: is_gif,
+        names: &["گیف", "gif", "gifs"],
+        matches: gif_lock,
     },
     Lock {
         key: "sticker",
-        names: &["استیکر"],
-        matches: is_sticker,
+        names: &["استیکر", "sticker", "stickers"],
+        matches: sticker_lock,
     },
     Lock {
         key: "animsticker",
-        names: &["استیکر متحرک", "استیکرمتحرک"],
+        names: &[
+            "استیکر متحرک",
+            "استیکرمتحرک",
+            "animated sticker",
+            "animated stickers",
+        ],
         matches: is_animated_sticker,
     },
     Lock {
         key: "music",
-        names: &["موزیک", "آهنگ", "اهنگ"],
-        matches: is_music,
+        names: &["موزیک", "آهنگ", "اهنگ", "موسیقی", "music", "audio"],
+        matches: music_lock,
     },
     Lock {
         key: "voice",
-        names: &["ویس", "صدا"],
-        matches: is_voice,
+        names: &["ویس", "صدا", "پیام صوتی", "voice", "voice messages"],
+        matches: voice_lock,
     },
     Lock {
         key: "file",
-        names: &["فایل", "سند"],
-        matches: is_file,
+        names: &["فایل", "سند", "file", "files", "document", "documents"],
+        matches: file_lock,
     },
     Lock {
         key: "contact",
-        names: &["مخاطب", "کانتکت"],
+        names: &["مخاطب", "کانتکت", "contact", "contacts"],
         matches: is_contact,
     },
     Lock {
         key: "location",
-        names: &["مکان", "لوکیشن"],
+        names: &["مکان", "لوکیشن", "موقعیت", "موقعیت مکانی", "location"],
         matches: is_location,
     },
     Lock {
         key: "poll",
-        names: &["نظرسنجی"],
+        names: &["نظرسنجی", "نظر سنجی", "poll", "polls"],
         matches: is_poll,
     },
     Lock {
         key: "dice",
-        names: &["تاس", "بازی"],
+        names: &["تاس", "بازی", "dice", "games"],
         matches: is_dice,
     },
     Lock {
         key: "forward_channel",
-        names: &["فوروارد از کانال", "فوروارد کانال"],
+        names: &[
+            "فوروارد از کانال",
+            "فوروارد کانال",
+            "فروارد کانال",
+            "فروارد از کانال",
+            "channel forwards",
+        ],
         matches: is_forward_channel,
     },
     Lock {
         key: "forward_user",
-        names: &["فوروارد از کاربر", "فوروارد کاربر"],
+        names: &[
+            "فوروارد از کاربر",
+            "فوروارد کاربر",
+            "فروارد کاربر",
+            "فروارد از کاربر",
+            "user forwards",
+        ],
         matches: is_forward_user,
     },
     Lock {
         key: "hyperlink",
-        names: &["لینک مخفی", "هایپرلینک", "لینک متنی"],
+        names: &[
+            "لینک مخفی",
+            "هایپرلینک",
+            "لینک متنی",
+            "hyperlink",
+            "hidden links",
+        ],
         matches: is_hyperlink,
     },
     Lock {
         key: "hashtag",
-        names: &["هشتگ"],
+        names: &["هشتگ", "hashtag", "hashtags"],
         matches: is_hashtag,
     },
     Lock {
         key: "emoji",
-        names: &["ایموجی", "شکلک"],
+        names: &["ایموجی", "شکلک", "اموجی", "emoji"],
         matches: has_emoji,
     },
     Lock {
         key: "premoji",
-        names: &["ایموجی پرمیوم", "ایموجی ویژه"],
+        names: &[
+            "ایموجی پرمیوم",
+            "ایموجی ویژه",
+            "premium emoji",
+            "custom emoji",
+        ],
         matches: has_custom_emoji,
     },
     Lock {
         key: "english",
-        names: &["انگلیسی", "لاتین"],
+        names: &["انگلیسی", "لاتین", "english"],
         matches: has_english,
     },
     Lock {
         key: "persian",
-        names: &["فارسی", "پارسی"],
+        names: &["فارسی", "پارسی", "persian", "farsi"],
         matches: has_persian,
     },
     Lock {
         key: "button",
-        names: &["دکمه", "دکمه شیشه ای", "اینلاین"],
+        names: &[
+            "دکمه",
+            "دکمه شیشه ای",
+            "اینلاین",
+            "button",
+            "buttons",
+            "inline",
+        ],
         matches: has_inline_button,
     },
     Lock {
         key: USERNAME,
-        names: &["یوزرنیم", "یوزر", "آیدی"],
+        names: &[
+            "یوزرنیم",
+            "یوزر",
+            "آیدی",
+            "نام کاربری",
+            "username",
+            "usernames",
+        ],
         matches: is_username,
     },
     Lock {
         key: MENTION,
-        names: &["تگ", "منشن"],
+        names: &["تگ", "منشن", "mention", "mentions"],
         matches: is_mention,
     },
     Lock {
         key: "media",
-        names: &["مدیا", "رسانه"],
+        names: &["مدیا", "رسانه", "media"],
         matches: is_media,
     },
     Lock {
         key: "anon",
-        names: &["ناشناس", "هویت ناشناس", "کانال"],
+        names: &["ناشناس", "هویت ناشناس", "کانال", "anonymous"],
         matches: is_anonymous_channel,
     },
     Lock {
         key: "spoiler",
-        names: &["اسپویلر", "اسپویل"],
+        names: &["اسپویلر", "اسپویل", "spoiler", "spoilers"],
         matches: is_spoiler,
     },
     Lock {
         key: "story",
-        names: &["استوری"],
+        names: &["استوری", "story", "stories"],
         matches: is_story,
     },
     Lock {
         key: "pin",
-        names: &["اعلان سنجاق", "اعلان پین"],
+        names: &["اعلان سنجاق", "اعلان پین", "pin notices"],
         matches: is_pin_notice,
     },
     Lock {
         key: "promoter",
-        names: &["تبچی", "تبلیغ", "تبلیغات"],
+        names: &["تبچی", "تبلیغ", "تبلیغات", "ads", "advertising"],
         matches: is_promoter,
     },
     Lock {
         key: COMMANDS,
-        names: &["دستورات عمومی", "دستورات", "کامند"],
+        names: &[
+            "دستورات عمومی",
+            "دستورات",
+            "کامند",
+            "دستورها",
+            "دستور ها",
+            "commands",
+        ],
         matches: never,
     },
     Lock {
         key: BOTCALL,
-        names: &["دستور ربات", "دستور بات", "کامند ربات"],
+        names: &["دستور ربات", "دستور بات", "کامند ربات", "bot commands"],
         matches: is_bot_call,
     },
     Lock {
         key: EDIT,
-        names: &["ویرایش", "ادیت"],
+        names: &["ویرایش", "ادیت", "edit", "edits"],
         matches: never,
     },
     Lock {
         key: SERVICE,
-        names: &["سرویس", "سرویس تلگرام", "پیام سرویس"],
+        names: &[
+            "سرویس",
+            "سرویس تلگرام",
+            "پیام سرویس",
+            "پیام خدماتی",
+            "service",
+            "service messages",
+        ],
         matches: never,
     },
     Lock {
         key: super::bots::LOCK,
-        names: &["ربات", "بات"],
+        names: &["ربات", "بات", "bot", "bots"],
         matches: never,
     },
     Lock {
         key: super::biolink::LOCK,
-        names: &["لینک در بایو", "لینک بایو", "بایو"],
+        names: &["لینک در بایو", "لینک بایو", "بایو", "bio", "bio links"],
         matches: never,
     },
     Lock {
         key: super::comment::LOCK,
-        names: &["کامنت", "کامنت ها", "کامنتها"],
+        names: &["کامنت", "کامنت ها", "کامنتها", "comment", "comments"],
         matches: never,
     },
     Lock {
         key: super::nsfw::LOCK,
-        names: &["محتوای غیراخلاقی", "غیراخلاقی", "مستهجن"],
+        names: &["محتوای غیراخلاقی", "غیراخلاقی", "مستهجن", "nsfw"],
         matches: never,
     },
     Lock {
         key: "c_cig",
-        names: &["سیگار", "دخانیات", "قلیان"],
+        names: &["سیگار", "دخانیات", "قلیان", "smoking"],
         matches: never,
     },
     Lock {
         key: "c_alc",
-        names: &["مشروب", "الکل", "مشروبات"],
+        names: &["مشروب", "الکل", "مشروبات", "alcohol"],
         matches: never,
     },
     Lock {
         key: "c_gun",
-        names: &["اسلحه", "سلاح"],
+        names: &["اسلحه", "سلاح", "weapons"],
         matches: never,
     },
     Lock {
         key: "c_bet",
-        names: &["قمار", "شرط بندی", "شرطبندی"],
+        names: &["قمار", "شرط بندی", "شرطبندی", "gambling"],
         matches: never,
     },
     Lock {
         key: "c_drg",
-        names: &["مواد", "مواد مخدر"],
+        names: &["مواد", "مواد مخدر", "drugs"],
         matches: never,
     },
     Lock {
         key: "c_bld",
-        names: &["خون", "خونریزی"],
+        names: &["خون", "خونریزی", "blood"],
         matches: never,
     },
     Lock {
         key: super::ocr::LOCK,
-        names: &["تبلیغ در تصویر", "تبلیغ تصویری", "لینک در تصویر"],
+        names: &[
+            "تبلیغ در تصویر",
+            "تبلیغ تصویری",
+            "لینک در تصویر",
+            "ocr",
+            "image ads",
+        ],
         matches: never,
     },
     Lock {
         key: super::trade::LOCK,
-        names: &["خرید و فروش", "خرید فروش", "معامله"],
+        names: &["خرید و فروش", "خرید فروش", "معامله", "trade", "trading"],
         matches: never,
     },
 ];
 
-const ALL: &[&str] = &["همه", "همه چیز", "کل"];
+const ALL: &[&str] = &[
+    "همه",
+    "همه چیز",
+    "کل",
+    "همه قفل ها",
+    "تمام قفل ها",
+    "all",
+    "all locks",
+];
 
-const FORWARD: &[&str] = &["فوروارد", "فروارد", "هدایت"];
+const FORWARD: &[&str] = &["فوروارد", "فروارد", "هدایت", "forward", "forwards"];
 
-const BOT: &[&str] = &["ربات", "بات"];
+const BOT: &[&str] = &["ربات", "بات", "bot", "bots"];
 
-const GROUP: &[&str] = &["گروه", "کل گروه"];
+const GROUP: &[&str] = &["گروه", "کل گروه", "group"];
 
 pub const TIMED_RANGE: (u64, u64) = (60, 30 * 86_400);
 
@@ -345,33 +581,23 @@ pub const MENTION: &str = "mention";
 pub const BOTCALL: &str = "botcall";
 pub const FORWARD_CHANNEL: &str = "forward_channel";
 pub const FORWARD_USER: &str = "forward_user";
-pub const STATUS: &[&str] = &["قفل ها", "قفلها", "لیست قفل", "وضعیت قفل"];
+pub const STATUS: &[&str] = &[
+    "قفل ها",
+    "قفلها",
+    "لیست قفل",
+    "وضعیت قفل",
+    "لیست قفل ها",
+    "وضعیت قفل ها",
+    "قفل های فعال",
+    "/locks",
+    "/lockstatus",
+];
 
 pub const COMMANDS: &str = "commands";
 
-const PUBLIC: &[&[&str]] = &[
-    super::ping::COMMANDS,
-    super::report::COMMANDS,
-    super::config::HELP,
-    super::config::ADMIN_LIST,
-    super::extras::SHOW_RULES,
-    super::stats::INFO,
-    super::currency::COMMANDS,
-    STATUS,
-];
-
-fn is_public_command(text: &str) -> bool {
-    PUBLIC.iter().any(|names| names.contains(&text))
-}
-
-async fn ignored_command(
-    ctx: &std::sync::Arc<Ctx>,
-    message: &Message,
-    chat: i64,
-    text: &str,
-) -> bool {
+async fn ignored_command(ctx: &std::sync::Arc<Ctx>, message: &Message, chat: i64) -> bool {
     ctx.settings.is_locked(chat, COMMANDS)
-        && is_public_command(text)
+        && message.action().is_none()
         && !super::is_exempt(ctx, message).await
 }
 
@@ -385,14 +611,14 @@ fn names_a_lock(name: &str) -> bool {
 }
 
 pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_>) -> bool {
-    let text = view.digits();
+    let text = view.command();
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
 
     if STATUS.contains(&text) {
         if moderate(ctx, message, chat, view).await
-            || ignored_command(ctx, message, chat, text).await
+            || ignored_command(ctx, message, chat).await
         {
             return true;
         }
@@ -448,24 +674,19 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
         }
 
         if ALL.contains(&name) {
-            let mut changed = 0;
-            for lock in plain() {
-                match try_set(ctx, chat, lock.key, on).await {
-                    Ok(true) => changed += 1,
-                    Ok(false) => {}
-                    Err(error) => {
-                        ::log::warn!("locks: bulk write for {chat}/{} failed: {error}", lock.key);
-                        super::respond(ctx, message, crate::response::ResponseKind::CommandError, if error.commit_outcome_unknown() {
-                                "نتیجه تنظیم همه قفل ها نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
-                            } else if changed == 0 {
-                                "قفل ها ذخیره نشدند؛ دوباره تلاش کنید."
-                            } else {
-                                "تنظیم همه قفل ها کامل نشد؛ بعضی قفل ها تغییر کردند. وضعیت را بررسی کنید."
-                            }).await;
-                        return true;
-                    }
+            let keys: Vec<&'static str> = plain().map(|lock| lock.key).collect();
+            let changed = match try_set_many(ctx, chat, &keys, on).await {
+                Ok(changed) => changed,
+                Err(error) => {
+                    ::log::warn!("locks: bulk write for {chat} failed: {error}");
+                    super::respond(ctx, message, crate::response::ResponseKind::CommandError, if error.commit_outcome_unknown() {
+                            "نتیجه تنظیم همه قفل ها نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                        } else {
+                            "قفل ها ذخیره نشدند؛ دوباره تلاش کنید."
+                        }).await;
+                    return true;
                 }
-            }
+            };
             super::respond(
                 ctx,
                 message,
@@ -551,10 +772,10 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message, view: &View<'_
     if moderate(ctx, message, chat, view).await {
         return true;
     }
-    ignored_command(ctx, message, chat, text).await
+    ignored_command(ctx, message, chat).await
 }
 
-async fn moderate(
+pub(super) async fn moderate(
     ctx: &std::sync::Arc<Ctx>,
     message: &Message,
     chat: i64,
@@ -683,7 +904,7 @@ async fn enforce(
         DeleteClaim::Duplicate => return Acted::Already,
         DeleteClaim::Owner => {}
     }
-    let text = view.message.text().to_owned();
+    let text = view.deleted_text().to_owned();
     ctx.bump(chat, super::stats::DELETED);
     let sender_name = super::name_of(message);
     let (cause, reason_for_log, by_filter) = match (matched, filtered) {
@@ -795,7 +1016,7 @@ fn timed_group(view: &View<'_>, name: &str) -> Option<u64> {
             .is_some_and(|rest| rest.starts_with(char::is_whitespace))
     })?;
 
-    let (on, normalised) = parse(view.digits())?;
+    let (on, normalised) = parse(view.command())?;
     if !on {
         return None;
     }
@@ -883,13 +1104,23 @@ async fn group_lock_timed(ctx: &Ctx, message: &Message, chat: i64, seconds: u64)
 }
 
 fn parse(text: &str) -> Option<(bool, &str)> {
-    const ON: &[&str] = &["قفل"];
-    const OFF: &[&str] = &["بازکردن", "باز کردن", "آنلاک", "انلاک", "بازکن", "حذف قفل"];
+    const ON: &[&str] = &["قفل کردن", "قفل کن", "قفل", "/lock"];
+    const OFF: &[&str] = &[
+        "بازکردن",
+        "باز کردن",
+        "آنلاک",
+        "انلاک",
+        "بازکن",
+        "باز کن",
+        "حذف قفل",
+        "رفع قفل",
+        "/unlock",
+    ];
 
     for (words, on) in [(ON, true), (OFF, false)] {
         for word in words {
-            if let Some(rest) = text.strip_prefix(word)
-                && rest.starts_with(char::is_whitespace)
+            if let Some(rest) = super::commands::strip_prefix(text, word)
+                && !rest.is_empty()
             {
                 return Some((on, rest.trim()));
             }
@@ -898,29 +1129,53 @@ fn parse(text: &str) -> Option<(bool, &str)> {
     None
 }
 
+pub(super) fn is_management_command(text: &str) -> bool {
+    let normalized = super::commands::normalize(text);
+    parse(&normalized).is_some_and(|(on, name)| {
+        names_a_lock(name)
+            || (on
+                && GROUP.iter().any(|group| {
+                    super::commands::strip_prefix(name, group).is_some_and(|tail| {
+                        !tail.is_empty() && super::restrict::duration_of(tail).is_some()
+                    })
+                }))
+    })
+}
+
 fn never(_: &View) -> bool {
     false
 }
 
 fn is_link(view: &View) -> bool {
-    let marked_up = view.entities().is_some_and(|entities| {
-        entities
-            .iter()
-            .any(|e| matches!(e, tl::enums::MessageEntity::Url(_)))
-    });
-
-    marked_up
-        || text_has_link(view.ascii())
-        || (disguised(view) && text_has_bare_domain(view.ascii()))
+    view.shown().any(shows_a_link)
         || markup_of(view).is_some_and(markup_has_link)
+        || previews_a_link(view)
+        || view.shown_media.preview
 }
 
-fn disguised(view: &View) -> bool {
-    let text = view.message.text();
-    !matches!(
-        unicode_normalization::is_nfkc_quick(text.chars()),
-        unicode_normalization::IsNormalized::Yes
-    ) || text.chars().any(hides_a_link)
+fn shows_a_link(shown: &Shown) -> bool {
+    shown.has(|e| matches!(e, tl::enums::MessageEntity::Url(_)))
+        || text_has_link(shown.ascii())
+        || (shown.disguised() && text_has_bare_domain(shown.ascii()))
+        || shown.code().any(|code| text_has_listed_domain(&code))
+}
+
+fn previews_a_link(view: &View) -> bool {
+    previews(raw_media(view), &view.own)
+}
+
+fn previews(media: Option<&tl::enums::MessageMedia>, own: &Shown) -> bool {
+    let Some(tl::enums::MessageMedia::WebPage(preview)) = media else {
+        return false;
+    };
+    let url = match &preview.webpage {
+        tl::enums::WebPage::Page(page) => Some(page.url.as_str()),
+        tl::enums::WebPage::Pending(page) => page.url.as_deref(),
+        tl::enums::WebPage::Empty(page) => page.url.as_deref(),
+        tl::enums::WebPage::NotModified(_) => None,
+    };
+    url.is_some_and(|url| !url.trim().is_empty())
+        && !own.has(|e| matches!(e, tl::enums::MessageEntity::TextUrl(_)))
 }
 
 fn hides_a_link(c: char) -> bool {
@@ -970,6 +1225,20 @@ fn hides_a_link(c: char) -> bool {
 }
 
 pub(super) fn text_has_bare_domain(text: &str) -> bool {
+    domain_shaped(text, false, |_| true)
+}
+
+const CODE_TLDS: &[&str] = &[
+    "com", "net", "org", "ir", "io", "me", "co", "xyz", "biz", "info", "site", "online", "shop",
+    "store", "top", "club", "ru", "app", "dev", "pro", "gg", "ly", "ai", "cc", "ws", "tv", "link",
+    "live", "uk", "us", "de", "tk", "ml", "ga", "cf", "su", "website", "space", "fun", "click",
+];
+
+fn text_has_listed_domain(text: &str) -> bool {
+    domain_shaped(text, true, |tld| CODE_TLDS.contains(&tld))
+}
+
+fn domain_shaped(text: &str, chained: bool, known: impl Fn(&str) -> bool) -> bool {
     let label = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
     text.match_indices('.').any(|(dot, _)| {
         let before = &text[..dot];
@@ -980,7 +1249,7 @@ pub(super) fn text_has_bare_domain(text: &str) -> bool {
         if before[..before.len() - left]
             .chars()
             .next_back()
-            .is_some_and(|c| c.is_alphanumeric() || c == '.' || c == '@')
+            .is_some_and(|c| c.is_alphanumeric() || (c == '.' && !chained) || c == '@')
         {
             return false;
         }
@@ -988,6 +1257,7 @@ pub(super) fn text_has_bare_domain(text: &str) -> bool {
         let after = &text[dot + 1..];
         let tld = after.chars().take_while(|c| c.is_ascii_lowercase()).count();
         (2..=24).contains(&tld)
+            && known(&after[..tld])
             && after[tld..]
                 .chars()
                 .next()
@@ -997,8 +1267,8 @@ pub(super) fn text_has_bare_domain(text: &str) -> bool {
 }
 
 fn is_hyperlink(view: &View) -> bool {
-    view.entities().is_some_and(|entities| {
-        entities.iter().any(|entity| match entity {
+    view.shown().any(|shown| {
+        shown.has(|entity| match entity {
             tl::enums::MessageEntity::TextUrl(text_url) => external_text_url(&text_url.url),
             _ => false,
         })
@@ -1014,23 +1284,20 @@ fn external_text_url(url: &str) -> bool {
 }
 
 fn has_custom_emoji(view: &View) -> bool {
-    view.entities().is_some_and(|entities| {
-        entities
-            .iter()
-            .any(|e| matches!(e, tl::enums::MessageEntity::CustomEmoji(_)))
-    })
+    view.shown()
+        .any(|shown| shown.has(|e| matches!(e, tl::enums::MessageEntity::CustomEmoji(_))))
 }
 
 fn has_emoji(view: &View) -> bool {
-    text_has_emoji(view.message.text()) || has_custom_emoji(view)
+    view.shown().any(|shown| text_has_emoji(&shown.raw)) || has_custom_emoji(view)
 }
 
 fn has_english(view: &View) -> bool {
-    text_has_english(view.message.text())
+    view.shown().any(|shown| text_has_english(&shown.raw))
 }
 
 fn has_persian(view: &View) -> bool {
-    text_has_persian(view.message.text())
+    view.shown().any(|shown| text_has_persian(&shown.raw))
 }
 
 fn text_has_emoji(text: &str) -> bool {
@@ -1060,14 +1327,11 @@ fn text_has_persian(text: &str) -> bool {
 }
 
 fn is_spoiler(view: &View) -> bool {
-    let entity = view.entities().is_some_and(|entities| {
-        entities
-            .iter()
-            .any(|e| matches!(e, tl::enums::MessageEntity::Spoiler(_)))
-    });
-    entity
+    view.shown()
+        .any(|shown| shown.has(|e| matches!(e, tl::enums::MessageEntity::Spoiler(_))))
         || matches!(&view.media, Some(Media::Photo(photo)) if photo.is_spoiler())
         || matches!(&view.media, Some(Media::Document(doc)) if doc.is_spoiler())
+        || view.shown_media.spoiler
 }
 
 fn raw_media<'a>(view: &View<'a>) -> Option<&'a tl::enums::MessageMedia> {
@@ -1078,7 +1342,7 @@ fn raw_media<'a>(view: &View<'a>) -> Option<&'a tl::enums::MessageMedia> {
 }
 
 fn is_story(view: &View) -> bool {
-    matches!(raw_media(view), Some(tl::enums::MessageMedia::Story(_)))
+    matches!(raw_media(view), Some(tl::enums::MessageMedia::Story(_))) || view.shown_media.story
 }
 
 fn is_pin_notice(view: &View) -> bool {
@@ -1089,13 +1353,28 @@ fn is_pin_notice(view: &View) -> bool {
 }
 
 fn is_hashtag(view: &View) -> bool {
-    view.entities().is_some_and(|entities| {
-        entities.iter().any(|e| {
+    view.shown().any(|shown| {
+        shown.has(|e| {
             matches!(
                 e,
                 tl::enums::MessageEntity::Hashtag(_) | tl::enums::MessageEntity::Cashtag(_)
             )
-        })
+        }) || shown.code().any(|code| text_has_hashtag(&code))
+    })
+}
+
+fn text_has_hashtag(text: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    text.char_indices().any(|(at, c)| {
+        c == '#'
+            && !text[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|prev| word(prev) || prev == '#')
+            && text[at + 1..]
+                .chars()
+                .take_while(|c| word(*c))
+                .any(char::is_alphabetic)
     })
 }
 
@@ -1273,6 +1552,35 @@ fn latinised(text: &str) -> Option<String> {
     rewritten(text, latin_twin, false)
 }
 
+fn ascii_of(text: &str) -> String {
+    let lower = folded(text);
+    let tight = tightened(&lower).unwrap_or(lower);
+    latinised(&tight).unwrap_or(tight)
+}
+
+fn utf16_slice(text: &str, offset: i32, length: i32) -> Option<&str> {
+    let (start, end) = (
+        usize::try_from(offset).ok()?,
+        usize::try_from(offset).ok()? + usize::try_from(length).ok().filter(|l| *l > 0)?,
+    );
+    let mut units = 0;
+    let (mut from, mut to) = (None, None);
+    for (byte, c) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
+        if units == start {
+            from = Some(byte);
+        }
+        if units == end {
+            to = Some(byte);
+            break;
+        }
+        units += c.len_utf16();
+    }
+    text.get(from?..to?)
+}
+
 pub(super) fn text_has_link(text: &str) -> bool {
     ["http://", "https://", "t.me/", "telegram.me/", "www."]
         .iter()
@@ -1301,11 +1609,10 @@ fn is_anonymous_channel(view: &View) -> bool {
 }
 
 fn is_username(view: &View) -> bool {
-    view.entities().is_some_and(|entities| {
-        entities
-            .iter()
-            .any(|e| matches!(e, tl::enums::MessageEntity::Mention(_)))
-    }) || text_has_username(view.ascii())
+    view.shown().any(|shown| {
+        shown.has(|e| matches!(e, tl::enums::MessageEntity::Mention(_)))
+            || text_has_username(shown.ascii())
+    })
 }
 
 pub(super) fn text_has_username(text: &str) -> bool {
@@ -1334,22 +1641,21 @@ fn command_targets_a_bot(text: &str) -> bool {
 }
 
 fn is_bot_call(view: &View) -> bool {
-    command_targets_a_bot(view.ascii())
+    view.shown()
+        .any(|shown| command_targets_a_bot(shown.ascii()))
 }
 
 fn is_promoter(view: &View) -> bool {
     is_forward_channel(view)
+        || view.shown_media.channel
         || is_username(view)
-        || has_telegram_link(view.ascii())
+        || view.shown().any(|shown| has_telegram_link(shown.ascii()))
         || markup_of(view).is_some_and(markup_has_telegram_link)
 }
 
 fn is_mention(view: &View) -> bool {
-    view.entities().is_some_and(|entities| {
-        entities
-            .iter()
-            .any(|e| matches!(e, tl::enums::MessageEntity::MentionName(_)))
-    })
+    view.shown()
+        .any(|shown| shown.has(|e| matches!(e, tl::enums::MessageEntity::MentionName(_))))
 }
 
 fn is_forward_channel(view: &View) -> bool {
@@ -1362,6 +1668,35 @@ fn is_forward_user(view: &View) -> bool {
 
 fn is_media(view: &View) -> bool {
     !matches!(raw_media(view), None | Some(tl::enums::MessageMedia::Empty))
+        || view.shown_media.any()
+}
+
+fn photo_lock(view: &View) -> bool {
+    is_photo(view) || view.shown_media.photo
+}
+
+fn video_lock(view: &View) -> bool {
+    is_video(view) || view.shown_media.video
+}
+
+fn gif_lock(view: &View) -> bool {
+    is_gif(view) || view.shown_media.gif
+}
+
+fn sticker_lock(view: &View) -> bool {
+    is_sticker(view) || view.shown_media.sticker
+}
+
+fn music_lock(view: &View) -> bool {
+    is_music(view) || view.shown_media.music
+}
+
+fn voice_lock(view: &View) -> bool {
+    is_voice(view) || view.shown_media.voice
+}
+
+fn file_lock(view: &View) -> bool {
+    is_file(view) || view.shown_media.file
 }
 
 pub fn is_photo(view: &View) -> bool {
@@ -1373,26 +1708,37 @@ pub fn is_sticker(view: &View) -> bool {
 }
 
 fn is_animated_sticker(view: &View) -> bool {
-    matches!(&view.media, Some(Media::Sticker(s)) if s.is_animated())
+    view.media.as_ref().is_some_and(animated_sticker) || view.shown_media.animsticker
+}
+
+fn animated_sticker(media: &Media) -> bool {
+    let Media::Sticker(sticker) = media else {
+        return false;
+    };
+    sticker.is_animated()
+        || sticker
+            .document
+            .mime_type()
+            .is_some_and(|mime| mime == "application/x-tgsticker" || mime.starts_with("video/"))
 }
 
 fn is_contact(view: &View) -> bool {
-    matches!(view.media, Some(Media::Contact(_)))
+    matches!(view.media, Some(Media::Contact(_))) || view.shown_media.contact
 }
 
 fn is_poll(view: &View) -> bool {
-    matches!(view.media, Some(Media::Poll(_)))
+    matches!(view.media, Some(Media::Poll(_))) || view.shown_media.poll
 }
 
 fn is_dice(view: &View) -> bool {
-    matches!(view.media, Some(Media::Dice(_)))
+    matches!(view.media, Some(Media::Dice(_))) || view.shown_media.dice
 }
 
 fn is_location(view: &View) -> bool {
     matches!(
         view.media,
         Some(Media::Geo(_) | Media::GeoLive(_) | Media::Venue(_))
-    )
+    ) || view.shown_media.location
 }
 
 pub fn is_gif(view: &View) -> bool {
@@ -1451,6 +1797,56 @@ pub fn is_file(view: &View) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sticker_with_mime(mime: &str) -> Media {
+        let document =
+            grammers_client::media::Document::from_raw_media(tl::types::MessageMediaDocument {
+                nopremium: false,
+                spoiler: false,
+                video: false,
+                round: false,
+                voice: false,
+                document: Some(
+                    tl::types::Document {
+                        id: 42,
+                        access_hash: 7,
+                        file_reference: vec![1],
+                        date: 0,
+                        mime_type: mime.to_owned(),
+                        size: 128,
+                        thumbs: None,
+                        video_thumbs: None,
+                        dc_id: 1,
+                        attributes: vec![
+                            tl::types::DocumentAttributeSticker {
+                                mask: false,
+                                alt: String::new(),
+                                stickerset: tl::enums::InputStickerSet::Empty,
+                                mask_coords: None,
+                            }
+                            .into(),
+                        ],
+                    }
+                    .into(),
+                ),
+                alt_documents: None,
+                video_cover: None,
+                video_timestamp: None,
+                ttl_seconds: None,
+            });
+        Media::Sticker(
+            grammers_client::media::Sticker::from_document(&document).expect("a sticker"),
+        )
+    }
+
+    #[test]
+    fn animated_stickers_are_lottie_and_video_stickers() {
+        assert!(animated_sticker(&sticker_with_mime(
+            "application/x-tgsticker"
+        )));
+        assert!(animated_sticker(&sticker_with_mime("video/webm")));
+        assert!(!animated_sticker(&sticker_with_mime("image/webp")));
+    }
 
     #[test]
     fn failed_delete_does_not_consume_the_moderation_claim() {
@@ -1742,6 +2138,41 @@ mod tests {
     }
 
     #[test]
+    fn lock_aliases_cover_common_verbs_and_keep_whole_lock_names() {
+        for (text, expected) in [
+            ("قفل کن لینک", (true, "لینک")),
+            ("قفل کردن گروه", (true, "گروه")),
+            ("باز\u{200c}کن عکس", (false, "عکس")),
+            ("رفع  قفل ویس", (false, "ویس")),
+            ("/UNLOCK مدیا", (false, "مدیا")),
+        ] {
+            assert_eq!(parse(text), Some(expected));
+        }
+        assert!(names_a_lock("نام کاربری"));
+        assert!(names_a_lock("پیام صوتی"));
+        for name in [
+            "links",
+            "photos",
+            "animated stickers",
+            "voice",
+            "group",
+            "all",
+            "forwards",
+        ] {
+            assert!(names_a_lock(name), "{name}");
+        }
+        for lock in LOCKS {
+            assert!(
+                lock.names.iter().any(|name| name.is_ascii()),
+                "{} has no English alias",
+                lock.key
+            );
+        }
+        assert!(!names_a_lock("عکس لطفا"));
+        assert!(parse("/locksmith عکس").is_none());
+    }
+
+    #[test]
     fn spots_a_username_inside_a_bot_command() {
         assert!(command_targets_a_bot("/start@RextesterRoBot"));
         assert!(command_targets_a_bot("سلام /help@somebot لطفا"));
@@ -1794,33 +2225,6 @@ mod tests {
     }
 
     #[test]
-    fn the_commands_lock_covers_what_a_member_can_actually_send() {
-        for word in [
-            "پینگ",
-            "گزارش",
-            "راهنما",
-            "دستورات",
-            "قوانین",
-            "لیست ادمین",
-            "قفل ها",
-            "نرخ ارز",
-            "قیمت ارز",
-        ] {
-            assert!(
-                is_public_command(word),
-                "«{word}» is public but the lock ignores it"
-            );
-        }
-
-        for word in ["قفل عکس", "سکوت", "بن", "پنل", "ترفیع", "کانفیگ", "توقف"]
-        {
-            assert!(!is_public_command(word), "«{word}» is admin-gated already");
-        }
-
-        assert!(LOCKS.iter().any(|lock| lock.key == COMMANDS));
-    }
-
-    #[test]
     fn the_commands_lock_never_deletes() {
         let row = LOCKS
             .iter()
@@ -1830,18 +2234,6 @@ mod tests {
             std::ptr::fn_addr_eq(row.matches, never as fn(&View) -> bool),
             "«دستورات عمومی» must not match, or enforce will delete instead of ignoring"
         );
-    }
-
-    #[test]
-    fn a_command_word_does_not_smuggle_anything() {
-        assert!(is_public_command("پینگ"));
-        for text in ["پینگ https://spam.example", "پینگ بیا", "قفل ها و بقیه"]
-        {
-            assert!(
-                !is_public_command(text),
-                "«{text}» carries more than the command and must face the locks"
-            );
-        }
     }
 
     #[test]
@@ -1995,5 +2387,368 @@ mod tests {
             }
             .into()
         ])));
+    }
+
+    fn code(offset: i32, length: i32) -> tl::enums::MessageEntity {
+        tl::types::MessageEntityCode { offset, length }.into()
+    }
+
+    fn pre(offset: i32, length: i32) -> tl::enums::MessageEntity {
+        tl::types::MessageEntityPre {
+            offset,
+            length,
+            language: String::new(),
+        }
+        .into()
+    }
+
+    fn shown(text: &str, entities: Vec<tl::enums::MessageEntity>) -> Shown<'_> {
+        Shown::new(text, entities, true)
+    }
+
+    #[test]
+    fn a_span_is_found_by_utf16_offset() {
+        assert_eq!(utf16_slice("ab spam.com", 3, 8), Some("spam.com"));
+        assert_eq!(utf16_slice("😀 spam.com", 3, 8), Some("spam.com"));
+        assert_eq!(utf16_slice("سلام x.io", 5, 4), Some("x.io"));
+        assert_eq!(utf16_slice("abc", 0, 3), Some("abc"));
+        assert_eq!(utf16_slice("abc", 2, 5), None);
+        assert_eq!(utf16_slice("abc", -1, 2), None);
+        assert_eq!(utf16_slice("abc", 1, 0), None);
+    }
+
+    #[test]
+    fn a_domain_in_monospace_is_a_link() {
+        assert!(shows_a_link(&shown("بیا spam.com", vec![code(4, 8)])));
+        assert!(shows_a_link(&shown("بیا\nspam.ir\n", vec![pre(4, 8)])));
+        assert!(shows_a_link(&shown(
+            "😀 sub.example.com",
+            vec![code(3, 15)]
+        )));
+        assert!(shows_a_link(&shown(
+            "\u{1D69C}\u{1D699}\u{1D68A}\u{1D696}.\u{1D68C}\u{1D698}\u{1D696}",
+            vec![code(0, 15)]
+        )));
+        assert!(shows_a_link(&shown("https://x.y", vec![code(0, 11)])));
+
+        for ordinary in [
+            "os.path",
+            "app.js",
+            "main.rs",
+            "readme.md",
+            "self.name",
+            "1.5",
+        ] {
+            let length = ordinary.encode_utf16().count() as i32;
+            assert!(
+                !shows_a_link(&shown(ordinary, vec![code(0, length)])),
+                "{ordinary} in monospace was read as a link"
+            );
+        }
+        assert!(!shows_a_link(&shown("spam.com", Vec::new())));
+    }
+
+    #[test]
+    fn a_hashtag_in_monospace_is_a_hashtag() {
+        let tagged = |text: &str| {
+            let length = text.encode_utf16().count() as i32;
+            shown(text, vec![code(0, length)])
+                .code()
+                .any(|code| text_has_hashtag(&code))
+        };
+        assert!(tagged("#ad"));
+        assert!(tagged("join #تخفیف now"));
+        assert!(tagged("#tag_2"));
+        assert!(!tagged("#1"));
+        assert!(!tagged("a#b"));
+        assert!(!tagged("##"));
+        assert!(!tagged("no tag"));
+    }
+
+    fn reply(
+        to_peer: Option<tl::enums::Peer>,
+        from: bool,
+        quote: Option<&str>,
+    ) -> tl::enums::Message {
+        let mut raw = super::super::scalability_tests::raw_message(5, 1, "hi");
+        let tl::enums::Message::Message(message) = &mut raw else {
+            unreachable!()
+        };
+        message.reply_to = Some(
+            tl::types::MessageReplyHeader {
+                reply_to_scheduled: false,
+                forum_topic: false,
+                quote: quote.is_some(),
+                reply_to_ephemeral: false,
+                reply_to_msg_id: Some(7),
+                reply_to_peer_id: to_peer,
+                reply_from: from.then(|| {
+                    tl::types::MessageFwdHeader {
+                        imported: false,
+                        saved_out: false,
+                        from_id: None,
+                        from_name: Some("channel".into()),
+                        date: 0,
+                        channel_post: None,
+                        post_author: None,
+                        saved_from_peer: None,
+                        saved_from_msg_id: None,
+                        saved_from_id: None,
+                        saved_from_name: None,
+                        saved_date: None,
+                        psa_type: None,
+                    }
+                    .into()
+                }),
+                reply_media: None,
+                reply_to_top_id: None,
+                quote_text: quote.map(str::to_owned),
+                quote_entities: None,
+                quote_offset: None,
+                todo_item_id: None,
+                poll_option: None,
+            }
+            .into(),
+        );
+        raw
+    }
+
+    #[test]
+    fn a_quote_from_another_chat_is_read() {
+        let elsewhere: tl::enums::Peer = tl::types::PeerChannel { channel_id: 9 }.into();
+        let here: tl::enums::Peer = tl::types::PeerChat { chat_id: -5 }.into();
+
+        let quoted = reply(Some(elsewhere.clone()), false, Some("t.me/spam"));
+        assert_eq!(
+            foreign_quote(&quoted).map(|(text, _)| text),
+            Some("t.me/spam")
+        );
+        let quoted = reply(None, true, Some("t.me/spam"));
+        assert_eq!(
+            foreign_quote(&quoted).map(|(text, _)| text),
+            Some("t.me/spam")
+        );
+
+        assert!(foreign_quote(&reply(Some(here), false, Some("t.me/spam"))).is_none());
+        assert!(foreign_quote(&reply(None, false, Some("t.me/spam"))).is_none());
+        assert!(foreign_quote(&reply(Some(elsewhere), true, None)).is_none());
+    }
+
+    fn with_reply_media(
+        mut raw: tl::enums::Message,
+        media: tl::enums::MessageMedia,
+    ) -> tl::enums::Message {
+        if let tl::enums::Message::Message(message) = &mut raw
+            && let Some(tl::enums::MessageReplyHeader::Header(reply)) = &mut message.reply_to
+        {
+            reply.reply_media = Some(media);
+        }
+        raw
+    }
+
+    #[test]
+    fn media_quoted_from_another_chat_is_shown_media() {
+        let photo: tl::enums::MessageMedia = tl::types::MessageMediaPhoto {
+            spoiler: false,
+            live_photo: false,
+            photo: None,
+            ttl_seconds: None,
+            video: None,
+        }
+        .into();
+        let elsewhere: tl::enums::Peer = tl::types::PeerChannel { channel_id: 9 }.into();
+
+        let foreign = with_reply_media(reply(Some(elsewhere), false, None), photo.clone());
+        let shown = shown_media(&foreign, super::super::rich::Media::default());
+        assert!(shown.photo && shown.any());
+
+        let local = with_reply_media(reply(None, false, None), photo);
+        assert_eq!(
+            shown_media(&local, super::super::rich::Media::default()),
+            super::super::rich::Media::default()
+        );
+
+        let card = with_reply_media(
+            reply(None, true, None),
+            preview(Some("https://spam.example")),
+        );
+        assert!(shown_media(&card, super::super::rich::Media::default()).preview);
+    }
+
+    fn preview(url: Option<&str>) -> tl::enums::MessageMedia {
+        tl::types::MessageMediaWebPage {
+            force_large_media: false,
+            force_small_media: false,
+            manual: true,
+            safe: false,
+            webpage: tl::types::WebPagePending {
+                id: 1,
+                url: url.map(str::to_owned),
+                date: 0,
+            }
+            .into(),
+        }
+        .into()
+    }
+
+    #[test]
+    fn a_link_preview_is_a_link_without_the_link_in_the_text() {
+        let plain = shown("hello", Vec::new());
+        assert!(previews(
+            Some(&preview(Some("https://spam.example"))),
+            &plain
+        ));
+        assert!(!previews(Some(&preview(None)), &plain));
+        assert!(!previews(None, &plain));
+
+        let hidden = shown(
+            "hello",
+            vec![
+                tl::types::MessageEntityTextUrl {
+                    offset: 0,
+                    length: 5,
+                    url: "https://spam.example".into(),
+                }
+                .into(),
+            ],
+        );
+        assert!(!previews(
+            Some(&preview(Some("https://spam.example"))),
+            &hidden
+        ));
+    }
+
+    #[test]
+    fn a_rich_message_text_trips_the_text_locks() {
+        let paragraph = |text: tl::enums::RichText| -> tl::enums::PageBlock {
+            tl::types::PageBlockParagraph { text }.into()
+        };
+        let plain = |text: &str| -> tl::enums::RichText {
+            tl::types::TextPlain { text: text.into() }.into()
+        };
+        let flat = super::super::rich::flatten(&tl::types::RichMessage {
+            rtl: false,
+            part: false,
+            blocks: vec![
+                paragraph(plain("بیا spam.com")),
+                paragraph(
+                    tl::types::TextMention {
+                        text: plain("@spamchannel"),
+                    }
+                    .into(),
+                ),
+            ],
+            photos: Vec::new(),
+            documents: Vec::new(),
+        });
+        let rich = Shown::new(flat.text, flat.entities, false);
+        assert!(shows_a_link(&rich));
+        assert!(rich.has(|e| matches!(e, tl::enums::MessageEntity::Mention(_))));
+        assert!(text_has_username(rich.ascii()));
+    }
+
+    #[tokio::test]
+    #[ignore = "sends one message to the cleaner's own Saved Messages; set RICH_PROBE=1"]
+    async fn a_live_rich_message_trips_the_text_locks() {
+        if std::env::var("RICH_PROBE").as_deref() != Ok("1") {
+            eprintln!("RICH_PROBE is not 1: nothing sent");
+            return;
+        }
+        let api_id: i32 = std::env::var("TG_ID").unwrap().trim().parse().unwrap();
+        let copy = std::env::temp_dir().join("groupbot_rich_probe.session");
+        std::fs::copy(super::super::super::USER_SESSION_FILE, &copy).unwrap();
+        let session = std::sync::Arc::new(
+            grammers_client::session::storages::SqliteSession::open(&copy)
+                .await
+                .unwrap(),
+        );
+        let grammers_client::SenderPool { runner, handle, .. } =
+            grammers_client::SenderPool::new(session, api_id);
+        let runner = tokio::spawn(runner.run());
+        let client = grammers_client::Client::new(handle.clone());
+        assert!(
+            client.is_authorized().await.unwrap(),
+            "cleaner.session is signed out"
+        );
+        let me = client
+            .get_me()
+            .await
+            .unwrap()
+            .to_ref()
+            .await
+            .unwrap()
+            .unwrap();
+
+        let markdown =
+            "# probe\n\nbuy at spam.com now, ask @spamchannel, `evil.ir`\n\n#ad https://t.me/spam";
+        client
+            .invoke(&tl::functions::messages::SendMessage {
+                no_webpage: true,
+                silent: true,
+                background: false,
+                clear_draft: false,
+                noforwards: false,
+                update_stickersets_order: false,
+                invert_media: false,
+                allow_paid_floodskip: false,
+                peer: tl::enums::InputPeer::PeerSelf,
+                reply_to: None,
+                message: String::new(),
+                random_id: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as i64,
+                reply_markup: None,
+                entities: None,
+                schedule_date: None,
+                schedule_repeat_period: None,
+                send_as: None,
+                quick_reply_shortcut: None,
+                effect: None,
+                allow_paid_stars: None,
+                suggested_post: None,
+                rich_message: Some(
+                    tl::types::InputRichMessageMarkdown {
+                        rtl: false,
+                        noautolink: false,
+                        markdown: markdown.into(),
+                        files: None,
+                    }
+                    .into(),
+                ),
+            })
+            .await
+            .unwrap();
+        let message = client
+            .iter_messages(me)
+            .limit(1)
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
+        let deleted = client.delete_messages(me, &[message.id()]).await;
+
+        let view = View::new(&message);
+        let rich = view
+            .rich
+            .as_ref()
+            .expect("Telegram returned no rich_message");
+        println!("text field: {:?}", message.text());
+        println!("rich text: {:?}", rich.raw);
+        println!("rich entities: {:?}", rich.entities);
+        let verdicts = [
+            ("link", is_link(&view)),
+            ("username", is_username(&view)),
+            ("hashtag", is_hashtag(&view)),
+            ("promoter", is_promoter(&view)),
+            ("english", has_english(&view)),
+        ];
+        println!("verdicts: {verdicts:?}");
+        deleted.unwrap();
+        runner.abort();
+        let _ = std::fs::remove_file(&copy);
+        for (lock, tripped) in verdicts {
+            assert!(tripped, "the {lock} lock did not see the live rich message");
+        }
     }
 }

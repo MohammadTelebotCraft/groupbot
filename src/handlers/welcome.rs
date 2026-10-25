@@ -21,9 +21,46 @@ pub const TTL_PRESETS: &[u32] = &[0, 10, 30, 60, 300, 900];
 
 pub const INSTALL_TTL: u32 = 10;
 
-pub const SET: &[&str] = &["تنظیم خوشامد", "خوشامد", "خوش امد"];
-pub const CLEAR: &[&str] = &["حذف خوشامد", "خاموش خوشامد"];
-pub const SHOW: &[&str] = &["نمایش خوشامد", "تست خوشامد"];
+pub const SET: &[&str] = &[
+    "تنظیم پیام خوشامد",
+    "تنظیم خوش آمدگویی",
+    "تنظیم خوشامدگویی",
+    "تنظیم خوش آمد",
+    "تنظیم خوش امد",
+    "تنظیم خوشامد",
+    "/setwelcome",
+    "/welcome",
+    "خوشامد",
+    "خوش امد",
+    "/setgreeting",
+];
+pub const CLEAR: &[&str] = &[
+    "حذف خوشامد",
+    "خاموش خوشامد",
+    "حذف خوش آمد",
+    "حذف خوش امد",
+    "حذف خوشامدگویی",
+    "حذف خوش آمدگویی",
+    "خاموش خوش آمد",
+    "خاموش خوشامدگویی",
+    "خوشامد خاموش",
+    "/delwelcome",
+    "/clearwelcome",
+    "/delgreeting",
+];
+pub const SHOW: &[&str] = &[
+    "نمایش خوشامد",
+    "تست خوشامد",
+    "نمایش خوش آمد",
+    "تست خوش آمد",
+    "نمایش خوشامدگویی",
+    "نمایش خوش آمدگویی",
+    "تست خوشامدگویی",
+    "تست خوش آمدگویی",
+    "/showwelcome",
+    "/testwelcome",
+    "/greeting",
+];
 
 const TAGS: &[(&str, &str)] = &[
     ("{نام}", "display name"),
@@ -51,7 +88,10 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
-    if CLEAR.contains(&text) {
+    if CLEAR
+        .iter()
+        .any(|command| super::commands::matches(text, command))
+    {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
@@ -82,7 +122,10 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    if SHOW.contains(&text) {
+    if SHOW
+        .iter()
+        .any(|command| super::commands::matches(text, command))
+    {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
@@ -95,11 +138,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    let Some((command, after, rest)) = SET.iter().find_map(|command| {
-        let after = text.strip_prefix(command)?;
-        (after.is_empty() || after.starts_with(char::is_whitespace))
-            .then(|| (*command, after, after.trim()))
-    }) else {
+    let Some((command, rest)) = parse_set(text) else {
         return false;
     };
     if !rest.is_empty() && !super::phrase_carries_text(command) {
@@ -124,9 +163,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         }
     } else {
         let raw = message.text();
-        let skipped = (raw.len() - raw.trim_start().len())
-            + command.len()
-            + (after.len() - after.trim_start().len());
+        let skipped = rest.as_ptr() as usize - raw.as_ptr() as usize;
         let shift = u16len(&raw[..skipped]);
         let carried = message
             .fmt_entities()
@@ -215,6 +252,12 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     true
 }
 
+fn parse_set(text: &str) -> Option<(&'static str, &str)> {
+    SET.iter().find_map(|command| {
+        super::commands::strip_prefix(text, command).map(|rest| (*command, rest))
+    })
+}
+
 pub async fn try_clear_stored(ctx: &Ctx, chat: i64) -> Result<(), SettingsWriteError> {
     ctx.settings
         .try_apply_batch(
@@ -268,7 +311,7 @@ fn rebase(
         .collect()
 }
 
-fn bounds(entity: &tl::enums::MessageEntity) -> Option<(i32, i32)> {
+pub(super) fn bounds(entity: &tl::enums::MessageEntity) -> Option<(i32, i32)> {
     use tl::enums::MessageEntity as E;
     Some(match entity {
         E::Unknown(e) => (e.offset, e.length),
@@ -292,11 +335,18 @@ fn bounds(entity: &tl::enums::MessageEntity) -> Option<(i32, i32)> {
         E::Spoiler(e) => (e.offset, e.length),
         E::CustomEmoji(e) => (e.offset, e.length),
         E::Blockquote(e) => (e.offset, e.length),
-        _ => return None,
+        E::FormattedDate(e) => (e.offset, e.length),
+        E::DiffInsert(e) => (e.offset, e.length),
+        E::DiffReplace(e) => (e.offset, e.length),
+        E::DiffDelete(e) => (e.offset, e.length),
     })
 }
 
-fn placed(entity: &tl::enums::MessageEntity, offset: i32, length: i32) -> tl::enums::MessageEntity {
+pub(super) fn placed(
+    entity: &tl::enums::MessageEntity,
+    offset: i32,
+    length: i32,
+) -> tl::enums::MessageEntity {
     use tl::enums::MessageEntity as E;
     let mut moved = entity.clone();
     match &mut moved {
@@ -321,7 +371,10 @@ fn placed(entity: &tl::enums::MessageEntity, offset: i32, length: i32) -> tl::en
         E::Spoiler(e) => (e.offset, e.length) = (offset, length),
         E::CustomEmoji(e) => (e.offset, e.length) = (offset, length),
         E::Blockquote(e) => (e.offset, e.length) = (offset, length),
-        _ => {}
+        E::FormattedDate(e) => (e.offset, e.length) = (offset, length),
+        E::DiffInsert(e) => (e.offset, e.length) = (offset, length),
+        E::DiffReplace(e) => (e.offset, e.length) = (offset, length),
+        E::DiffDelete(e) => (e.offset, e.length) = (offset, length),
     }
     moved
 }
@@ -716,6 +769,32 @@ mod tests {
 
     fn bold(offset: i32, length: i32) -> tl::enums::MessageEntity {
         tl::types::MessageEntityBold { offset, length }.into()
+    }
+
+    #[test]
+    fn normalized_welcome_aliases_keep_content_and_entity_offsets() {
+        let raw = "  تنظيم\u{200c}خوش\u{200c}آمدگويي\tHi كيان ۱۲ 😀  ";
+        let (command, tail) = parse_set(raw).unwrap();
+        assert_eq!(command, "تنظیم خوش آمدگویی");
+        assert_eq!(tail, "Hi كيان ۱۲ 😀");
+        let skipped = tail.as_ptr() as usize - raw.as_ptr() as usize;
+        assert_eq!(raw[skipped..].trim_end(), tail);
+        let shift = u16len(&raw[..skipped]);
+        let entities = rebase(
+            &[bold(shift, 2), emoji(shift + 11, 2, 123)],
+            shift,
+            u16len(tail),
+        );
+        assert_eq!(bounds(&entities[0]), Some((0, 2)));
+        assert_eq!(bounds(&entities[1]), Some((11, 2)));
+        assert_eq!(
+            parse_set("/SetWelcome Hello {نام}"),
+            Some(("/setwelcome", "Hello {نام}"))
+        );
+        assert_eq!(parse_set("/welcomes Hello"), None);
+        assert_eq!(parse_set("خوشامدگویی کردم"), None);
+        assert!(!super::super::phrase_carries_text("خوشامد"));
+        assert!(super::super::phrase_carries_text("/welcome"));
     }
 
     fn walk(

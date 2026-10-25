@@ -93,7 +93,7 @@ def plan(
     db_pool: int = 8,
     db_max_connections: int = 100,
     db_reserve_ratio: float = 0.20,
-    memory_per_shard_mb: int = 2_048,
+    memory_per_shard_mb: int = 4_096,
     host_memory_mb: int = 22_000,
     host_cpu_cores: int = 0,
     cpu_cores_per_shard: float = 0.0,
@@ -261,7 +261,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db-pool", type=int, default=8)
     parser.add_argument("--db-max-connections", type=int, default=100)
     parser.add_argument("--db-reserve-ratio", type=float, default=0.20)
-    parser.add_argument("--memory-per-shard-mb", type=int, default=2_048)
+    parser.add_argument("--memory-per-shard-mb", type=int, default=4_096)
     parser.add_argument("--host-memory-mb", type=int, default=22_000)
     parser.add_argument(
         "--host-cpu-cores",

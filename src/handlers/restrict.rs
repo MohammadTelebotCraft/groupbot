@@ -38,8 +38,6 @@ fn wipe_key(action: Action) -> Option<&'static str> {
     }
 }
 
-const WIPE_ROUNDS: usize = 32;
-
 const WIPE_CHUNK: usize = 100;
 
 pub fn remember(ctx: &Ctx, chat: i64, message: &Message) {
@@ -73,19 +71,15 @@ pub async fn wipe_history(
         return 0;
     };
 
-    let mut deleted = cleaner_wipe(ctx, chat_id, target).await;
-
     let mine = ctx.take_said(chat_id, user);
-    for chunk in mine.chunks(WIPE_CHUNK) {
-        match ctx.client.delete_messages_critical(chat, chunk).await {
-            Ok(gone) => deleted += gone,
-            Err(e) => {
-                eprintln!("wipe: {chat_id}: could not delete {} ids: {e}", chunk.len());
-                break;
-            }
-        }
+    let (cleaned, (said, failed)) = tokio::join!(
+        cleaner_wipe(ctx, chat_id, target),
+        super::delete_chunks(&ctx.client, chat, &mine, WIPE_CHUNK, true),
+    );
+    if let Some(e) = failed {
+        eprintln!("wipe: {chat_id}: could not delete remembered ids: {e}");
     }
-    deleted
+    cleaned + said
 }
 
 async fn cleaner_wipe(
@@ -93,8 +87,6 @@ async fn cleaner_wipe(
     chat_id: i64,
     target: grammers_client::session::types::PeerRef,
 ) -> usize {
-    use grammers_client::tl;
-
     let Some(user) = ctx.user_client() else {
         return 0;
     };
@@ -109,31 +101,22 @@ async fn cleaner_wipe(
         eprintln!("wipe: {chat_id}: cleaner could not find participant {user_id}");
         return 0;
     };
-    let mut deleted = 0;
-    for _ in 0..WIPE_ROUNDS {
-        let asked = user
-            .invoke_outbound_critical(&tl::functions::channels::DeleteParticipantHistory {
-                channel: chat_ref.into(),
-                participant: target.into(),
-            })
-            .await;
-        match asked {
-            Ok(tl::enums::messages::AffectedHistory::History(done)) => {
-                deleted += done.pts_count.max(0) as usize;
-                if done.offset == 0 {
-                    break;
-                }
-            }
-            Err(e) => {
-                eprintln!("wipe: {chat_id}: cleaner could not clear history: {e}");
-                break;
-            }
-        }
+    let history = super::cleaner::delete_history(&user, chat_ref, target).await;
+    if let Some(e) = &history.error {
+        eprintln!("wipe: {chat_id}: cleaner could not clear history: {e}");
     }
-    deleted
+    history.deleted
 }
 
 pub const COMMANDS: &[(&str, Action)] = &[
+    ("حذف میوت", Unmute),
+    ("رفع میوت", Unmute),
+    ("آن میوت", Unmute),
+    ("آنمیوت", Unmute),
+    ("رفع مسدودی", Unban),
+    ("حذف مسدودی", Unban),
+    ("آن بن", Unban),
+    ("آنبن", Unban),
     ("حذف سکوت", Unmute),
     ("حذف خفه", Unmute),
     ("حذف بن", Unban),
@@ -142,16 +125,55 @@ pub const COMMANDS: &[(&str, Action)] = &[
     ("رفع خفه", Unmute),
     ("رفع بن", Unban),
     ("رفع سیک", Unban),
+    ("رفع مسدودیت", Unban),
+    ("حذف مسدودیت", Unban),
+    ("سکوت کن", Mute),
+    ("میوت کن", Mute),
+    ("بن کن", Ban),
+    ("مسدود کن", Ban),
     ("سکوت", Mute),
+    ("میوت", Mute),
     ("خفه", Mute),
     ("بن", Ban),
+    ("مسدود", Ban),
+    ("مسدودسازی", Ban),
     ("سیک", Ban),
+    ("/mute", Mute),
+    ("/unmute", Unmute),
+    ("/ban", Ban),
+    ("/unban", Unban),
 ];
 
+const ORIGINAL_COMMANDS: &[&str] = &[
+    "حذف سکوت",
+    "حذف خفه",
+    "حذف بن",
+    "حذف سیک",
+    "رفع سکوت",
+    "رفع خفه",
+    "رفع بن",
+    "رفع سیک",
+    "سکوت",
+    "خفه",
+    "بن",
+    "سیک",
+];
+
+fn preserves_custom_alias(text: &str) -> bool {
+    !text.starts_with('/')
+        && !ORIGINAL_COMMANDS
+            .iter()
+            .any(|command| super::commands::strip_prefix(text, command).is_some())
+}
+
 pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
-    let Some(parsed) = parse(view.digits()) else {
+    let text = view.command();
+    let Some(parsed) = parse(text) else {
         return false;
     };
+    if preserves_custom_alias(text) && handle_custom(ctx, message, view).await {
+        return true;
+    }
     run(ctx, message, parsed).await
 }
 
@@ -176,48 +198,64 @@ pub async fn handle_custom(ctx: &Ctx, message: &Message, view: &super::locks::Vi
     if ctx.settings.indexed_empty(chat, CUSTOM_PREFIX) {
         return false;
     }
-    let text = view.digits();
-    let words: Vec<&str> = text
-        .split_whitespace()
-        .take(MAX_TRIGGER_WORDS + 1)
-        .collect();
-    let candidates = trigger_candidates(&words);
-
-    let raw = view.text();
-    let legacy = (raw != text).then(|| {
-        let words: Vec<&str> = raw.split_whitespace().take(MAX_TRIGGER_WORDS + 1).collect();
-        let candidates = trigger_candidates(&words);
-        (words, candidates)
-    });
-
-    let found = ctx.settings.with_chat(chat, |settings| {
-        let hit = |candidates: Vec<(usize, String)>| {
-            candidates.into_iter().find_map(|(count, candidate)| {
-                let action = action_of_code(settings.value(&custom_key(&candidate))?)?;
-                Some((count, action))
-            })
-        };
-        match hit(candidates) {
-            Some(found) => Some((false, found)),
-            None => legacy
-                .as_ref()
-                .and_then(|(_, candidates)| hit(candidates.clone()))
-                .map(|found| (true, found)),
+    let candidates = custom_candidates(&[view.command(), view.digits(), view.text()]);
+    let mut actions = vec![None; candidates.len()];
+    ctx.settings.with_chat(chat, |settings| {
+        for (candidate, action) in candidates.iter().zip(&mut actions) {
+            *action = settings.value(&candidate.key).and_then(action_of_code);
         }
     });
-    let Some((was_legacy, (consumed, action))) = found else {
+    let Some(parsed) = choose_custom_candidate(&candidates, &actions) else {
         return false;
     };
-    let (text, words) = match (was_legacy, &legacy) {
-        (true, Some((words, _))) => (raw, words),
-        _ => (text, &words),
-    };
-    run(
-        ctx,
-        message,
-        parse_rest(action, tail_after(text, words, consumed)),
-    )
-    .await
+    run(ctx, message, parsed).await
+}
+
+struct CustomCandidate<'a> {
+    key: String,
+    specificity: usize,
+    tail: &'a str,
+}
+
+fn custom_candidates<'a>(spellings: &[&'a str]) -> Vec<CustomCandidate<'a>> {
+    let mut candidates = Vec::new();
+    for (index, &text) in spellings.iter().enumerate() {
+        if spellings[..index].contains(&text) {
+            continue;
+        }
+        let words: Vec<_> = text
+            .split_whitespace()
+            .take(MAX_TRIGGER_WORDS + 1)
+            .collect();
+        for (consumed, phrase) in trigger_candidates(&words) {
+            candidates.push(CustomCandidate {
+                key: custom_key(&phrase),
+                specificity: normalize_phrase(&phrase).len(),
+                tail: tail_after(text, &words, consumed),
+            });
+        }
+    }
+    candidates
+}
+
+fn choose_custom_candidate<'a>(
+    candidates: &[CustomCandidate<'a>],
+    actions: &[Option<Action>],
+) -> Option<Parsed<'a>> {
+    let mut chosen = None;
+    let mut specificity = 0;
+    for (candidate, action) in candidates.iter().zip(actions) {
+        let Some(action) = *action else { continue };
+        if candidate.specificity <= specificity {
+            continue;
+        }
+        let parsed = parse_rest(action, candidate.tail);
+        if parsed.complete && parsed.target.is_none_or(super::arg_names_a_user) {
+            specificity = candidate.specificity;
+            chosen = Some(parsed);
+        }
+    }
+    chosen
 }
 
 fn tail_after<'a>(text: &'a str, words: &[&str], consumed: usize) -> &'a str {
@@ -236,6 +274,9 @@ fn trigger_candidates(words: &[&str]) -> Vec<(usize, String)> {
 }
 
 async fn run(ctx: &Ctx, message: &Message, parsed: Parsed<'_>) -> bool {
+    if !parsed.complete {
+        return false;
+    }
     let (action, arg) = (parsed.action, parsed.target);
 
     let Some(named) = super::named(message, arg) else {
@@ -1130,6 +1171,8 @@ async fn apply_rights(
 struct Parsed<'a> {
     action: Action,
 
+    complete: bool,
+
     target: Option<&'a str>,
 
     duration: Option<Duration>,
@@ -1145,21 +1188,33 @@ const UNITS: &[(&str, u64)] = &[
     ("هفته", 604_800),
     ("ماه", 2_592_000),
     ("s", 1),
+    ("sec", 1),
+    ("secs", 1),
+    ("second", 1),
+    ("seconds", 1),
     ("m", 60),
+    ("min", 60),
+    ("mins", 60),
+    ("minute", 60),
+    ("minutes", 60),
     ("h", 3600),
+    ("hr", 3600),
+    ("hrs", 3600),
+    ("hour", 3600),
+    ("hours", 3600),
     ("d", 86_400),
+    ("day", 86_400),
+    ("days", 86_400),
     ("w", 604_800),
+    ("week", 604_800),
+    ("weeks", 604_800),
+    ("month", 2_592_000),
+    ("months", 2_592_000),
 ];
 
 fn parse(text: &str) -> Option<Parsed<'_>> {
     let (action, rest) = COMMANDS.iter().find_map(|&(cmd, action)| {
-        let rest = text.strip_prefix(cmd)?;
-
-        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            Some((action, rest.trim()))
-        } else {
-            None
-        }
+        super::commands::strip_prefix(text, cmd).map(|rest| (action, rest))
     })?;
     Some(parse_rest(action, rest))
 }
@@ -1167,6 +1222,7 @@ fn parse(text: &str) -> Option<Parsed<'_>> {
 fn parse_rest(action: Action, rest: &str) -> Parsed<'_> {
     let mut parsed = Parsed {
         action,
+        complete: true,
         target: None,
         duration: None,
         duration_text: None,
@@ -1176,6 +1232,9 @@ fn parse_rest(action: Action, rest: &str) -> Parsed<'_> {
     let mut i = 0;
     while i < words.len() {
         if let Some((secs, end)) = duration_at(&words, i) {
+            if parsed.duration.is_some() {
+                parsed.complete = false;
+            }
             parsed.duration = Some(Duration::from_secs(secs));
             parsed.duration_text = Some(slice_of(rest, &words, i, end));
             i = end;
@@ -1183,6 +1242,8 @@ fn parse_rest(action: Action, rest: &str) -> Parsed<'_> {
         }
         if parsed.target.is_none() {
             parsed.target = Some(words[i]);
+        } else {
+            parsed.complete = false;
         }
         i += 1;
     }
@@ -1190,7 +1251,8 @@ fn parse_rest(action: Action, rest: &str) -> Parsed<'_> {
 }
 
 fn duration_at(words: &[&str], i: usize) -> Option<(u64, usize)> {
-    let word = words[i];
+    let normalized = super::commands::normalize(words[i]);
+    let word = normalized.as_ref();
 
     let split = word
         .find(|c: char| !c.is_ascii_digit())
@@ -1198,20 +1260,27 @@ fn duration_at(words: &[&str], i: usize) -> Option<(u64, usize)> {
     let (digits, tail) = word.split_at(split);
     let amount: u64 = digits.parse().ok()?;
     if !tail.is_empty() {
-        return unit_secs(tail).map(|secs| (amount * secs, i + 1));
+        return unit_secs(tail)
+            .and_then(|secs| amount.checked_mul(secs))
+            .map(|seconds| (seconds, i + 1));
     }
     let unit = words.get(i + 1)?;
-    unit_secs(unit).map(|secs| (amount * secs, i + 2))
+    unit_secs(unit)
+        .and_then(|secs| amount.checked_mul(secs))
+        .map(|seconds| (seconds, i + 2))
 }
 
 fn unit_secs(word: &str) -> Option<u64> {
+    let normalized = super::commands::normalize(word);
     UNITS
         .iter()
-        .find(|(name, _)| *name == word)
+        .find(|(name, _)| *name == normalized)
         .map(|(_, secs)| *secs)
 }
 
 pub(crate) fn duration_of(tail: &str) -> Option<Duration> {
+    let normalized = super::commands::normalize(tail);
+    let tail = normalized.as_ref();
     let words: Vec<&str> = tail.split_whitespace().collect();
     if words.is_empty() {
         return None;
@@ -1241,14 +1310,33 @@ const MAX_CUSTOM_TRIGGER_CHARS: usize = 40;
 
 const MAX_TRIGGER_WORDS: usize = 4;
 
-pub const CUSTOM_SET: &[&str] = &["تنظیم دستور", "افزودن دستور"];
-pub const CUSTOM_REMOVE: &[&str] = &["حذف دستور", "پاک دستور"];
+pub const CUSTOM_SET: &[&str] = &[
+    "تنظیم دستور",
+    "افزودن دستور",
+    "ثبت دستور",
+    "اضافه کردن دستور",
+    "/setcommand",
+    "/addcommand",
+];
+pub const CUSTOM_REMOVE: &[&str] = &[
+    "حذف دستور",
+    "پاک دستور",
+    "پاک کردن دستور",
+    "/delcommand",
+    "/removecommand",
+];
 
 const ACTION_WORDS: &[(&str, Action)] = &[
     ("بن", Ban),
+    ("مسدود", Ban),
+    ("ban", Ban),
     ("سیک", Ban),
     ("کیک", Kick),
+    ("اخراج", Kick),
+    ("kick", Kick),
     ("سکوت", Mute),
+    ("میوت", Mute),
+    ("mute", Mute),
     ("خفه", Mute),
 ];
 
@@ -1295,29 +1383,43 @@ pub fn custom_triggers(ctx: &Ctx, chat: i64) -> Vec<(String, Action)> {
 }
 
 fn normalize_phrase(phrase: &str) -> String {
-    super::digits(phrase)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+    super::commands::normalize(phrase).to_lowercase()
+}
+
+fn custom_spellings(phrase: &str) -> Vec<String> {
+    let digit_folded = super::digits(phrase);
+    let mut spellings = vec![normalize_phrase(phrase)];
+    for legacy in [digit_folded.as_ref(), phrase] {
+        let legacy = legacy
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        if !spellings.contains(&legacy) {
+            spellings.push(legacy);
+        }
+    }
+    spellings
 }
 
 fn strip_command<'a>(text: &'a str, commands: &[&str]) -> Option<&'a str> {
-    commands.iter().find_map(|command| {
-        let rest = text.strip_prefix(command)?;
-        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
-    })
+    commands
+        .iter()
+        .find_map(|command| super::commands::strip_prefix(text, command))
 }
 
 fn action_word(label: &str) -> Option<Action> {
     ACTION_WORDS
         .iter()
-        .find(|(name, _)| *name == label)
+        .find(|(name, _)| super::commands::matches(label, name))
         .map(|&(_, action)| action)
 }
 
 fn is_builtin_command(word: &str) -> bool {
-    COMMANDS.iter().any(|&(builtin, _)| builtin == word)
+    COMMANDS
+        .iter()
+        .any(|&(builtin, _)| super::commands::matches(word, builtin))
+        || super::commands::reserved_trigger(word)
 }
 
 async fn set_custom(ctx: &Ctx, message: &Message, chat: i64, rest: &str) -> bool {
@@ -1335,7 +1437,7 @@ async fn set_custom(ctx: &Ctx, message: &Message, chat: i64, rest: &str) -> bool
         .await;
         return true;
     }
-    let Some((word, label)) = rest.rsplit_once(char::is_whitespace) else {
+    let Some((word, label)) = rest.rsplit_once(super::commands::separator) else {
         return false;
     };
     let Some(action) = action_word(label) else {
@@ -1381,7 +1483,23 @@ async fn set_custom(ctx: &Ctx, message: &Message, chat: i64, rest: &str) -> bool
             ctx,
             message,
             ResponseKind::CommandError,
-            format!("«{}» از قبل یک دستور آماده ربات است.", esc(&word)),
+            format!(
+                "«{}» با یک دستور آماده ربات شروع می شود؛ نام دیگری انتخاب کنید.",
+                esc(&word)
+            ),
+        )
+        .await;
+        return true;
+    }
+    if super::answers::triggers(ctx, chat)
+        .iter()
+        .any(|trigger| super::commands::normalize(trigger).as_ref() == word)
+    {
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::CommandError,
+            format!("«{}» از قبل برای یک پاسخ استفاده می شود.", esc(&word)),
         )
         .await;
         return true;
@@ -1449,33 +1567,15 @@ async fn remove_custom(ctx: &Ctx, message: &Message, chat: i64, rest: &str) -> b
         return true;
     }
     let word = normalize_phrase(rest);
-    let normalized_key = custom_key(&word);
-    let legacy = rest
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-    let legacy_key = (legacy != word).then(|| custom_key(&legacy));
-    let result = match legacy_key.as_deref() {
-        Some(legacy_key) => {
-            ctx.settings
-                .try_apply_batch(
-                    chat,
-                    &[
-                        crate::state::SettingMutation::Delete {
-                            key: &normalized_key,
-                        },
-                        crate::state::SettingMutation::Delete { key: legacy_key },
-                    ],
-                )
-                .await
-        }
-        None => ctx
-            .settings
-            .try_set(chat, &normalized_key, false)
-            .await
-            .map(usize::from),
-    };
+    let keys: Vec<_> = custom_spellings(rest)
+        .iter()
+        .map(|word| custom_key(word))
+        .collect();
+    let mutations: Vec<_> = keys
+        .iter()
+        .map(|key| crate::state::SettingMutation::Delete { key })
+        .collect();
+    let result = ctx.settings.try_apply_batch(chat, &mutations).await;
     let existed = match result {
         Ok(changed) => changed != 0,
         Err(error) => {
@@ -1576,6 +1676,110 @@ mod tests {
     }
 
     #[test]
+    fn common_duration_units_and_keyboard_variants_are_consistent() {
+        for (tail, seconds) in [
+            ("۲ MINUTES", 120),
+            ("٣hrs", 10_800),
+            ("۱\u{200c}دقيقه", 60),
+            ("2days", 172_800),
+            ("1 second", 1),
+        ] {
+            assert_eq!(
+                duration_of(tail),
+                Some(Duration::from_secs(seconds)),
+                "{tail}"
+            );
+        }
+        assert_eq!(duration_of("18446744073709551615 months"), None);
+        assert_eq!(duration_of("2 hrs later"), None);
+    }
+
+    #[test]
+    fn restriction_aliases_preserve_targets_and_decline_unused_tail_tokens() {
+        let parsed = p("رفع\u{200c}ميوت @Ali");
+        assert_eq!(parsed.action, Unmute);
+        assert_eq!(parsed.target, Some("@Ali"));
+        assert!(parsed.complete);
+        assert_eq!(
+            p("/BAN @Ali ۲hours").duration,
+            Some(Duration::from_secs(7_200))
+        );
+        for text in ["بن @Ali لطفا", "بن @Ali @Bob", "بن @Ali 2h 3h"] {
+            assert!(!p(text).complete, "{text}");
+        }
+        assert!(parse("/banish @Ali").is_none());
+    }
+
+    #[test]
+    fn custom_commands_keep_pre_normalization_storage_spellings_removable() {
+        assert_eq!(normalize_phrase("بيرون\u{200c}كن  ۲"), "بیرون کن 2");
+        assert_eq!(
+            custom_spellings("بيرون\u{200c}كن  ۲"),
+            vec!["بیرون کن 2", "بیرون\u{200c}کن 2", "بيرون\u{200c}كن ۲"]
+        );
+        assert_eq!(custom_spellings("simple"), vec!["simple"]);
+        assert_eq!(action_word("MUTE"), Some(Mute));
+    }
+
+    #[test]
+    fn longer_legacy_custom_trigger_beats_a_short_normalized_hit() {
+        let raw = "بیرون\u{200c}کن @Ali";
+        let normalized = super::super::commands::normalize(raw);
+        let candidates = custom_candidates(&[normalized.as_ref(), raw]);
+        let actions: Vec<_> = candidates
+            .iter()
+            .map(|candidate| match candidate.key.as_str() {
+                "cmd:بیرون" => Some(Ban),
+                "cmd:بیرون\u{200c}کن" => Some(Kick),
+                _ => None,
+            })
+            .collect();
+        let parsed = choose_custom_candidate(&candidates, &actions)
+            .expect("the legacy trigger remains usable");
+        assert_eq!(parsed.action, Kick);
+        assert_eq!(parsed.target, Some("@Ali"));
+        assert!(parsed.complete);
+
+        let raw = "بیرون\u{200c}2h @Ali";
+        let normalized = super::super::commands::normalize(raw);
+        let candidates = custom_candidates(&[normalized.as_ref(), raw]);
+        let actions: Vec<_> = candidates
+            .iter()
+            .map(|candidate| match candidate.key.as_str() {
+                "cmd:بیرون" => Some(Ban),
+                "cmd:بیرون\u{200c}2h" => Some(Kick),
+                _ => None,
+            })
+            .collect();
+        let parsed = choose_custom_candidate(&candidates, &actions).unwrap();
+        assert_eq!(parsed.action, Kick);
+        assert_eq!(parsed.target, Some("@Ali"));
+        assert_eq!(parsed.duration, None);
+    }
+
+    #[test]
+    fn new_persian_restriction_aliases_keep_existing_custom_actions() {
+        assert!(preserves_custom_alias("میوت @Ali"));
+        assert!(!preserves_custom_alias("سکوت @Ali"));
+        assert!(!preserves_custom_alias("رفع سکوت @Ali"));
+        assert!(
+            !preserves_custom_alias("/ban @Ali"),
+            "slash custom priority belongs to dispatch"
+        );
+        let candidates = custom_candidates(&["میوت @Ali"]);
+        let actions: Vec<_> = candidates
+            .iter()
+            .map(|candidate| (candidate.key == "cmd:میوت").then_some(Kick))
+            .collect();
+        assert_eq!(
+            choose_custom_candidate(&candidates, &actions)
+                .unwrap()
+                .action,
+            Kick
+        );
+    }
+
+    #[test]
     fn the_argument_must_name_a_user() {
         use super::super::arg_names_a_user as names;
         let word = "میکنم";
@@ -1612,6 +1816,10 @@ mod tests {
         assert_eq!(p("سیک").action, Ban);
         assert_eq!(p("خفه @someone").target, Some("@someone"));
         assert_eq!(p("حذف سیک 12345").target, Some("12345"));
+        assert_eq!(p("بن کن @someone").action, Ban);
+        assert_eq!(p("بن کن @someone").target, Some("@someone"));
+        assert_eq!(p("سکوت کن 10 دقیقه").target, None);
+        assert_eq!(p("رفع مسدودیت 12345").action, Unban);
         assert!(parse("سکوتی").is_none());
         assert!(parse("سلام").is_none());
     }
@@ -1691,6 +1899,22 @@ mod tests {
             assert!(is_builtin_command(builtin));
         }
         assert!(!is_builtin_command("زنجیر"));
+        for word in [
+            "/ban",
+            "/purge",
+            "/warn",
+            "/PURGE",
+            "/lock photos",
+            "پنل",
+            "قوانین",
+            "قفل عکس",
+        ] {
+            assert!(
+                is_builtin_command(word),
+                "{word} is reserved for a built-in command"
+            );
+        }
+        assert!(!is_builtin_command("/myshortcut"));
     }
 
     #[test]

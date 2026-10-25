@@ -1,4 +1,3 @@
-
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -51,7 +50,7 @@ pub async fn apply(
         Err(error) if error.invalid_night_window() => {
             return (
                 StatusCode::BAD_REQUEST,
-                axum::Json(json!({ "error": "شروع و پایان قفل شب نمی‌تواند یکسان باشد." })),
+                axum::Json(json!({ "error": "شروع و پایان قفل شب نمی تواند یکسان باشد." })),
             )
                 .into_response();
         }

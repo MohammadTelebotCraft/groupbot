@@ -38,22 +38,30 @@ fn number(ctx: &Ctx, chat: i64, key: &str, default: u32, range: (u32, u32)) -> u
         .with_chat(chat, |settings| settings.number(key, default, range))
 }
 
-pub const COMMANDS: &[&str] = &["ضد رگبار", "ضدرگبار", "ضد فلاد"];
+pub const COMMANDS: &[&str] = &[
+    "ضد رگبار",
+    "ضدرگبار",
+    "ضد فلاد",
+    "ضدفلاد",
+    "ضد اسپم",
+    "ضداسپم",
+    "/antiflood",
+    "/flood",
+];
+
+fn parse(text: &str) -> Option<Vec<u32>> {
+    let rest = COMMANDS
+        .iter()
+        .find_map(|command| super::commands::strip_prefix(text, command))?;
+    super::numbers_in(rest)
+}
 
 pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
-    let text = view.digits();
-    let Some(rest) = COMMANDS.iter().find_map(|command| {
-        let rest = text.strip_prefix(command)?;
-        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim().to_owned())
-    }) else {
+    let Some(numbers) = parse(view.command()) else {
         return false;
     };
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
-    };
-    let numbers = match super::numbers_in(&rest) {
-        Some(numbers) => numbers,
-        None => return false,
     };
     if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
@@ -204,4 +212,18 @@ pub async fn check(ctx: &Ctx, message: &Message) -> bool {
             .await;
     }
     true
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn flood_aliases_accept_keyboard_variants_without_extra_words() {
+        for text in ["ضد\u{200c}رگبار ۱۰ ۵", "ضد  اسپم ۱۰ ۵", "/ANTIFLOOD 10 5"] {
+            assert_eq!(parse(text), Some(vec![10, 5]), "{text}");
+        }
+        assert_eq!(parse("ضد اسپم 10 5 لطفا"), None);
+        assert_eq!(parse("ضداسپمی 10 5"), None);
+    }
 }

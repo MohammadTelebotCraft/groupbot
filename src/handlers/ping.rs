@@ -5,10 +5,18 @@ use grammers_client::message::Message;
 use super::Ctx;
 use crate::response::ResponseKind;
 
-pub const COMMANDS: &[&str] = &["پینگ", "ping", "وضعیت ربات", "سرعت"];
+pub const COMMANDS: &[&str] = &[
+    "پینگ",
+    "ping",
+    "/ping",
+    "وضعیت ربات",
+    "سرعت",
+    "سرعت ربات",
+    "/speed",
+];
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
-    if !COMMANDS.contains(&message.text().trim()) {
+    if !super::commands::contains(COMMANDS, message.text()) {
         return false;
     }
 

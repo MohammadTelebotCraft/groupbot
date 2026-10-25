@@ -1,4 +1,3 @@
-
 mod api;
 mod auth;
 mod cases;
@@ -8,10 +7,12 @@ mod frontend;
 mod lists;
 mod locks;
 mod misc;
+mod more;
 mod overview;
 mod response_policy;
 mod settings;
 mod voice;
+mod words;
 
 use std::sync::Arc;
 

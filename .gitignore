@@ -11,6 +11,7 @@ groupbot.locks
 *.sql.gz
 *.md
 !README.md
+/audit/
 assets/clip.onnx
 
 # The general model and its text tower, built by tools/export_vision.py. Too big for GitHub,

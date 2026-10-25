@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 
 use grammers_client::message::{Button, Message, ReplyMarkup};
@@ -7,7 +6,27 @@ use grammers_client::update::CallbackQuery;
 
 use super::{Ctx, esc};
 
-pub const COMMANDS: &[&str] = &["داشبورد", "پنل کل", "آمار کل", "سودو"];
+pub const COMMANDS: &[&str] = &[
+    "داشبورد",
+    "پنل کل",
+    "آمار کل",
+    "سودو",
+    "/sudo",
+    "/dashboard",
+    "/sudopanel",
+];
+
+fn section(text: &str) -> Option<&'static str> {
+    COMMANDS.iter().find_map(|command| {
+        let rest = super::commands::strip_prefix(text, command)?;
+        match super::commands::normalize(rest).as_ref() {
+            "" | "خلاصه" | "summary" => Some("sum"),
+            "شلوغ ترین ها" | "top" => Some("top"),
+            "امکانات" | "use" => Some("use"),
+            _ => None,
+        }
+    })
+}
 
 const BUSIEST: i64 = 10;
 
@@ -36,9 +55,9 @@ fn tracked() -> Vec<(&'static str, &'static str)> {
 }
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
-    if !COMMANDS.contains(&message.text().trim()) {
+    let Some(section) = section(message.text()) else {
         return false;
-    }
+    };
     let Some(opener) = message.sender_id().and_then(PeerId::bare_id) else {
         return false;
     };
@@ -46,9 +65,9 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return false;
     }
 
-    let card = match page(ctx, "sum").await {
+    let card = match page(ctx, section).await {
         Ok(page) => super::premium::icon_html(Some(super::premium::Icon::Settings), page)
-            .reply_markup(markup(opener, "sum")),
+            .reply_markup(markup(opener, section)),
         Err(error) => {
             log::warn!("sudo dashboard: summary read failed: {error}");
             super::premium::icon_text(
@@ -205,6 +224,18 @@ fn markup(opener: i64, current: &str) -> ReplyMarkup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_dashboard_page_has_a_text_command() {
+        for (text, page) in [
+            ("داشبورد", "sum"),
+            ("داشبورد شلوغ ترین ها", "top"),
+            ("/SUDO use", "use"),
+        ] {
+            assert_eq!(section(text), Some(page));
+        }
+        assert_eq!(section("داشبورد یعنی چی"), None);
+    }
 
     #[test]
     fn every_payload_fits_a_callback() {

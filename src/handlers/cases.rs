@@ -16,20 +16,57 @@ use crate::state::{
 use super::restrict::{self, Action};
 use super::{Ctx, esc, name_of};
 
-pub const LIST: &[&str] = &["پرونده ها", "پرونده‌ها", "لیست پرونده"];
+pub const LIST: &[&str] = &[
+    "پرونده ها",
+    "لیست پرونده",
+    "لیست پرونده ها",
+    "فهرست پرونده ها",
+    "/cases",
+    "/caselist",
+];
 pub const SHOW: &str = "پرونده";
 pub const HISTORY: &str = "تاریخچه";
 pub const CLOSE: &str = "بستن پرونده";
 pub const REVERSE: &str = "لغو پرونده";
-#[cfg(test)]
-pub const COMMANDS: &[&str] = &[
-    "پرونده",
-    "پرونده ها",
-    "پرونده‌ها",
-    "لیست پرونده",
-    "تاریخچه",
-    "بستن پرونده",
-    "لغو پرونده",
+pub const DELETE_MESSAGE: &str = "حذف پیام پرونده";
+pub const NOTE: &str = "یادداشت پرونده";
+pub const SHOW_ALIASES: &[&str] = &[
+    SHOW,
+    "نمایش پرونده",
+    "/case",
+    "مشاهده پرونده",
+    "/viewcase",
+];
+pub const HISTORY_ALIASES: &[&str] = &[
+    "تاریخچه کاربر",
+    "سوابق کاربر",
+    HISTORY,
+    "/history",
+    "سابقه کاربر",
+    "/userhistory",
+];
+pub const CLOSE_ALIASES: &[&str] = &[
+    CLOSE,
+    "مختومه پرونده",
+    "/closecase",
+    "/resolvecase",
+];
+pub const REVERSE_ALIASES: &[&str] = &[
+    REVERSE,
+    "برگرداندن پرونده",
+    "/reversecase",
+    "/undocase",
+];
+pub const DELETE_MESSAGE_ALIASES: &[&str] = &[
+    DELETE_MESSAGE,
+    "/deletecase",
+    "پاک کردن پیام پرونده",
+    "/delcasemessage",
+];
+pub const NOTE_ALIASES: &[&str] = &[
+    NOTE,
+    "/casenote",
+    "/addcasenote",
 ];
 pub const NOTE_MAX: usize = 500;
 pub const WRITTEN: &str = "moderation_case_written";
@@ -400,11 +437,13 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
     let history = history_argument(text).and_then(|arg| super::named(message, arg));
-    let command = LIST.contains(&text)
+    let command = super::commands::contains(LIST, text)
         || history.is_some()
         || exact_case_id(text, SHOW)
         || case_id_and_note(text, CLOSE)
-        || case_id_and_note(text, REVERSE);
+        || case_id_and_note(text, REVERSE)
+        || exact_case_id(text, DELETE_MESSAGE)
+        || case_id_and_note(text, NOTE);
     if !command {
         return false;
     }
@@ -413,15 +452,15 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     }
     let actor = super::sender_of(message);
     let actor = actor.as_ref().map(|(id, name)| (*id, name.as_str()));
-    if LIST.contains(&text) {
+    if super::commands::contains(LIST, text) {
         show_list(ctx, message, chat, None).await;
-    } else if let Some(rest) = text.strip_prefix(CLOSE).map(str::trim) {
-        let Some((id, note)) = id_and_note(rest) else {
+    } else if let Some(rest) = case_tail(text, CLOSE) {
+        let Some((id, note)) = id_and_note(rest, text.starts_with('/')) else {
             super::respond(
                 ctx,
                 message,
                 crate::response::ResponseKind::CommandError,
-                "مثال: بستن پرونده ۱۲۳ [یادداشت]",
+                "مثال: بستن پرونده ۱۲۳: یادداشت",
             )
             .await;
             return true;
@@ -434,13 +473,13 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             reply,
         )
         .await;
-    } else if let Some(rest) = text.strip_prefix(REVERSE).map(str::trim) {
-        let Some((id, note)) = id_and_note(rest) else {
+    } else if let Some(rest) = case_tail(text, REVERSE) {
+        let Some((id, note)) = id_and_note(rest, text.starts_with('/')) else {
             super::respond(
                 ctx,
                 message,
                 crate::response::ResponseKind::CommandError,
-                "مثال: لغو پرونده ۱۲۳ [یادداشت]",
+                "مثال: لغو پرونده ۱۲۳: یادداشت",
             )
             .await;
             return true;
@@ -453,8 +492,62 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             reply,
         )
         .await;
-    } else if let Some(rest) = text.strip_prefix(SHOW).map(str::trim) {
-        match rest.parse::<i64>() {
+    } else if let Some(rest) = case_tail(text, DELETE_MESSAGE) {
+        if !super::limits::allows(ctx, message, super::limits::CLEAN).await {
+            return true;
+        }
+        let Ok(id) = super::digits(rest).parse::<i64>() else {
+            return false;
+        };
+        let reply = resolve_delete(ctx, chat, id, actor).await;
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::ModerationConfirmation,
+            reply,
+        )
+        .await;
+    } else if let Some(rest) = case_tail(text, NOTE) {
+        let Some((id, Some(note))) = id_and_note(rest, text.starts_with('/')) else {
+            super::respond(
+                ctx,
+                message,
+                crate::response::ResponseKind::CommandError,
+                "مثال: یادداشت پرونده ۱۲۳: دلیل بررسی",
+            )
+            .await;
+            return true;
+        };
+        let reply = match valid_note(Some(&note)) {
+            Err(error) => error.to_owned(),
+            Ok(()) => match ctx
+                .settings
+                .add_moderation_case_note(
+                    chat,
+                    id,
+                    actor.map(|(id, _)| id),
+                    actor.map_or("", |(_, name)| name),
+                    &note,
+                )
+                .await
+            {
+                Ok(true) => "✓ یادداشت پرونده ثبت شد.".to_owned(),
+                Ok(false) => "پرونده پیدا نشد.".to_owned(),
+                Err(error) => {
+                    log::warn!("case {id} note failed: {error}");
+                    "یادداشت ذخیره نشد؛ دوباره تلاش کنید.".to_owned()
+                }
+            },
+        };
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::ModerationConfirmation,
+            reply,
+        )
+        .await;
+    } else if let Some(rest) = case_tail(text, SHOW) {
+        match super::digits(rest).parse::<i64>() {
             Ok(id) => show_one(ctx, message, chat, id).await,
             Err(_) => {
                 super::respond(
@@ -486,26 +579,37 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
 }
 
 fn history_argument(text: &str) -> Option<Option<&str>> {
-    if text == HISTORY {
-        return Some(None);
-    }
-    let tail = text
-        .strip_prefix(HISTORY)?
-        .strip_prefix(char::is_whitespace)?;
-    let tail = tail.trim();
-    (tail.split_whitespace().count() == 1 && super::arg_names_a_user(tail)).then_some(Some(tail))
+    HISTORY_ALIASES.iter().find_map(|command| {
+        let tail = super::commands::strip_prefix(text, command)?;
+        if tail.is_empty() {
+            Some(None)
+        } else {
+            (tail.split_whitespace().count() == 1 && super::arg_names_a_user(tail))
+                .then_some(Some(tail))
+        }
+    })
+}
+
+fn case_tail<'a>(text: &'a str, command: &str) -> Option<&'a str> {
+    let aliases = match command {
+        SHOW => SHOW_ALIASES,
+        CLOSE => CLOSE_ALIASES,
+        REVERSE => REVERSE_ALIASES,
+        DELETE_MESSAGE => DELETE_MESSAGE_ALIASES,
+        NOTE => NOTE_ALIASES,
+        _ => return None,
+    };
+    aliases
+        .iter()
+        .find_map(|alias| super::commands::strip_prefix(text, alias))
 }
 
 fn exact_case_id(text: &str, command: &str) -> bool {
-    text.strip_prefix(command)
-        .and_then(|tail| tail.strip_prefix(char::is_whitespace))
-        .is_some_and(|tail| tail.trim().parse::<i64>().is_ok())
+    case_tail(text, command).is_some_and(|tail| super::digits(tail).parse::<i64>().is_ok())
 }
 
 fn case_id_and_note(text: &str, command: &str) -> bool {
-    text.strip_prefix(command)
-        .and_then(|tail| tail.strip_prefix(char::is_whitespace))
-        .is_some_and(|tail| id_and_note(tail.trim()).is_some())
+    case_tail(text, command).is_some_and(|tail| id_and_note(tail, text.starts_with('/')).is_some())
 }
 
 async fn show_list(ctx: &Ctx, message: &Message, chat: i64, subject: Option<i64>) {
@@ -519,7 +623,7 @@ async fn show_list(ctx: &Ctx, message: &Message, chat: i64, subject: Option<i64>
                 ctx,
                 message,
                 crate::response::ResponseKind::ModerationCaseDetails,
-                "پرونده‌ای پیدا نشد.",
+                "پرونده ای پیدا نشد.",
             )
             .await;
         }
@@ -531,7 +635,7 @@ async fn show_list(ctx: &Ctx, message: &Message, chat: i64, subject: Option<i64>
                 crate::response::ResponseKind::ModerationCaseDetails,
                 super::premium::icon_html(
                     Some(super::premium::Icon::DocumentActivity),
-                    format!("<b>پرونده‌ها</b>\n\n{body}"),
+                    format!("<b>پرونده ها</b>\n\n{body}"),
                 ),
             )
             .await;
@@ -544,7 +648,7 @@ async fn show_list(ctx: &Ctx, message: &Message, chat: i64, subject: Option<i64>
                 crate::response::ResponseKind::ModerationCaseDetails,
                 super::premium::icon_text(
                     Some(super::premium::Icon::ErrorRed),
-                    "پرونده‌ها خوانده نشد. کمی بعد دوباره امتحان کنید.",
+                    "پرونده ها خوانده نشد. کمی بعد دوباره امتحان کنید.",
                 ),
             )
             .await;
@@ -851,15 +955,22 @@ async fn transition_case(ctx: &Ctx, transition: ModerationCaseTransition<'_>) ->
     }
 }
 
-fn id_and_note(input: &str) -> Option<(i64, Option<String>)> {
-    let mut parts = input.splitn(2, char::is_whitespace);
-    let id = parts.next()?.parse().ok()?;
-    let note = parts
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
-    Some((id, note))
+fn id_and_note(input: &str, slash: bool) -> Option<(i64, Option<String>)> {
+    let input = input.trim();
+    let end = input
+        .find(|c: char| c.is_whitespace() || c == ':')
+        .unwrap_or(input.len());
+    let id = super::digits(&input[..end]).parse().ok()?;
+    let rest = input[end..].trim();
+    if rest.is_empty() {
+        return Some((id, None));
+    }
+    let note = match rest.strip_prefix(':') {
+        Some(note) => note.trim(),
+        None if slash => rest,
+        None => return None,
+    };
+    (!note.is_empty()).then(|| (id, Some(note.to_owned())))
 }
 
 pub(crate) fn valid_note(note: Option<&str>) -> Result<(), &'static str> {
@@ -987,6 +1098,26 @@ pub async fn run_retention(ctx: Arc<Ctx>, mut stopping: tokio::sync::watch::Rece
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn case_aliases_accept_local_digits_and_preserve_notes() {
+        assert!(exact_case_id("نمايش\tپرونده ۱۲٣", SHOW));
+        assert!(exact_case_id("/CASE ۱۲۳", SHOW));
+        assert!(!exact_case_id("/case@otherbot 123", SHOW));
+        assert!(!exact_case_id("/case 123 extra", SHOW));
+        let text = "بستن\u{200c}پرونده ۱۲۳: یادداشت\u{200c}من  AbC";
+        assert!(case_id_and_note(text, CLOSE));
+        assert_eq!(
+            id_and_note(case_tail(text, CLOSE).unwrap(), false),
+            Some((123, Some("یادداشت\u{200c}من  AbC".into())))
+        );
+        assert_eq!(
+            history_argument("سوابق کاربر @Some_User"),
+            Some(Some("@Some_User"))
+        );
+        assert_eq!(history_argument("تاريخچه\tکاربر ۱۲۳"), Some(Some("۱۲۳")));
+        assert_eq!(history_argument("تاریخچه کشور من"), None);
+        assert_eq!(history_argument("/history@otherbot @someone"), None);
+    }
     use super::*;
 
     #[test]
@@ -995,7 +1126,7 @@ mod tests {
         assert_eq!(history_argument("تاریخچه @ali"), Some(Some("@ali")));
         assert_eq!(history_argument("تاریخچه ۱۲۳۴"), Some(Some("۱۲۳۴")));
         assert_eq!(history_argument("تاریخچه خوبی نداری😭"), None);
-        assert_eq!(history_argument("تاریخچه‌ خوبی نداری"), None);
+        assert_eq!(history_argument("تاریخچه\u{200c} خوبی نداری"), None);
         assert_eq!(history_argument("تاریخچه @ali امروز"), None);
     }
 
@@ -1003,8 +1134,19 @@ mod tests {
     fn other_case_commands_have_closed_numeric_grammars() {
         assert!(exact_case_id("پرونده 123", SHOW));
         assert!(!exact_case_id("پرونده خوبی نیست", SHOW));
-        assert!(case_id_and_note("بستن پرونده 123 اشتباه بود", CLOSE));
+        assert!(!case_id_and_note("بستن پرونده 123 اشتباه بود", CLOSE));
+        assert!(case_id_and_note("بستن پرونده 123: اشتباه بود", CLOSE));
+        assert!(case_id_and_note("لغو پرونده 123 : اشتباه بود", REVERSE));
+        assert!(case_id_and_note("/closecase 123 اشتباه بود", CLOSE));
+        assert!(case_id_and_note("بستن پرونده 123", CLOSE));
+        assert!(!case_id_and_note("بستن پرونده 123:", CLOSE));
         assert!(!case_id_and_note("بستن پرونده کار سختی است", CLOSE));
+        assert!(exact_case_id("حذف پیام پرونده ۱۲۳", DELETE_MESSAGE));
+        assert!(exact_case_id("/DELETECASE 123", DELETE_MESSAGE));
+        assert!(!exact_case_id("حذف پیام پرونده 123 و بعد", DELETE_MESSAGE));
+        assert!(case_id_and_note("یادداشت پرونده 123: بررسی شد", NOTE));
+        assert!(case_id_and_note("/casenote 123 بررسی شد", NOTE));
+        assert!(!case_id_and_note("یادداشت پرونده 123 بررسی شد", NOTE));
     }
 
     #[test]

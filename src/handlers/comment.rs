@@ -1,4 +1,3 @@
-
 use std::sync::Arc;
 
 use grammers_client::message::Message;

@@ -1,5 +1,4 @@
-
-use grammers_client::message::Button;
+use grammers_client::message::{Button, Message};
 
 use crate::state::SettingsWriteError;
 
@@ -265,7 +264,7 @@ pub const SETTINGS: &[Setting] = &[
         id: "rk_on",
         key: super::stats::RANKS,
         label: "مقام خودکار",
-        section: "adv",
+        section: "msg",
         kind: Kind::Flag,
     },
     Setting {
@@ -887,6 +886,18 @@ pub async fn shown(ctx: &Ctx, chat: i64, setting: &Setting) -> Result<String, Ap
     }
 }
 
+async fn set_flag(ctx: &Ctx, chat: i64, setting: &Setting, on: bool) -> Result<(), ApplyError> {
+    if super::locks::LOCKS
+        .iter()
+        .any(|lock| lock.key == setting.key)
+    {
+        super::locks::try_set(ctx, chat, setting.key, on).await?;
+    } else if ctx.settings.is_locked(chat, setting.key) != on {
+        ctx.settings.try_set(chat, setting.key, on).await?;
+    }
+    Ok(())
+}
+
 pub async fn apply(
     ctx: &Ctx,
     chat: i64,
@@ -904,14 +915,7 @@ pub async fn apply(
         match &setting.kind {
             Kind::Flag if setting.id == action => {
                 let now_on = !ctx.settings.is_locked(chat, setting.key);
-                if super::locks::LOCKS
-                    .iter()
-                    .any(|lock| lock.key == setting.key)
-                {
-                    super::locks::try_set(ctx, chat, setting.key, now_on).await?;
-                } else {
-                    ctx.settings.try_set(chat, setting.key, now_on).await?;
-                }
+                set_flag(ctx, chat, setting, now_on).await?;
                 return Ok(Some((setting.section, ApplyStatus::Applied)));
             }
             Kind::Pick { options, .. } => {
@@ -993,9 +997,15 @@ pub fn rows(
                     .iter()
                     .map(|pick| {
                         let target = payload(pick.id);
-                        match (pick.danger, pick.value == current) {
-                            (true, _) => coloured(pick.label, target, Colour::Danger),
-                            (false, chosen) => choice(pick.label, target, chosen),
+                        let chosen = pick.value == current;
+                        let label = if chosen {
+                            format!("✓  {}", pick.label)
+                        } else {
+                            pick.label.to_owned()
+                        };
+                        match pick.danger {
+                            true => coloured(label, target, Colour::Danger),
+                            false => choice(label, target, chosen),
                         }
                     })
                     .collect(),
@@ -1079,9 +1089,362 @@ pub fn number_icon(id: &str) -> Option<super::premium::Icon> {
     }
 }
 
+pub const COMMANDS: &[&str] = &[
+    "تنظیم ویژگی",
+    "/set",
+    "/setting",
+];
+const COMMAND_NAMES: &[(&str, &str)] = &[
+    ("fl_on", "ضد رگبار"),
+    ("bt_on", "ضد خیانت"),
+    ("cp_on", "احراز هویت"),
+    ("nt_on", "اعلان حذف"),
+    ("rd_on", "ضد هجوم"),
+    ("strict", "سختگیرانه"),
+    ("lb_on", "بازگشت اعضا"),
+    ("vm_on", "نظارت ویس"),
+    ("wp_ban", "پاکسازی با بن"),
+    ("wp_mute", "پاکسازی با سکوت"),
+    ("rk_on", "مقام خودکار"),
+    ("tmed_on", "رسانه موقت"),
+    ("lim_on", "محدودیت مدیران"),
+    ("cq_shadow", "موضوعی فقط بررسی"),
+    ("ad_shadow", "تبلیغ تصویر فقط بررسی"),
+    ("tr_shadow", "خرید و فروش فقط بررسی"),
+    ("fl_lim", "ضد رگبار پیام"),
+    ("fl_win", "ضد رگبار ثانیه"),
+    ("bt_lim", "ضد خیانت حذف"),
+    ("bt_win", "ضد خیانت دقیقه"),
+    ("wn_lim", "اخطار سقف"),
+    ("s_lim", "سختگیرانه تخلف"),
+    ("s_time", "سختگیرانه مدت"),
+    ("rd_lim", "ضد هجوم عضو"),
+    ("rd_win", "ضد هجوم ثانیه"),
+    ("rd_time", "ضد هجوم مدت"),
+    ("cp_t", "احراز هویت مهلت"),
+    ("cp_n", "احراز هویت گزینه"),
+    ("nt_t", "اعلان حذف مدت"),
+    ("gpe", "اعلان شرط فاصله"),
+    ("wct", "خوشامد مدت"),
+    ("gpt", "اعلان شرط مدت"),
+    ("ad", "اد اجباری تعداد"),
+    ("tmed_min", "رسانه موقت مدت"),
+    ("cq_lim", "موضوعی حساسیت"),
+    ("tr_lim", "خرید و فروش حساسیت"),
+    ("apc", "پاکسازی خودکار تعداد"),
+    ("apt", "پاکسازی خودکار ساعت"),
+    ("dr", "گزارش روزانه ساعت"),
+    ("ngf", "قفل شب شروع"),
+    ("ngt", "قفل شب پایان"),
+    ("fl_act", "ضد رگبار برخورد"),
+    ("bl_on", "لینک بایو"),
+    ("bl_act", "لینک بایو برخورد"),
+    ("bt_act", "ضد خیانت برخورد"),
+    ("cp_act", "احراز هویت برخورد"),
+    ("wn_act", "اخطار برخورد"),
+    ("s_act", "سختگیرانه برخورد"),
+    ("tmed_who", "رسانه موقت مخاطب"),
+    ("an_act", "پاسخ خودکار مخاطب"),
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandValue {
+    Flag(bool),
+    Number(u32),
+    Pick(&'static str),
+}
+
+enum SettingCommand {
+    List,
+    Setting(&'static Setting, &'static str, Option<CommandValue>),
+}
+
+fn parse_command(text: &str) -> Option<SettingCommand> {
+    let tail = COMMANDS
+        .iter()
+        .find_map(|prefix| super::commands::strip_prefix(text, prefix))?;
+    let tail = tail.trim();
+    if tail.is_empty() || super::commands::contains(&["لیست", "راهنما"], tail) {
+        return Some(SettingCommand::List);
+    }
+    let (id, name, value) = COMMAND_NAMES
+        .iter()
+        .filter_map(|(id, name)| {
+            super::commands::strip_prefix(tail, name).map(|value| (*id, *name, value.trim()))
+        })
+        .min_by_key(|(_, _, value)| value.len())?;
+    let setting = find(id)?;
+    let value = if value.is_empty() {
+        None
+    } else {
+        Some(parse_command_value(setting, value)?)
+    };
+    Some(SettingCommand::Setting(setting, name, value))
+}
+
+fn parse_command_value(setting: &Setting, value: &str) -> Option<CommandValue> {
+    match &setting.kind {
+        Kind::Flag => {
+            if super::commands::contains(&["روشن", "فعال", "on", "1"], value) {
+                Some(CommandValue::Flag(true))
+            } else if super::commands::contains(&["خاموش", "غیرفعال", "off", "0"], value)
+            {
+                Some(CommandValue::Flag(false))
+            } else {
+                None
+            }
+        }
+        Kind::Number { range, .. } => {
+            let digits = super::digits(value);
+            let number = if *range == CLOCK {
+                if let Some((hour, minute)) = digits.split_once([':', '.']) {
+                    let (Ok(hour), Ok(minute)) = (hour.parse::<u32>(), minute.parse::<u32>())
+                    else {
+                        return None;
+                    };
+                    if hour > 23 || minute > 59 {
+                        return None;
+                    }
+                    hour * 60 + minute
+                } else {
+                    let hour = digits.parse::<u32>().ok()?;
+                    if hour > 23 {
+                        return None;
+                    }
+                    hour * 60
+                }
+            } else {
+                digits.parse::<u32>().ok()?
+            };
+            (range.0..=range.1)
+                .contains(&number)
+                .then_some(CommandValue::Number(number))
+        }
+        Kind::Pick { options, .. } => options
+            .iter()
+            .find(|pick| {
+                super::commands::matches(value, pick.label)
+                    || super::commands::matches(value, pick.value)
+            })
+            .map(|pick| CommandValue::Pick(pick.id)),
+    }
+}
+
+fn command_values(setting: &Setting) -> String {
+    match &setting.kind {
+        Kind::Flag => "روشن|خاموش".to_owned(),
+        Kind::Number { range, .. } if *range == CLOCK => "HH:MM".to_owned(),
+        Kind::Number { range, .. } => format!("{}..{}", range.0, range.1),
+        Kind::Pick { options, .. } => options
+            .iter()
+            .map(|pick| pick.label)
+            .collect::<Vec<_>>()
+            .join("|"),
+    }
+}
+
+async fn command_current(ctx: &Ctx, chat: i64, setting: &Setting) -> Result<String, ApplyError> {
+    match &setting.kind {
+        Kind::Flag => Ok(if ctx.settings.is_locked(chat, setting.key) {
+            "روشن"
+        } else {
+            "خاموش"
+        }
+        .to_owned()),
+        Kind::Number { .. } => shown(ctx, chat, setting).await,
+        Kind::Pick { options, .. } => Ok(options
+            .iter()
+            .find(|pick| pick.value == chosen(ctx, chat, setting))
+            .map_or("", |pick| pick.label)
+            .to_owned()),
+    }
+}
+
+pub async fn command(ctx: &Ctx, message: &Message) -> bool {
+    let Some(command) = parse_command(message.text().trim()) else {
+        return false;
+    };
+    let Some(chat) = message.peer_id().bot_api_dialog_id() else {
+        return false;
+    };
+    if matches!(&command, SettingCommand::List) {
+        let mut body = String::from(
+            "نمونه: «تنظیم ویژگی ضد رگبار روشن» یا «/set ضد رگبار پیام 10»\n\nنام ها و مقدارهای پذیرفته شده:\n",
+        );
+        for (id, name) in COMMAND_NAMES {
+            let setting = find(id).expect("every command name has a setting");
+            body.push_str(&format!("\n{name} · {}", command_values(setting)));
+        }
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::SettingsView,
+            body,
+        )
+        .await;
+        return true;
+    }
+    if !super::limits::allows(ctx, message, limits::SET).await {
+        return true;
+    }
+    let SettingCommand::Setting(setting, name, value) = command else {
+        unreachable!();
+    };
+    let changing = value.is_some();
+    if changing && setting.id == "lim_on" && !super::is_owner(ctx, message) {
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::PermissionDenied,
+            "محدودیت مدیران را فقط مالک ربات تنظیم می کند.",
+        )
+        .await;
+        return true;
+    }
+    let mut status = ApplyStatus::Applied;
+    let result = match value {
+        Some(CommandValue::Flag(on)) => set_flag(ctx, chat, setting, on).await,
+        Some(CommandValue::Number(number)) => match store(ctx, chat, setting, number).await {
+            Ok(saved) => {
+                status = saved;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        },
+        Some(CommandValue::Pick(action)) => match apply(ctx, chat, action).await {
+            Ok(Some((_, saved))) => {
+                status = saved;
+                Ok(())
+            }
+            Ok(None) => unreachable!("declared pick must apply"),
+            Err(error) => Err(error),
+        },
+        None => Ok(()),
+    };
+    if let Err(error) = result {
+        ::log::warn!("setting command for {chat}/{} failed: {error}", setting.id);
+        let reply = if error.invalid_night_window() {
+            "شروع و پایان قفل شب نمی تواند یکسان باشد."
+        } else if error.acceptance_unknown() {
+            "نتیجه ذخیره سازی نامشخص است؛ وضعیت را بررسی کنید."
+        } else {
+            "تنظیم ذخیره نشد؛ دوباره تلاش کنید."
+        };
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            reply,
+        )
+        .await;
+        return true;
+    }
+    let current = match command_current(ctx, chat, setting).await {
+        Ok(current) => current,
+        Err(error) => {
+            ::log::warn!(
+                "setting command could not read {chat}/{}: {error}",
+                setting.id
+            );
+            if !changing {
+                super::respond(
+                    ctx,
+                    message,
+                    crate::response::ResponseKind::CommandError,
+                    "خواندن وضعیت ممکن نیست؛ دوباره تلاش کنید.",
+                )
+                .await;
+                return true;
+            }
+            "ذخیره شد، اما خواندن وضعیت ممکن نیست".to_owned()
+        }
+    };
+    let suffix = match status {
+        ApplyStatus::Applied => "",
+        ApplyStatus::PendingRetry => " · تحویل به تلگرام در انتظار تلاش دوباره است",
+        ApplyStatus::DeliveryUnknown => " · وضعیت تحویل به تلگرام نامشخص است",
+    };
+    let reply = if changing {
+        format!("✓ {name}: {current}{suffix}")
+    } else {
+        format!(
+            "{name}: {current}\nمقدارهای مجاز: {}",
+            command_values(setting)
+        )
+    };
+    super::respond(
+        ctx,
+        message,
+        if changing {
+            crate::response::ResponseKind::SettingsChanged
+        } else {
+            crate::response::ResponseKind::SettingsView
+        },
+        reply,
+    )
+    .await;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_panel_setting_has_an_unambiguous_text_command() {
+        let mut names = std::collections::HashSet::new();
+        for setting in SETTINGS {
+            let matching: Vec<_> = COMMAND_NAMES
+                .iter()
+                .filter(|(id, _)| *id == setting.id)
+                .collect();
+            assert_eq!(matching.len(), 1, "{} needs one command name", setting.id);
+            let name = matching[0].1;
+            assert!(
+                names.insert(super::super::commands::normalize(name).into_owned()),
+                "duplicate command name: {name}"
+            );
+            let samples: Vec<(&str, CommandValue)> = match &setting.kind {
+                Kind::Flag => vec![
+                    ("روشن", CommandValue::Flag(true)),
+                    ("خاموش", CommandValue::Flag(false)),
+                ],
+                Kind::Number { range, .. } => vec![("", CommandValue::Number(range.0))],
+                Kind::Pick { options, .. } => options
+                    .iter()
+                    .map(|pick| (pick.label, CommandValue::Pick(pick.id)))
+                    .collect(),
+            };
+            for (sample, expected) in samples {
+                let command = if sample.is_empty() {
+                    format!(
+                        "/set {name} {}",
+                        match expected {
+                            CommandValue::Number(number) => number.to_string(),
+                            _ => unreachable!(),
+                        }
+                    )
+                } else {
+                    format!("/set {name} {sample}")
+                };
+                let Some(SettingCommand::Setting(found, _, Some(parsed))) = parse_command(&command)
+                else {
+                    panic!("command did not parse: {command}");
+                };
+                assert_eq!(found.id, setting.id, "{command}");
+                assert_eq!(parsed, expected, "{command}");
+            }
+        }
+        assert_eq!(COMMAND_NAMES.len(), SETTINGS.len());
+        assert!(parse_command("/set ضد رگبار پیام 10 حرف").is_none());
+        let Some(SettingCommand::Setting(setting, _, Some(CommandValue::Number(1260)))) =
+            parse_command("/set گزارش روزانه ساعت ۲۱")
+        else {
+            panic!("a bare report hour should mean 21:00");
+        };
+        assert_eq!(setting.id, "dr");
+        assert!(parse_command("/set گزارش روزانه ساعت 25").is_none());
+    }
 
     #[test]
     fn every_action_is_claimed_once() {

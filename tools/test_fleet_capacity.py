@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import patch
 
-from fleet_capacity import plan
+from fleet_capacity import parse_args, plan
 
 
 class FleetCapacityTests(unittest.TestCase):
@@ -11,6 +12,15 @@ class FleetCapacityTests(unittest.TestCase):
         self.assertEqual(result.db_connections_used, 80)
         self.assertEqual(result.db_connections_with_reserve, 100)
         self.assertTrue(result.fits_database)
+
+    def test_default_memory_reserves_four_gib_per_shard(self):
+        result = plan(groups=500_000)
+        with patch("sys.argv", ["fleet_capacity.py", "--groups", "500000"]):
+            self.assertEqual(parse_args().memory_per_shard_mb, result.memory_per_shard_mb)
+        self.assertEqual(result.memory_per_shard_mb, 4_096)
+        self.assertEqual(result.memory_used_mb, 40_960)
+        self.assertEqual(result.hosts_for_memory, 2)
+        self.assertFalse(result.fits_memory)
 
     def test_action_rate_can_require_more_shards_than_groups(self):
         result = plan(

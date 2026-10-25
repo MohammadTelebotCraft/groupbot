@@ -22,7 +22,10 @@ simple_logger = { version = "5", default-features = false, features = ["colors"]
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "hdr", "qoi", "ff", "tiff", "ico", "pnm"] }
+flate2 = "1"
+tiff = "0.11.2"
+thorvg = { version = "0.5", default-features = false, features = ["vendored", "std", "lottie"] }
 cosmic-text = "0.19.0"
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 base64 = "0.22"

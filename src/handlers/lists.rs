@@ -66,6 +66,24 @@ impl From<sqlx::Error> for MutationError {
 }
 
 pub const SHOW: &[(&str, Kind)] = &[
+    ("لیست بن شده ها", Kind::Ban),
+    ("فهرست بن شده ها", Kind::Ban),
+    ("لیست سکوت شده ها", Kind::Mute),
+    ("فهرست سکوت شده ها", Kind::Mute),
+    ("لیست کاربران ویژه", Kind::Vip),
+    ("فهرست کاربران ویژه", Kind::Vip),
+    ("لیست کلمات فیلتر", Kind::Filter),
+    ("فهرست کلمات فیلتر", Kind::Filter),
+    ("لیست فیلتر عکس", Kind::Image),
+    ("فهرست فیلتر عکس", Kind::Image),
+    ("لیست پاسخ خودکار", Kind::Answer),
+    ("فهرست پاسخ خودکار", Kind::Answer),
+    ("لیست معافیت ها", Kind::Exempt),
+    ("فهرست معافیت ها", Kind::Exempt),
+    ("لیست دستورهای سفارشی", Kind::Command),
+    ("فهرست دستورهای سفارشی", Kind::Command),
+    ("لیست پک ها", Kind::Pack),
+    ("فهرست پک ها", Kind::Pack),
     ("لیست بن", Kind::Ban),
     ("لیست سیک", Kind::Ban),
     ("لیست سکوت", Kind::Mute),
@@ -78,9 +96,36 @@ pub const SHOW: &[(&str, Kind)] = &[
     ("لیست دستور", Kind::Command),
     ("لیست پک", Kind::Pack),
     ("لیست استیکرپک", Kind::Pack),
+    ("/banlist", Kind::Ban),
+    ("/mutelist", Kind::Mute),
+    ("/viplist", Kind::Vip),
+    ("/filterlist", Kind::Filter),
+    ("/imagefilterlist", Kind::Image),
+    ("/answerlist", Kind::Answer),
+    ("/exemptlist", Kind::Exempt),
+    ("/commandlist", Kind::Command),
+    ("/packlist", Kind::Pack),
 ];
 
 pub const CLEAR: &[(&str, Kind)] = &[
+    ("پاکسازی لیست بن شده ها", Kind::Ban),
+    ("خالی کردن لیست بن شده ها", Kind::Ban),
+    ("پاکسازی لیست سکوت شده ها", Kind::Mute),
+    ("خالی کردن لیست سکوت شده ها", Kind::Mute),
+    ("پاکسازی لیست کاربران ویژه", Kind::Vip),
+    ("خالی کردن لیست کاربران ویژه", Kind::Vip),
+    ("پاکسازی لیست کلمات فیلتر", Kind::Filter),
+    ("خالی کردن لیست کلمات فیلتر", Kind::Filter),
+    ("پاکسازی لیست فیلتر عکس", Kind::Image),
+    ("خالی کردن لیست فیلتر عکس", Kind::Image),
+    ("پاکسازی لیست پاسخ خودکار", Kind::Answer),
+    ("خالی کردن لیست پاسخ خودکار", Kind::Answer),
+    ("پاکسازی لیست معافیت ها", Kind::Exempt),
+    ("خالی کردن لیست معافیت ها", Kind::Exempt),
+    ("پاکسازی لیست دستورهای سفارشی", Kind::Command),
+    ("خالی کردن لیست دستورهای سفارشی", Kind::Command),
+    ("پاکسازی لیست پک ها", Kind::Pack),
+    ("خالی کردن لیست پک ها", Kind::Pack),
     ("پاکسازی لیست بن", Kind::Ban),
     ("پاکسازی لیست سیک", Kind::Ban),
     ("پاکسازی لیست سکوت", Kind::Mute),
@@ -93,12 +138,25 @@ pub const CLEAR: &[(&str, Kind)] = &[
     ("پاکسازی لیست دستور", Kind::Command),
     ("پاکسازی لیست پک", Kind::Pack),
     ("پاکسازی لیست استیکرپک", Kind::Pack),
+    ("/clearbanlist", Kind::Ban),
+    ("/clearmutelist", Kind::Mute),
+    ("/clearviplist", Kind::Vip),
+    ("/clearfilterlist", Kind::Filter),
+    ("/clearimagefilterlist", Kind::Image),
+    ("/clearanswerlist", Kind::Answer),
+    ("/clearexemptlist", Kind::Exempt),
+    ("/clearcommandlist", Kind::Command),
+    ("/clearpacklist", Kind::Pack),
 ];
 
 pub async fn command(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
-    let show = SHOW.iter().find(|(name, _)| *name == text);
-    let clear = CLEAR.iter().find(|(name, _)| *name == text);
+    let show = SHOW
+        .iter()
+        .find(|(name, _)| super::commands::matches(text, name));
+    let clear = CLEAR
+        .iter()
+        .find(|(name, _)| super::commands::matches(text, name));
     let Some(&(_, kind)) = show.or(clear) else {
         return false;
     };
@@ -176,54 +234,126 @@ pub async fn clear_all(
     chat: i64,
     kind: Kind,
 ) -> Result<usize, MutationError> {
-    let mut removed = 0;
-    loop {
-        let entries = entries(ctx, chat_ref, chat, kind, MEMBER_LIST_PAGE).await?;
-        if entries.is_empty() {
-            break;
-        }
-        let mut page_removed = 0;
-        for entry in entries {
-            if matches!(
-                kind,
-                Kind::Filter
-                    | Kind::Image
-                    | Kind::Vip
-                    | Kind::Answer
-                    | Kind::Exempt
-                    | Kind::Command
-                    | Kind::Pack
-            ) {
-                if remove(ctx, chat_ref, chat, kind, &entry.key).await? {
-                    page_removed += 1;
-                }
-                continue;
+    match kind {
+        Kind::Ban | Kind::Mute => clear_members(ctx, chat_ref, chat, kind).await,
+        Kind::Image => {
+            let filters = imgfilter::listing(ctx, chat).await?;
+            for (name, _) in &filters {
+                imgfilter::try_forget(ctx, chat, name).await?;
             }
-            let Some(peer) = entry.peer else {
-                eprintln!("lists: {chat}: no ref for user {}", entry.key);
-                continue;
-            };
-            restrict::apply_maintenance(
-                ctx,
-                chat_ref,
-                peer,
-                Action::Unban,
-                None,
-                restrict::By {
-                    reason: "پنل لیست ها",
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(MutationError::Restriction)?;
-            page_removed += 1;
+            Ok(filters.len())
         }
-        removed += page_removed;
-        if page_removed == 0 || !matches!(kind, Kind::Ban | Kind::Mute) {
-            break;
+        Kind::Vip | Kind::Filter | Kind::Answer | Kind::Exempt | Kind::Command | Kind::Pack => {
+            let keys = setting_keys(ctx, chat, kind);
+            let mutations: Vec<_> = keys
+                .iter()
+                .map(|key| crate::state::SettingMutation::Delete { key })
+                .collect();
+            Ok(ctx.settings.try_apply_batch(chat, &mutations).await?)
         }
     }
-    Ok(removed)
+}
+
+fn setting_keys(ctx: &Ctx, chat: i64, kind: Kind) -> Vec<String> {
+    let ids = |prefix: &str| -> Vec<i64> {
+        ctx.settings
+            .flags_with_prefix(chat, prefix)
+            .into_iter()
+            .filter_map(|id| id.parse().ok())
+            .collect()
+    };
+    let mut keys: Vec<String> = match kind {
+        Kind::Command => restrict::custom_triggers(ctx, chat)
+            .into_iter()
+            .map(|(word, _)| restrict::custom_key(&word))
+            .collect(),
+        Kind::Answer => super::answers::triggers(ctx, chat)
+            .into_iter()
+            .map(|trigger| format!("{}{trigger}", super::answers::PREFIX))
+            .collect(),
+        Kind::Filter => filters::words(ctx, chat)
+            .iter()
+            .map(|word| filters::key(word))
+            .collect(),
+        Kind::Pack => ctx
+            .settings
+            .values_with_prefix(chat, packs::PREFIX)
+            .into_iter()
+            .filter_map(|(set, _)| set.parse().ok())
+            .map(packs::key)
+            .collect(),
+        Kind::Vip => ids(vip::PREFIX).into_iter().map(vip::key).collect(),
+        Kind::Exempt => ids(join::EXEMPT).into_iter().map(join::exempt_key).collect(),
+        Kind::Ban | Kind::Mute | Kind::Image => Vec::new(),
+    };
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
+const CLEAR_PARALLEL: usize = super::FLEET_CAMPAIGNS;
+
+const CLEAR_ROUND: usize = 200;
+
+async fn clear_members(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    chat: i64,
+    kind: Kind,
+) -> Result<usize, MutationError> {
+    let removed = std::sync::atomic::AtomicUsize::new(0);
+    let failed: std::sync::Mutex<Option<restrict::Failed>> = std::sync::Mutex::new(None);
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let round: Vec<PeerRef> = entries(ctx, chat_ref, chat, kind, CLEAR_ROUND)
+            .await?
+            .into_iter()
+            .filter(|entry| seen.insert(entry.key.clone()))
+            .filter_map(|entry| {
+                if entry.peer.is_none() {
+                    eprintln!("lists: {chat}: no ref for user {}", entry.key);
+                }
+                entry.peer
+            })
+            .collect();
+        if round.is_empty() {
+            break;
+        }
+        super::bounded(round, CLEAR_PARALLEL, |peer| {
+            let removed = &removed;
+            let failed = &failed;
+            async move {
+                if failed.lock().unwrap().is_some() {
+                    return;
+                }
+                match restrict::apply_maintenance(
+                    ctx,
+                    chat_ref,
+                    peer,
+                    Action::Unban,
+                    None,
+                    restrict::By {
+                        reason: "پنل لیست ها",
+                        ..Default::default()
+                    },
+                )
+                .await
+                {
+                    Ok(_) => {
+                        removed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(error) => {
+                        failed.lock().unwrap().get_or_insert(error);
+                    }
+                }
+            }
+        })
+        .await;
+        if let Some(error) = failed.lock().unwrap().take() {
+            return Err(MutationError::Restriction(error));
+        }
+    }
+    Ok(removed.into_inner())
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -256,6 +386,10 @@ impl Kind {
             Self::Command => 7,
             Self::Pack => 8,
         }
+    }
+
+    fn is_member_list(self) -> bool {
+        matches!(self, Self::Ban | Self::Mute)
     }
 
     pub fn from_action(action: &str) -> Option<Self> {
@@ -375,14 +509,8 @@ pub async fn confirm_clear(
     kind: Kind,
     opener: i64,
 ) -> Result<(String, ReplyMarkup), sqlx::Error> {
-    let count = entries(ctx, chat_ref, chat, kind, MEMBER_LIST_PAGE)
-        .await?
-        .len();
-    let count_label = if count >= MEMBER_LIST_PAGE {
-        format!("{count}+")
-    } else {
-        count.to_string()
-    };
+    let (_, count) = listed(ctx, chat_ref, chat, kind, 0).await?;
+    let count_label = count_label(kind, count);
     let title = format!(
         "<b>پنل مدیریت</b> › <b>{}</b>\n\n\
          همه <b>{count_label}</b> مورد از این لیست حذف می شود. این کار برگشت ندارد.",
@@ -393,19 +521,26 @@ pub async fn confirm_clear(
             super::style::data(
                 "تایید",
                 format!("p:{opener}:{chat}:l:{}:{CLEAR_CONFIRMED}", kind.action()).into_bytes(),
-                super::style::Colour::Success,
+                super::style::Colour::Primary,
             ),
             Some(super::premium::Icon::Success),
         ),
         super::premium::decorate(
-            Button::data(
+            super::style::data(
                 "لغو",
                 format!("p:{opener}:{chat}:l:{}", kind.action()).into_bytes(),
+                super::style::Colour::Danger,
             ),
             Some(super::premium::Icon::Close),
         ),
     ]]);
     Ok((title, markup))
+}
+
+fn unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 pub async fn view(
@@ -415,14 +550,14 @@ pub async fn view(
     kind: Kind,
     opener: i64,
 ) -> Result<(String, ReplyMarkup), sqlx::Error> {
-    let entries = entries(ctx, chat_ref, chat, kind, MEMBER_LIST_PAGE).await?;
+    let (entries, total) = listed(ctx, chat_ref, chat, kind, LIMIT).await?;
 
     let mut rows: Vec<Vec<Button>> = entries
         .iter()
         .take(LIMIT)
         .map(|entry| {
             vec![Button::data(
-                format!("✗  {}", entry.name),
+                format!("✗  {}", unescape(&entry.name)),
                 format!("p:{opener}:{chat}:l:{}:{}", kind.action(), entry.key).into_bytes(),
             )]
         })
@@ -440,18 +575,13 @@ pub async fn view(
     )]);
 
     let shown = entries.len().min(LIMIT);
-    let entry_count = if entries.len() >= MEMBER_LIST_PAGE {
-        format!("{}+", entries.len())
-    } else {
-        entries.len().to_string()
-    };
     let mut title = format!(
         "<b>پنل مدیریت</b> › <b>{}</b> ({})\n\n{}",
         kind.title(),
-        entry_count,
+        count_label(kind, total),
         kind.hint()
     );
-    if entries.len() > shown {
+    if total > shown {
         title.push_str(&format!("\n<i>{shown} مورد اول نمایش داده شده است.</i>"));
     }
     if entries.is_empty() {
@@ -538,12 +668,7 @@ pub async fn remove(
         return Ok(true);
     }
 
-    let Some(peer) = entries(ctx, chat_ref, chat, kind, MEMBER_LIST_PAGE)
-        .await?
-        .into_iter()
-        .find(|entry| entry.key == entry_key)
-        .and_then(|entry| entry.peer)
-    else {
+    let Some(peer) = listed_member(ctx, chat_ref, chat, kind, user_id).await? else {
         return Ok(false);
     };
     restrict::apply_maintenance(
@@ -616,8 +741,8 @@ pub(crate) async fn entries(
             .values_with_prefix(chat, packs::PREFIX)
             .into_iter()
             .map(|(set, title)| Entry {
+                name: esc(&format!("{title} · {set}")),
                 key: set,
-                name: esc(&title),
                 peer: None,
             })
             .collect();
@@ -650,14 +775,99 @@ pub(crate) async fn entries(
             .collect());
     }
 
+    Ok(walk(ctx, chat_ref, chat, kind, limit).await.0)
+}
+
+async fn listed(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    chat: i64,
+    kind: Kind,
+    shown: usize,
+) -> Result<(Vec<Entry>, usize), sqlx::Error> {
+    if kind.is_member_list() {
+        return Ok(walk(ctx, chat_ref, chat, kind, shown).await);
+    }
+    let found = entries(ctx, chat_ref, chat, kind, MEMBER_LIST_PAGE).await?;
+    let total = found.len();
+    Ok((found, total))
+}
+
+fn count_label(kind: Kind, count: usize) -> String {
+    if !kind.is_member_list() && count >= MEMBER_LIST_PAGE {
+        format!("{count}+")
+    } else {
+        count.to_string()
+    }
+}
+
+async fn listed_member(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    chat: i64,
+    kind: Kind,
+    user_id: i64,
+) -> Result<Option<PeerRef>, sqlx::Error> {
+    use grammers_client::session::types::{PeerAuth, PeerId, PeerKind};
+
+    if chat_ref.id.kind() == PeerKind::Channel
+        && let Some(target) = PeerId::user(user_id).map(PeerId::to_ambient_ref)
+    {
+        let asked = ctx
+            .client
+            .invoke(&tl::functions::channels::GetParticipant {
+                channel: chat_ref.into(),
+                participant: target.into(),
+            })
+            .await;
+        match asked {
+            Ok(tl::enums::channels::ChannelParticipant::Participant(found)) => {
+                let tl::enums::ChannelParticipant::Banned(banned) = &found.participant else {
+                    return Ok(None);
+                };
+                let tl::enums::ChatBannedRights::Rights(rights) = &banned.banned_rights;
+                if rights.view_messages != (kind == Kind::Ban) {
+                    return Ok(None);
+                }
+                let hash = found.users.iter().find_map(|user| match user {
+                    tl::enums::User::User(user) if user.id == user_id => user.access_hash,
+                    _ => None,
+                });
+                if let (Some(id), Some(hash)) = (PeerId::user(user_id), hash) {
+                    return Ok(Some(PeerRef {
+                        id,
+                        auth: PeerAuth::from_hash(hash),
+                    }));
+                }
+            }
+            Err(grammers_client::InvocationError::Rpc(error))
+                if error.name == "USER_NOT_PARTICIPANT" =>
+            {
+                return Ok(None);
+            }
+            Err(error) => eprintln!("lists: {chat}: could not look up {user_id}: {error}"),
+        }
+    }
+    let key = user_id.to_string();
+    Ok(entries(ctx, chat_ref, chat, kind, MEMBER_LIST_PAGE)
+        .await?
+        .into_iter()
+        .find(|entry| entry.key == key)
+        .and_then(|entry| entry.peer))
+}
+
+async fn walk(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    chat: i64,
+    kind: Kind,
+    limit: usize,
+) -> (Vec<Entry>, usize) {
     let mut participants = ctx.client.iter_participants(chat_ref).filter(kind.filter());
     let mut found = Vec::with_capacity(limit.min(LIMIT * 16));
-    loop {
+    while found.len() < limit {
         match participants.next().await {
             Ok(Some(participant)) => {
-                if found.len() >= limit {
-                    break;
-                }
                 let id = participant.id();
                 let key = match id.bare_id() {
                     Some(id) => id.to_string(),
@@ -680,11 +890,36 @@ pub(crate) async fn entries(
             }
         }
     }
-    Ok(found)
+    let total = participants.total().await.unwrap_or(0).max(found.len());
+    (found, total)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn list_aliases_are_exact_and_have_a_cleanup_family() {
+        for (name, kind) in SHOW {
+            let normalized = name.replace('ی', "ي").replace('ک', "ك").replace(' ', "\t");
+            assert!(
+                SHOW.iter()
+                    .any(
+                        |(alias, found)| super::super::commands::matches(&normalized, alias)
+                            && found == kind
+                    ),
+                "{name}"
+            );
+            assert!(CLEAR.iter().any(|(_, found)| found == kind), "{name}");
+            assert!(
+                !SHOW
+                    .iter()
+                    .any(|(alias, _)| super::super::commands::matches(
+                        &format!("{name} لطفا"),
+                        alias
+                    )),
+                "{name}"
+            );
+        }
+    }
     use super::*;
 
     #[test]
@@ -740,6 +975,13 @@ mod tests {
         assert_eq!(clearing("12345"), None);
         assert_eq!(clearing(CLEAR_KEY), Some(false));
         assert_eq!(clearing("clearyes"), Some(true));
+    }
+
+    #[test]
+    fn a_button_label_reads_the_name_as_typed() {
+        for name in ["Tom & Jerry", "<b>", "&amp;", "a&lt;b"] {
+            assert_eq!(unescape(&esc(name)), name);
+        }
     }
 
     #[test]

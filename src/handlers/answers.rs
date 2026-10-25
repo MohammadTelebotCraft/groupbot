@@ -2,14 +2,35 @@ use grammers_client::message::Message;
 
 use super::{Ctx, can_manage, esc, welcome};
 
+mod stored;
+use stored::StoredAnswer;
+
 pub const PREFIX: &str = "answer:";
 
 pub const AUDIENCE: &str = "answer_audience";
 
-pub const ADD: &[&str] = &["تنظیم پاسخ", "افزودن پاسخ", "پاسخ"];
-pub const REMOVE: &[&str] = &["حذف پاسخ", "پاک پاسخ"];
+pub const ADD: &[&str] = &[
+    "اضافه کردن پاسخ",
+    "اضافه پاسخ",
+    "ثبت پاسخ",
+    "تنظیم پاسخ",
+    "افزودن پاسخ",
+    "/setanswer",
+    "/addanswer",
+    "/answer",
+    "پاسخ",
+    "/autoreply",
+];
+pub const REMOVE: &[&str] = &[
+    "حذف پاسخ",
+    "پاک پاسخ",
+    "لغو پاسخ",
+    "/delanswer",
+    "/removeanswer",
+    "پاک کردن پاسخ",
+    "/delautoreply",
+];
 
-const SEPARATOR: char = '|';
 const MAX_ANSWERS: usize = 200;
 const MAX_TRIGGER_CHARS: usize = 64;
 const MAX_BODY_CHARS: usize = 3_500;
@@ -60,8 +81,10 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
         return false;
     };
 
-    if let Some((adding, command, rest)) = parse(text) {
-        return edit(ctx, message, chat, adding, command, rest).await;
+    if let Some((adding, command, rest)) = parse(text)
+        && edit(ctx, message, chat, adding, command, rest).await
+    {
+        return true;
     }
     answer(ctx, message, chat, view).await
 }
@@ -90,21 +113,15 @@ async fn answer(ctx: &Ctx, message: &Message, chat: i64, view: &super::locks::Vi
         return false;
     }
 
-    let (media, body) = stored
-        .split_once(SEPARATOR)
-        .unwrap_or(("", stored.as_str()));
+    let Some(mut answer) = StoredAnswer::decode(&stored) else {
+        log::warn!("answers: invalid stored formatting for {chat}/{trigger}");
+        return true;
+    };
 
-    if !media.is_empty()
-        && let Some(decoded) = welcome::decode_media(media)
+    if !answer.media.is_empty()
+        && let Some(decoded) = welcome::decode_media(&answer.media)
     {
-        let Err(e) = message
-            .reply(
-                grammers_client::message::InputMessage::new()
-                    .html(body)
-                    .media(decoded),
-            )
-            .await
-        else {
+        let Err(e) = message.reply(answer.message().media(decoded)).await else {
             return true;
         };
         if !welcome::reference_expired(&e) {
@@ -112,20 +129,19 @@ async fn answer(ctx: &Ctx, message: &Message, chat: i64, view: &super::locks::Vi
             return true;
         }
         eprintln!("answers: {chat}: media for «{trigger}» expired, keeping the text");
+        answer.media.clear();
         if let Err(error) = ctx
             .settings
-            .try_set_value(chat, &key(trigger), &format!("{SEPARATOR}{body}"))
+            .try_set_value(chat, &key(trigger), &answer.encode())
             .await
         {
             ::log::warn!("answers: could not remove expired media for {chat}: {error}");
         }
-        if body.trim().is_empty() {
+        if answer.body.trim().is_empty() {
             return true;
         }
     }
-    let _ = message
-        .reply(grammers_client::message::InputMessage::new().html(body))
-        .await;
+    let _ = message.reply(answer.message()).await;
     true
 }
 
@@ -143,7 +159,8 @@ async fn edit(
     if adding && !has_body(message, trigger) {
         return false;
     }
-    let mut trigger = trigger.trim().to_lowercase();
+    let raw_trigger = trigger.trim();
+    let mut trigger = raw_trigger.to_lowercase();
     if trigger.is_empty() {
         if !super::phrase_carries_text(command) {
             return false;
@@ -209,18 +226,29 @@ async fn edit(
         return true;
     }
 
-    let (media, body) = match inline_answer(&trigger) {
+    let answer = match inline_answer(raw_trigger) {
         Some((trigger_only, body)) => {
             trigger = trigger_only;
-            (String::new(), body)
+            StoredAnswer::capture(
+                message
+                    .media()
+                    .and_then(|media| welcome::encode_media(&media))
+                    .unwrap_or_default(),
+                message.text(),
+                body,
+                message
+                    .fmt_entities()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                true,
+            )
         }
 
-        None if message.media().is_some() => (
+        None if message.media().is_some() => StoredAnswer::media_only(
             message
                 .media()
                 .and_then(|media| welcome::encode_media(&media))
                 .unwrap_or_default(),
-            String::new(),
         ),
         None => {
             let Ok(Some(replied)) = message.get_reply().await else {
@@ -234,12 +262,18 @@ async fn edit(
                 .await;
                 return true;
             };
-            (
+            StoredAnswer::capture(
                 replied
                     .media()
                     .and_then(|media| welcome::encode_media(&media))
                     .unwrap_or_default(),
-                replied.text().to_owned(),
+                replied.text(),
+                replied.text(),
+                replied
+                    .fmt_entities()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                false,
             )
         }
     };
@@ -253,7 +287,22 @@ async fn edit(
         .await;
         return true;
     }
-    if media.is_empty() && body.is_empty() {
+    let normalized_trigger = super::commands::normalize(&trigger);
+    if super::commands::reserved_trigger(&trigger)
+        || super::restrict::custom_triggers(ctx, chat)
+            .iter()
+            .any(|(word, _)| super::commands::normalize(word) == normalized_trigger)
+    {
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::CommandError,
+            format!("«{trigger}» با یک دستور دیگر تداخل دارد؛ نام دیگری انتخاب کنید."),
+        )
+        .await;
+        return true;
+    }
+    if answer.media.is_empty() && answer.body.is_empty() {
         super::respond(
             ctx,
             message,
@@ -264,7 +313,7 @@ async fn edit(
         return true;
     }
 
-    if body.chars().count() > MAX_BODY_CHARS {
+    if answer.body.chars().count() > MAX_BODY_CHARS {
         super::respond(
             ctx,
             message,
@@ -274,7 +323,7 @@ async fn edit(
         .await;
         return true;
     }
-    let stored = format!("{media}{SEPARATOR}{body}");
+    let stored = answer.encode();
     if stored.len() > crate::state::MAX_SETTING_VALUE_BYTES {
         super::respond(
             ctx,
@@ -337,27 +386,66 @@ async fn edit(
     true
 }
 
+pub enum AddTextError {
+    Refused(String),
+    Settings(crate::state::SettingsWriteError),
+}
+
+pub async fn add_text(ctx: &Ctx, chat: i64, trigger: &str, body: &str) -> Result<String, AddTextError> {
+    let refused = |text: String| Err(AddTextError::Refused(text));
+    let trigger = trigger.trim().to_lowercase();
+    let body = body.trim();
+    if trigger.is_empty() || body.is_empty() {
+        return refused("کلمه و متن پاسخ هر دو لازم است.".to_owned());
+    }
+    if trigger.chars().count() > MAX_TRIGGER_CHARS {
+        return refused(format!("تریگر پاسخ باید حداکثر {MAX_TRIGGER_CHARS} نویسه باشد."));
+    }
+    if body.chars().count() > MAX_BODY_CHARS {
+        return refused(format!("متن پاسخ باید حداکثر {MAX_BODY_CHARS} نویسه باشد."));
+    }
+    let normalized_trigger = super::commands::normalize(&trigger);
+    if super::commands::reserved_trigger(&trigger)
+        || super::restrict::custom_triggers(ctx, chat)
+            .iter()
+            .any(|(word, _)| super::commands::normalize(word) == normalized_trigger)
+    {
+        return refused(format!("«{trigger}» با یک دستور دیگر تداخل دارد؛ نام دیگری انتخاب کنید."));
+    }
+    let stored = StoredAnswer::capture(String::new(), body, body, &[], false).encode();
+    if stored.len() > crate::state::MAX_SETTING_VALUE_BYTES {
+        return refused("متن پاسخ بیش از حد بزرگ است.".to_owned());
+    }
+    let trigger_key = key(&trigger);
+    if ctx.settings.value(chat, &trigger_key).is_none() && triggers(ctx, chat).len() >= MAX_ANSWERS {
+        return refused(format!("لیست پاسخ ها پر است ({MAX_ANSWERS} مورد)."));
+    }
+    ctx.settings
+        .try_set_value(chat, &trigger_key, &stored)
+        .await
+        .map_err(AddTextError::Settings)?;
+    Ok(trigger)
+}
+
 fn has_body(message: &Message, trigger: &str) -> bool {
-    inline_answer(&trigger.trim().to_lowercase()).is_some()
+    inline_answer(trigger).is_some()
         || message.media().is_some()
         || message.reply_to_message_id().is_some()
 }
 
-fn inline_answer(rest: &str) -> Option<(String, String)> {
+fn inline_answer(rest: &str) -> Option<(String, &str)> {
     let (trigger, answer) = rest.split_once('=')?;
     let (trigger, answer) = (trigger.trim(), answer.trim());
-    (!trigger.is_empty() && !answer.is_empty()).then(|| (trigger.to_lowercase(), answer.to_owned()))
+    (!trigger.is_empty() && !answer.is_empty()).then(|| (trigger.to_lowercase(), answer))
 }
 
 fn parse(text: &str) -> Option<(bool, &'static str, &str)> {
     for (commands, adding) in [(ADD, true), (REMOVE, false)] {
         for command in commands {
-            let Some(rest) = text.strip_prefix(command) else {
+            let Some(rest) = super::commands::strip_prefix(text, command) else {
                 continue;
             };
-            if rest.starts_with(char::is_whitespace) {
-                return Some((adding, command, rest.trim()));
-            }
+            return Some((adding, command, rest));
         }
     }
     None
@@ -371,7 +459,7 @@ mod tests {
     fn splits_inline_answers() {
         assert_eq!(
             inline_answer("سلام = درود بر شما"),
-            Some(("سلام".to_owned(), "درود بر شما".to_owned()))
+            Some(("سلام".to_owned(), "درود بر شما"))
         );
         assert_eq!(inline_answer("سلام"), None);
         assert_eq!(inline_answer("= درود"), None);
@@ -385,6 +473,39 @@ mod tests {
         assert_eq!(parse("حذف پاسخ سلام"), Some((false, "حذف پاسخ", "سلام")));
         assert_eq!(parse("پاسخگو"), None);
         assert_eq!(parse("سلام"), None);
+    }
+
+    #[test]
+    fn aliases_and_keyboard_variants_preserve_inline_answer_content() {
+        let raw = "ثبت\u{200c}پاسخ HELLO = <a href=\"https://Example.com/AbC\">Hi كيان ۱۲</a>";
+        let (_, command, rest) = parse(raw).unwrap();
+        assert_eq!(command, "ثبت پاسخ");
+        assert_eq!(
+            inline_answer(rest),
+            Some((
+                "hello".to_owned(),
+                "<a href=\"https://Example.com/AbC\">Hi كيان ۱۲</a>"
+            ))
+        );
+        assert_eq!(
+            parse("تنظيم\t پاسخ خودكار سلام = Hi"),
+            Some((true, "تنظیم پاسخ", "خودكار سلام = Hi"))
+        );
+        assert_eq!(
+            parse("حذف پاسخ خودکار"),
+            Some((false, "حذف پاسخ", "خودکار"))
+        );
+        assert_eq!(
+            parse("/AddAnswer HELLO = Hi"),
+            Some((true, "/addanswer", "HELLO = Hi"))
+        );
+        assert_eq!(
+            parse("/DELANSWER HELLO"),
+            Some((false, "/delanswer", "HELLO"))
+        );
+        assert!(super::super::phrase_carries_text("/answer"));
+        assert_eq!(parse("/answers HELLO = Hi"), None);
+        assert_eq!(parse("ثبت پاسخگو"), None);
     }
 
     #[test]

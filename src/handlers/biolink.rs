@@ -1,4 +1,3 @@
-
 use grammers_client::message::Message;
 use grammers_client::session::types::{PeerKind, PeerRef};
 use grammers_client::tl;

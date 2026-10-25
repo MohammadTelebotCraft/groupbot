@@ -14,10 +14,18 @@ use crate::state::{
 
 pub const MODE: &str = "captcha";
 
-pub const NAMES: &[&str] = &["احراز هویت", "احراز"];
+pub const NAMES: &[&str] = &[
+    "احراز هویت",
+    "احراز",
+    "کپچا ربات",
+    "کپچا",
+    "/captcha",
+    "تایید هویت",
+    "/verification",
+];
 
-const ON_WORDS: &[&str] = &["روشن", "فعال"];
-const OFF_WORDS: &[&str] = &["خاموش", "غیرفعال"];
+const ON_WORDS: &[&str] = &["روشن", "فعال", "on", "enable"];
+const OFF_WORDS: &[&str] = &["خاموش", "غیرفعال", "غیر فعال", "off", "disable"];
 
 pub const TIMEOUT: &str = "captcha_timeout";
 
@@ -53,18 +61,16 @@ const RETRY_SHARE: i64 = 1;
 const QUARANTINE_SHARE: i64 = 1;
 
 fn parse(text: &str) -> Option<bool> {
-    let tail = NAMES.iter().find_map(|name| {
-        let rest = text.strip_prefix(name)?;
-        rest.starts_with(char::is_whitespace)
-            .then(|| rest.trim_start())
-    })?;
-    if ON_WORDS.contains(&tail) {
-        return Some(true);
-    }
-    if OFF_WORDS.contains(&tail) {
-        return Some(false);
-    }
-    None
+    NAMES.iter().find_map(|name| {
+        let tail = super::commands::strip_prefix(text, name)?;
+        if super::commands::contains(ON_WORDS, tail) {
+            Some(true)
+        } else if super::commands::contains(OFF_WORDS, tail) {
+            Some(false)
+        } else {
+            None
+        }
+    })
 }
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
@@ -1490,6 +1496,27 @@ fn buttons(user: i64, generation: i64, choices: &[usize]) -> ReplyMarkup {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn captcha_aliases_keep_the_state_grammar_closed() {
+        for text in [
+            "كپچا\tفعال",
+            "احراز\u{200c}هويت روشن",
+            "/CAPTCHA ON",
+            "کپچا ربات روشن",
+        ] {
+            assert_eq!(parse(text), Some(true), "{text}");
+        }
+        for text in [
+            "کپچا غیر فعال",
+            "احراز هویت غیر\u{200c}فعال",
+            "/captcha DISABLE",
+        ] {
+            assert_eq!(parse(text), Some(false), "{text}");
+        }
+        for text in ["/captcha@otherbot off", "/captcha off now", "کپچایی فعال"] {
+            assert_eq!(parse(text), None, "{text}");
+        }
+    }
     use super::*;
     use grammers_client::{InvocationError, sender::RpcError};
 

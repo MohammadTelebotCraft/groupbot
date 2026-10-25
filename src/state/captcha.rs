@@ -1,4 +1,3 @@
-
 use super::{Result, Settings};
 
 pub const MAX_PENDING_CAPTCHAS_PER_CHAT: i64 = 256;

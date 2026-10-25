@@ -211,7 +211,18 @@ pub type Idle = (Vec<(i64, String, u64)>, u64);
 
 type BumpedRow = (i64, i64, String, i64, i64);
 
-type ImageFilterTuple = (String, Vec<u8>, f32, f32, i32, bool, i32, bool);
+type ImageFilterTuple = (
+    String,
+    Vec<u8>,
+    f32,
+    f32,
+    i32,
+    bool,
+    i32,
+    bool,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+);
 
 pub struct ImageFilterRow {
     pub name: String,
@@ -222,6 +233,8 @@ pub struct ImageFilterRow {
     pub live: bool,
     pub samples: u32,
     pub calibrated: bool,
+    pub examples: Option<Vec<u8>>,
+    pub faces: Option<Vec<u8>>,
 }
 
 pub struct ImageFilterWrite<'a> {
@@ -233,6 +246,8 @@ pub struct ImageFilterWrite<'a> {
     pub live: bool,
     pub samples: u32,
     pub calibrated: bool,
+    pub examples: Option<&'a [u8]>,
+    pub faces: Option<&'a [u8]>,
 }
 
 pub struct Counter {
@@ -1504,6 +1519,12 @@ impl Settings {
         )
         .execute(&mut *conn)
         .await?;
+        sqlx::query("ALTER TABLE image_filters ADD COLUMN IF NOT EXISTS examples BYTEA")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("ALTER TABLE image_filters ADD COLUMN IF NOT EXISTS faces BYTEA")
+            .execute(&mut *conn)
+            .await?;
         for column in ["warns", "strikes", "struck"] {
             sqlx::query(&format!(
                 "ALTER TABLE counters ADD COLUMN IF NOT EXISTS {column} BIGINT NOT NULL DEFAULT 0"
@@ -3317,7 +3338,7 @@ impl Settings {
 
     pub async fn image_filters(&self, chat: i64) -> Result<Vec<ImageFilterRow>> {
         let rows: Vec<ImageFilterTuple> = sqlx::query_as(
-            "SELECT name, vec, scale, cut, rate, live, samples, calibrated FROM image_filters
+            "SELECT name, vec, scale, cut, rate, live, samples, calibrated, examples, faces FROM image_filters
              WHERE chat_id = $1 ORDER BY name LIMIT 8",
         )
         .bind(chat)
@@ -3328,7 +3349,7 @@ impl Settings {
 
     pub async fn try_image_filter(&self, chat: i64, name: &str) -> Result<Option<ImageFilterRow>> {
         let row: Option<ImageFilterTuple> = sqlx::query_as(
-            "SELECT name, vec, scale, cut, rate, live, samples, calibrated FROM image_filters
+            "SELECT name, vec, scale, cut, rate, live, samples, calibrated, examples, faces FROM image_filters
              WHERE chat_id = $1 AND name = $2",
         )
         .bind(chat)
@@ -3339,7 +3360,7 @@ impl Settings {
     }
 
     fn image_filter_row(row: ImageFilterTuple) -> ImageFilterRow {
-        let (name, vector, scale, cut, rate, live, samples, calibrated) = row;
+        let (name, vector, scale, cut, rate, live, samples, calibrated, examples, faces) = row;
         ImageFilterRow {
             name,
             vector,
@@ -3349,34 +3370,15 @@ impl Settings {
             live,
             samples: u32::try_from(samples).unwrap_or(0),
             calibrated,
+            examples,
+            faces,
         }
-    }
-
-    pub async fn try_normalize_fixed_image_filters(&self, cut: f32) -> Result<u64> {
-        Ok(sqlx::query(
-            "UPDATE image_filters
-             SET cut = $1
-             WHERE calibrated = TRUE AND samples = 0 AND live = TRUE AND cut <> $1",
-        )
-        .bind(cut)
-        .execute(&self.pool)
-        .await?
-        .rows_affected())
-    }
-
-    pub async fn try_fixed_image_filter_keys(&self) -> Result<Vec<(i64, String)>> {
-        sqlx::query_as(
-            "SELECT chat_id, name FROM image_filters
-             WHERE calibrated = TRUE AND samples = 0 AND live = TRUE
-             ORDER BY chat_id, name",
-        )
-        .fetch_all(&self.pool)
-        .await
     }
 
     pub async fn try_phrase_image_filter_keys(&self) -> Result<Vec<(i64, String)>> {
         sqlx::query_as(
-            "SELECT chat_id, name FROM image_filters WHERE samples = 0 ORDER BY chat_id, name",
+            "SELECT chat_id, name FROM image_filters WHERE samples = 0 AND faces IS NULL
+             ORDER BY chat_id, name",
         )
         .fetch_all(&self.pool)
         .await
@@ -3431,6 +3433,8 @@ impl Settings {
             live,
             samples,
             calibrated,
+            examples,
+            faces,
         } = filter;
         let slot = self.write_slot(chat);
         let _writing = slot.lock().await;
@@ -3457,12 +3461,15 @@ impl Settings {
             }
         }
         sqlx::query(
-            "INSERT INTO image_filters              (chat_id, name, vec, scale, cut, rate, live, samples, calibrated)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "INSERT INTO image_filters              (chat_id, name, vec, scale, cut, rate, live, samples, calibrated, examples, faces)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              ON CONFLICT (chat_id, name) DO UPDATE SET
                  vec = EXCLUDED.vec, scale = EXCLUDED.scale, cut = EXCLUDED.cut,
                  rate = EXCLUDED.rate, live = EXCLUDED.live, samples = EXCLUDED.samples,
-                 calibrated = EXCLUDED.calibrated",
+                 calibrated = EXCLUDED.calibrated,
+                 examples = CASE WHEN EXCLUDED.samples = 0 THEN NULL
+                                 ELSE COALESCE(EXCLUDED.examples, image_filters.examples) END,
+                 faces = COALESCE(EXCLUDED.faces, image_filters.faces)",
         )
         .bind(chat)
         .bind(name)
@@ -3473,6 +3480,8 @@ impl Settings {
         .bind(live)
         .bind(i32::try_from(samples).unwrap_or(i32::MAX))
         .bind(calibrated)
+        .bind(examples)
+        .bind(faces)
         .execute(&self.pool)
         .await?;
         Ok(true)
@@ -5648,6 +5657,58 @@ mod tests {
             (0, 0),
             "cancelling the child write must roll its newly reserved owner back too"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated PostgreSQL image filter examples round-trip test"]
+    async fn image_filter_examples_roundtrip() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let chat = -999_999_999_771;
+        let settings = Settings::connect(&url).await.unwrap();
+        for table in ["image_filters", "settings", "durable_chats"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE chat_id = $1"))
+                .bind(chat)
+                .execute(&settings.pool)
+                .await
+                .unwrap();
+        }
+        settings.try_set_value(chat, "hash", "1").await.unwrap();
+        let vector = vec![1u8; 768];
+        let write = |samples: u32, examples: Option<&'static [u8]>| ImageFilterWrite {
+            name: "nimune",
+            vector: &[],
+            scale: 0.01,
+            cut: 0.62,
+            rate: 1000,
+            live: true,
+            samples,
+            calibrated: true,
+            examples,
+            faces: None,
+        };
+        let save = |samples, examples| {
+            let mut filter = write(samples, examples);
+            filter.vector = &vector;
+            settings.try_save_image_filter(chat, filter)
+        };
+        assert!(save(1, Some(&[7u8; 772])).await.unwrap());
+        let read = || settings.try_image_filter(chat, "nimune");
+        assert_eq!(read().await.unwrap().unwrap().examples, Some(vec![7u8; 772]));
+        assert!(save(1, None).await.unwrap());
+        assert_eq!(
+            read().await.unwrap().unwrap().examples,
+            Some(vec![7u8; 772]),
+            "a write without pictures keeps them"
+        );
+        assert!(save(0, None).await.unwrap());
+        assert_eq!(read().await.unwrap().unwrap().examples, None, "a phrase has none");
+        for table in ["image_filters", "settings", "durable_chats"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE chat_id = $1"))
+                .bind(chat)
+                .execute(&settings.pool)
+                .await
+                .unwrap();
+        }
     }
 
     #[tokio::test]

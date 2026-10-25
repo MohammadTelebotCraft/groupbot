@@ -6,42 +6,56 @@ use crate::state::{SettingMutation, SettingsWriteError};
 
 pub const SETTINGS: &[(&str, &str)] = &[
     ("اخطار", "warns"),
+    ("سقف اخطار", "warns"),
+    ("warns", "warns"),
+    ("هشدار", "warns"),
     ("احراز", "captcha"),
     ("احراز هویت", "captcha"),
+    ("کپچا", "captcha"),
+    ("captcha", "captcha"),
     ("خیانت", "betrayal"),
+    ("ضد خیانت", "betrayal"),
+    ("betrayal", "betrayal"),
     ("رگبار", "flood"),
+    ("ضد رگبار", "flood"),
+    ("ضد اسپم", "flood"),
+    ("flood", "flood"),
     ("اعلان", "notice"),
+    ("اعلان حذف", "notice"),
+    ("notice", "notice"),
 ];
 
-pub const COMMANDS: &[&str] = &["تنظیم", "ست"];
+pub const COMMANDS: &[&str] = &[
+    "تنظیم",
+    "ست",
+    "/tune",
+    "/adjust",
+];
+
+fn parse(text: &str) -> Option<(&'static str, Vec<u32>)> {
+    let rest = COMMANDS
+        .iter()
+        .find_map(|command| super::commands::strip_prefix(text, command))?;
+    let (tail, what) = SETTINGS
+        .iter()
+        .filter_map(|(name, what)| {
+            super::commands::strip_prefix(rest, name).map(|tail| (tail, *what))
+        })
+        .min_by_key(|(tail, _)| tail.len())?;
+    let numbers = numbers_in(tail)?;
+    let max = if matches!(what, "betrayal" | "flood") {
+        2
+    } else {
+        1
+    };
+    (numbers.len() <= max).then_some((what, numbers))
+}
 
 pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
-    let text = view.digits();
-    let Some(rest) = COMMANDS.iter().find_map(|command| {
-        let rest = text.strip_prefix(command)?;
-        rest.starts_with(char::is_whitespace)
-            .then(|| rest.trim().to_owned())
-    }) else {
-        return false;
-    };
-    let Some((name, what)) = SETTINGS
-        .iter()
-        .max_by_key(|(name, _)| {
-            if rest.starts_with(*name) {
-                name.len()
-            } else {
-                0
-            }
-        })
-        .filter(|(name, _)| rest.starts_with(*name))
-    else {
+    let Some((what, numbers)) = parse(view.command()) else {
         return false;
     };
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
-        return false;
-    };
-
-    let Some(numbers) = numbers_in(&rest[name.len()..]) else {
         return false;
     };
 
@@ -54,7 +68,7 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
     }
 
     let mut kind = ResponseKind::SettingsChanged;
-    let reply = match *what {
+    let reply = match what {
         "warns" => match warns::set_limit(ctx, chat, numbers[0]).await {
             Ok(()) => format!("✓ سقف اخطار روی {} تنظیم شد.", warns::limit(ctx, chat)),
             Err(error) => {
@@ -190,7 +204,7 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
         message,
         kind,
         super::premium::icon_text(
-            Some(match *what {
+            Some(match what {
                 "warns" => super::premium::Icon::Warning,
                 "captcha" | "flood" | "notice" => super::premium::Icon::Timer,
                 _ => super::premium::Icon::Locked,
@@ -237,18 +251,30 @@ mod tests {
     #[test]
     fn every_alias_is_matched_longest_first() {
         for (alias, what) in SETTINGS {
-            let picked = SETTINGS
-                .iter()
-                .max_by_key(|(name, _)| {
-                    if alias.starts_with(*name) {
-                        name.len()
-                    } else {
-                        0
-                    }
-                })
-                .filter(|(name, _)| alias.starts_with(*name))
-                .expect("an alias must match itself");
-            assert_eq!(picked.1, *what, "«{alias}» resolved to the wrong setting");
+            let picked = parse(&format!("تنظیم {alias} 15")).expect("an alias must match itself");
+            assert_eq!(
+                picked,
+                (*what, vec![15]),
+                "«{alias}» resolved to the wrong setting"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_accept_keyboard_variants_but_not_extra_words_or_numbers() {
+        assert_eq!(
+            parse("تنظيم  احراز\u{200c}هويت ۱۲۰"),
+            Some(("captcha", vec![120]))
+        );
+        assert_eq!(parse("/TUNE ضد اسپم ۱۰ ۵"), Some(("flood", vec![10, 5])));
+        for text in [
+            "تنظیم اخطار۵",
+            "تنظیم اخطار 5 لطفا",
+            "تنظیم اخطار 5 9",
+            "تنظیم رگبار 5 9 2",
+            "تنظیم اعلان شرط 120 30",
+        ] {
+            assert_eq!(parse(text), None, "{text}");
         }
     }
 }

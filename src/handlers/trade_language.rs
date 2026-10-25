@@ -1,4 +1,3 @@
-
 use super::context;
 
 fn amount(text: &str) -> bool {

@@ -82,8 +82,11 @@ ARCHIVES = {
     "drawn_sensitive": ["sensitive_341769.zip"],
     "drawn_safe": ["general_341506.zip"],
 }
-# corpus count, eval count
-WANT = {"drawn_explicit": (3000, 300), "drawn_soft": (1500, 150), "drawn_sensitive": (1000, 150), "drawn_safe": (1000, 150)}
+# corpus count, eval count. The drawn boundary is where every remaining false positive was
+# (2026-10-14: 13 of 20 held-out and 18 of 18 test deletions were ordinary Danbooru drawings),
+# so the two groups the head is trained on were grown from 3 000 / 1 000 to 5 000 / 5 000. The
+# eval counts did not move: the untouched set stays the one every earlier number was taken on.
+WANT = {"drawn_explicit": (5000, 300), "drawn_soft": (1500, 150), "drawn_sensitive": (1000, 150), "drawn_safe": (5000, 150)}
 MAX_SIDE = 800
 
 
@@ -119,8 +122,21 @@ def open_archive(name: str):
     return zipfile.ZipFile(handle)
 
 
+def known_hashes() -> set[str]:
+    """SHA-1 of every stored JPEG, corpus and eval alike. A later run draws with a new seed, and
+    the same archive member drawn twice re-encodes to the same bytes — so this is what keeps a
+    test picture from reappearing as a training one."""
+    seen = set()
+    for root in (CORPUS, EVAL):
+        for group in ARCHIVES:
+            for path in (root / group).glob("*.jpg"):
+                seen.add(hashlib.sha1(path.read_bytes()).hexdigest())
+    return seen
+
+
 def sample(threads: int, seed: int) -> None:
     rng = random.Random(seed)
+    seen = known_hashes()
     for group, archives in ARCHIVES.items():
         want_corpus, want_eval = WANT[group]
         corpus_dir = CORPUS / group
@@ -142,8 +158,12 @@ def sample(threads: int, seed: int) -> None:
             members = [m for m in z.namelist() if not m.endswith("/")]
             rng.shuffle(members)
             print(f"{group}: {name} {len(members)} members, index {time.time() - t:.0f}s", flush=True)
-            # Over-ask by a quarter: some members fail to decode or are too small.
-            budget = int((per_archive_corpus + per_archive_eval) * 1.25)
+            # Over-ask by a quarter: some members fail to decode or are too small. Sized by what
+            # is still missing, because every member asked for is fetched whether it is needed or
+            # not — a top-up run must not re-download the whole group to add a third of it.
+            need = max(0, min(per_archive_corpus, want_corpus - have_corpus)) + max(
+                0, min(per_archive_eval, want_eval - have_eval))
+            budget = int(need * 1.25) + 8
             chosen = members[:budget]
             # One ZipFile handle is not thread safe; each worker opens its own.
             local = {}
@@ -173,6 +193,10 @@ def sample(threads: int, seed: int) -> None:
                     jpeg = as_jpeg(data)
                     if jpeg is None:
                         continue
+                    digest = hashlib.sha1(jpeg).hexdigest()
+                    if digest in seen:
+                        continue
+                    seen.add(digest)
                     # Eval first, so the untouched set is filled from a disjoint prefix.
                     if got_eval < per_archive_eval and have_eval + got_eval < want_eval:
                         at = have_eval + got_eval
@@ -184,7 +208,8 @@ def sample(threads: int, seed: int) -> None:
                         (corpus_dir / f"{at:05d}.jpg").write_bytes(jpeg)
                         rows_corpus.append((f"{group}/{at:05d}.jpg", split_of(data)))
                         got_corpus += 1
-                    if got_corpus >= per_archive_corpus and got_eval >= per_archive_eval:
+                    if (have_corpus + got_corpus >= want_corpus or got_corpus >= per_archive_corpus) and (
+                        have_eval + got_eval >= want_eval or got_eval >= per_archive_eval):
                         break
             have_corpus += got_corpus
             have_eval += got_eval

@@ -26,13 +26,70 @@ pub const ADD_REQUIRED: &str = "add_required";
 pub const ADD_PRESETS: &[u32] = &[0, 1, 3, 5, 10, 20];
 pub const ADD_RANGE: (u32, u32) = (0, 1000);
 
-pub const SET: &[&str] = &["تنظیم عضویت اجباری", "عضویت اجباری"];
-pub const CLEAR: &[&str] = &["حذف عضویت اجباری", "خاموش عضویت اجباری"];
-pub const SET_ADD: &[&str] = &["تنظیم اد اجباری", "اد اجباری", "عضوگیری اجباری"];
-pub const SET_PROMPT: &[&str] = &["تنظیم اعلان شرط", "اعلان شرط"];
-pub const FREE_ADD: &[&str] = &["معاف", "تنظیم معاف", "افزودن معاف"];
-pub const FREE_REMOVE: &[&str] = &["حذف معاف", "لغو معاف"];
-pub const CLEAR_ADD: &[&str] = &["حذف اد اجباری", "خاموش اد اجباری"];
+pub const SET: &[&str] = &[
+    "تنظیم عضویت اجباری",
+    "عضویت اجباری",
+    "تنظیم جوین اجباری",
+    "جوین اجباری",
+    "/setjoin",
+    "/forcejoin",
+    "/requirejoin",
+];
+pub const CLEAR: &[&str] = &[
+    "حذف عضویت اجباری",
+    "خاموش عضویت اجباری",
+    "لغو عضویت اجباری",
+    "حذف جوین اجباری",
+    "عضویت اجباری خاموش",
+    "/clearjoin",
+    "/delforcejoin",
+    "/unforcejoin",
+];
+pub const SET_ADD: &[&str] = &[
+    "تنظیم اد اجباری",
+    "اد اجباری",
+    "عضوگیری اجباری",
+    "تنظیم عضوگیری اجباری",
+    "افزودن اجباری",
+    "/setadd",
+    "/forceadd",
+    "/requireadd",
+];
+pub const SET_PROMPT: &[&str] = &[
+    "تنظیم اعلان شرط",
+    "اعلان شرط",
+    "تنظیم پیام شرط",
+    "/gateprompt",
+    "/gatemessage",
+];
+pub const FREE_ADD: &[&str] = &[
+    "معاف",
+    "تنظیم معاف",
+    "افزودن معاف",
+    "اضافه کردن معاف",
+    "معاف کردن",
+    "/exempt",
+    "/addexempt",
+    "/exemptuser",
+];
+pub const FREE_REMOVE: &[&str] = &[
+    "حذف معاف",
+    "لغو معاف",
+    "لغو معافیت",
+    "/unexempt",
+    "/delexempt",
+    "/unexemptuser",
+];
+pub const CLEAR_ADD: &[&str] = &[
+    "حذف اد اجباری",
+    "خاموش اد اجباری",
+    "لغو اد اجباری",
+    "حذف عضوگیری اجباری",
+    "اد اجباری خاموش",
+    "/clearadd",
+    "/delforceadd",
+    "/unforceadd",
+];
 
 pub fn channel(ctx: &Ctx, chat: i64) -> Option<String> {
     ctx.settings
@@ -170,7 +227,10 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
-    if CLEAR.contains(&text) {
+    if CLEAR
+        .iter()
+        .any(|command| super::commands::matches(text, command))
+    {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
@@ -201,7 +261,10 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    if CLEAR_ADD.contains(&text) {
+    if CLEAR_ADD
+        .iter()
+        .any(|command| super::commands::matches(text, command))
+    {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
@@ -232,21 +295,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    if let Some((add, arg)) = FREE_ADD
-        .iter()
-        .map(|c| (true, *c))
-        .chain(FREE_REMOVE.iter().map(|c| (false, *c)))
-        .find_map(|(add, command)| {
-            let rest = text.strip_prefix(command)?;
-            match rest.is_empty() {
-                true => Some((add, None)),
-                false => rest
-                    .starts_with(char::is_whitespace)
-                    .then(|| (add, Some(rest.trim())))
-                    .filter(|(_, arg)| arg.is_none_or(|a| !a.contains(' '))),
-            }
-        })
-    {
+    if let Some((add, arg)) = parse_exemption(text) {
         let Some(named) = super::named(message, arg) else {
             return false;
         };
@@ -310,10 +359,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    if let Some(rest) = SET_PROMPT.iter().find_map(|command| {
-        let rest = text.strip_prefix(command)?;
-        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
-    }) {
+    if let Some(rest) = after(text, SET_PROMPT) {
         let Some(numbers) = super::numbers_in(rest) else {
             return false;
         };
@@ -367,10 +413,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    if let Some(rest) = SET_ADD.iter().find_map(|command| {
-        let rest = text.strip_prefix(command)?;
-        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
-    }) {
+    if let Some(rest) = after(text, SET_ADD) {
         let count = match super::numbers_in(rest).as_deref() {
             Some(&[count]) => Some(u64::from(count)),
             Some([]) if rest.is_empty() => None,
@@ -425,13 +468,10 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    let Some(rest) = SET.iter().find_map(|command| {
-        let rest = text.strip_prefix(command)?;
-        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
-    }) else {
+    let Some(rest) = after(text, SET) else {
         return false;
     };
-    if !rest.is_empty() && !rest.starts_with('@') {
+    if !rest.is_empty() && channel_arg(rest).is_none() {
         return false;
     }
     if !super::limits::allows(ctx, message, super::limits::SET).await {
@@ -460,12 +500,9 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    let Some(name) = rest.strip_prefix('@').map(|n| n.trim().to_lowercase()) else {
+    let Some(name) = channel_arg(rest).map(str::to_lowercase) else {
         return false;
     };
-    if name.is_empty() {
-        return false;
-    }
 
     let Ok(Some(_)) = ctx.client.resolve_username(&name).await else {
         super::respond(
@@ -506,6 +543,32 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         }
     }
     true
+}
+
+fn after<'a>(text: &'a str, aliases: &[&str]) -> Option<&'a str> {
+    aliases
+        .iter()
+        .find_map(|command| super::commands::strip_prefix(text, command))
+}
+
+fn channel_arg(rest: &str) -> Option<&str> {
+    let name = rest.strip_prefix('@')?;
+    super::arg_names_a_user(rest).then_some(name)
+}
+
+fn parse_exemption(text: &str) -> Option<(bool, Option<&str>)> {
+    FREE_ADD
+        .iter()
+        .map(|c| (true, *c))
+        .chain(FREE_REMOVE.iter().map(|c| (false, *c)))
+        .find_map(|(add, command)| {
+            let rest = super::commands::strip_prefix(text, command)?;
+            if rest.is_empty() {
+                return Some((add, None));
+            }
+            (!rest.contains(char::is_whitespace) && super::arg_names_a_user(rest))
+                .then_some((add, Some(rest)))
+        })
 }
 
 pub async fn enforce(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
@@ -727,6 +790,50 @@ async fn channel_ref(ctx: &Ctx, name: &str) -> Option<PeerRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_aliases_preserve_channel_names_and_closed_numeric_tails() {
+        assert_eq!(
+            after("تنظيم\u{200c}جوين\u{200c}اجباري @MyChannel", SET),
+            Some("@MyChannel")
+        );
+        assert_eq!(after("/ForceJoin @MyChannel", SET), Some("@MyChannel"));
+        assert_eq!(after("/ForceJoined @MyChannel", SET), None);
+        let rest = after("تنظيم\tعضوگيري اجباري ۵", SET_ADD).unwrap();
+        assert_eq!(super::super::numbers_in(rest), Some(vec![5]));
+        let rest = after("/ForceAdd 5 please", SET_ADD).unwrap();
+        assert_eq!(super::super::numbers_in(rest), None);
+        let rest = after("/GatePrompt ۱۲۰ ۳۰", SET_PROMPT).unwrap();
+        assert_eq!(super::super::numbers_in(rest), Some(vec![120, 30]));
+        assert_eq!(channel_arg("@MyChannel"), Some("MyChannel"));
+        assert_eq!(channel_arg("@channel چیه"), None);
+        assert_eq!(channel_arg("@channel@other"), None);
+        assert_eq!(channel_arg("چطوریه"), None);
+    }
+
+    #[test]
+    fn exemption_aliases_require_a_single_target_or_reply() {
+        assert_eq!(
+            parse_exemption("معاف کردن @SomeUser"),
+            Some((true, Some("@SomeUser")))
+        );
+        assert_eq!(
+            parse_exemption("افزودن\u{200c}معاف ۱۲۳"),
+            Some((true, Some("۱۲۳")))
+        );
+        assert_eq!(
+            parse_exemption("/Exempt @SomeUser"),
+            Some((true, Some("@SomeUser")))
+        );
+        assert_eq!(parse_exemption("/UnExempt"), Some((false, None)));
+        assert_eq!(
+            parse_exemption("لغو معافیت @SomeUser"),
+            Some((false, Some("@SomeUser")))
+        );
+        assert_eq!(parse_exemption("معاف شدم"), None);
+        assert_eq!(parse_exemption("معاف @SomeUser\tplease"), None);
+        assert_eq!(parse_exemption("/exemptions"), None);
+    }
 
     #[test]
     fn the_defaults_sit_inside_their_ranges() {

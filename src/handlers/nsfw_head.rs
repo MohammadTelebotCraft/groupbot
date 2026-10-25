@@ -1,4 +1,3 @@
-
 use super::nsfw_head_vectors::{BIAS, WEIGHTS};
 
 const _: () = assert!(WEIGHTS.len() == super::vision::DIM);

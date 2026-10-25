@@ -43,7 +43,7 @@ pub async fn list(
     let status = match query.status.as_deref() {
         None | Some("all") => None,
         Some("open" | "resolved" | "reversed") => query.status.as_deref(),
-        Some(_) => return (StatusCode::BAD_REQUEST, "وضعیت نامعتبر است.").into_response(),
+        Some(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "وضعیت نامعتبر است." }))).into_response(),
     };
     match ctx.settings.moderation_cases(
         gate.chat,
@@ -81,7 +81,7 @@ pub async fn resolve(
     if handlers::cases::valid_note(note).is_err() {
         return (
             StatusCode::BAD_REQUEST,
-            "یادداشت باید بین ۱ تا ۵۰۰ نویسه باشد.",
+            Json(json!({ "error": "یادداشت باید بین ۱ تا ۵۰۰ نویسه باشد." })),
         )
             .into_response();
     }
@@ -103,7 +103,7 @@ pub async fn resolve(
             }
             handlers::cases::resolve_delete(&ctx, gate.chat, id, actor).await
         }
-        _ => return (StatusCode::BAD_REQUEST, "اقدام نامعتبر است.").into_response(),
+        _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "اقدام نامعتبر است." }))).into_response(),
     };
     Json(json!({ "message": message })).into_response()
 }
@@ -131,7 +131,7 @@ pub async fn note(
     if note.is_empty() || note.chars().count() > handlers::cases::NOTE_MAX {
         return (
             StatusCode::BAD_REQUEST,
-            "یادداشت باید بین ۱ تا ۵۰۰ نویسه باشد.",
+            Json(json!({ "error": "یادداشت باید بین ۱ تا ۵۰۰ نویسه باشد." })),
         )
             .into_response();
     }

@@ -8,18 +8,100 @@ use super::{Ctx, esc, name_of};
 
 pub const RULES: &str = "rules";
 
-pub const SHOW_RULES: &[&str] = &["قوانین", "قانون"];
-pub const SET_RULES: &[&str] = &["تنظیم قوانین", "تنظیم قانون"];
-pub const NOTE_CMD: &[&str] = &["یادداشت"];
-pub const NOTE_SET: &[&str] = &["تنظیم یادداشت", "ثبت یادداشت"];
-pub const NOTE_CLEAR: &[&str] = &["حذف یادداشت"];
-pub const PIN: &[&str] = &["سنجاق", "پین"];
-pub const PIN_QUIET: &[&str] = &["سنجاق بی صدا", "پین بی صدا"];
-pub const UNPIN: &[&str] = &["حذف سنجاق", "حذف پین", "برداشتن سنجاق"];
-pub const SLOW: &[&str] = &["اسلوموشن", "اسلومود", "کندی"];
-pub const NIGHT_CMD: &[&str] = &["قفل شب"];
-pub const TAG_ALL: &[&str] = &["تگ همه", "منشن همه", "فراخوان", "تگ", "منشن"];
-pub const TAG_STOP: &[&str] = &["توقف", "استاپ"];
+pub const SHOW_RULES: &[&str] = &[
+    "قوانین",
+    "قانون",
+    "قوانین گروه",
+    "نمایش قوانین",
+    "/rules",
+    "/grouprules",
+];
+pub const SET_RULES: &[&str] = &[
+    "تنظیم قوانین",
+    "تنظیم قانون",
+    "ثبت قوانین",
+    "ثبت قانون",
+    "/setrules",
+    "افزودن قوانین",
+    "/addrules",
+];
+pub const NOTE_CMD: &[&str] = &[
+    "یادداشت",
+    "نمایش یادداشت",
+    "/note",
+    "/getnote",
+];
+pub const NOTE_SET: &[&str] = &[
+    "تنظیم یادداشت",
+    "ثبت یادداشت",
+    "افزودن یادداشت",
+    "/setnote",
+    "/addnote",
+];
+pub const NOTE_CLEAR: &[&str] = &[
+    "حذف یادداشت",
+    "پاک کردن یادداشت",
+    "/delnote",
+    "پاک یادداشت",
+    "/clearnote",
+];
+pub const PIN: &[&str] = &[
+    "سنجاق",
+    "پین",
+    "پین کن",
+    "سنجاق کن",
+    "/pin",
+    "/pinmessage",
+];
+pub const PIN_QUIET: &[&str] = &[
+    "سنجاق بی صدا",
+    "پین بی صدا",
+    "پین بدون صدا",
+    "/silentpin",
+    "/quietpin",
+];
+pub const UNPIN: &[&str] = &[
+    "حذف سنجاق",
+    "حذف پین",
+    "برداشتن سنجاق",
+    "برداشتن پین",
+    "آنپین",
+    "آن پین",
+    "/unpin",
+    "/unpinmessage",
+];
+pub const SLOW: &[&str] = &[
+    "اسلوموشن",
+    "اسلومود",
+    "اسلو مود",
+    "حالت آهسته",
+    "کندی",
+    "/slowmode",
+    "/slow",
+];
+pub const NIGHT_CMD: &[&str] = &[
+    "قفل شب",
+    "قفل شبانه",
+    "/nightlock",
+    "/night",
+];
+pub const TAG_ALL: &[&str] = &[
+    "تگ همه",
+    "منشن همه",
+    "تگ اعضا",
+    "منشن اعضا",
+    "/tagall",
+    "/mentionall",
+];
+pub const TAG_STOP: &[&str] = &[
+    "توقف",
+    "استاپ",
+    "توقف تگ",
+    "توقف منشن",
+    "لغو تگ",
+    "/stoptag",
+    "/stopmention",
+];
 
 const TAG_SEPARATOR: &str = " ⊹ ";
 
@@ -146,7 +228,7 @@ pub async fn handle(
     message: &Message,
     view: &super::locks::View<'_>,
 ) -> bool {
-    let text = view.digits();
+    let text = view.command();
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
@@ -209,7 +291,7 @@ pub async fn handle(
         return true;
     }
 
-    if let Some(rest) = after(text, SET_RULES) {
+    if let Some(rest) = after(view.text(), SET_RULES) {
         if !admin(super::limits::SET).await {
             return true;
         }
@@ -303,7 +385,7 @@ pub async fn handle(
         return true;
     }
 
-    let written = after(text, NOTE_SET);
+    let written = after(view.text(), NOTE_SET);
     if let Some(rest) = written.or_else(|| after(text, NOTE_CMD)) {
         if written.is_none() && !rest.is_empty() {
             return false;
@@ -419,9 +501,8 @@ pub async fn handle(
     }
 
     if let Some(rest) = after(text, SLOW) {
-        let asked = match super::numbers_in(rest).as_deref() {
-            Some(&[asked]) => asked,
-            _ => return false,
+        let Some(asked) = slow_seconds(rest) else {
+            return false;
         };
         if !admin(super::limits::SET).await {
             return true;
@@ -435,11 +516,24 @@ pub async fn handle(
     false
 }
 
+fn slow_seconds(rest: &str) -> Option<u32> {
+    let rest = super::commands::normalize(rest);
+    if ["خاموش", "غیرفعال", "غیر فعال", "off"].contains(&rest.as_ref()) {
+        return Some(0);
+    }
+    if let Some(numbers) = super::numbers_in(&rest)
+        && let [seconds] = numbers[..]
+    {
+        return Some(seconds);
+    }
+    super::restrict::duration_of(&rest).and_then(|duration| u32::try_from(duration.as_secs()).ok())
+}
+
 async fn set_night_from(ctx: &Ctx, message: &Message, chat: i64, rest: &str) -> bool {
     if rest.is_empty() {
         return false;
     }
-    if rest == "خاموش" || rest.starts_with("خاموش ") {
+    if ["خاموش", "غیرفعال", "غیر فعال", "off"].contains(&rest) {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
@@ -1010,10 +1104,10 @@ async fn send_batch(
 }
 
 fn after<'a>(text: &'a str, commands: &[&str]) -> Option<&'a str> {
-    commands.iter().find_map(|command| {
-        let rest = text.strip_prefix(command)?;
-        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
-    })
+    commands
+        .iter()
+        .filter_map(|command| super::commands::strip_prefix(text, command))
+        .min_by_key(|rest| rest.len())
 }
 
 fn clock_at(word: &str) -> Option<u32> {
@@ -1033,8 +1127,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_bare_tag_carries_the_default_batch() {
+    fn free_text_commands_keep_payloads_and_choose_the_longest_alias() {
+        assert_eq!(
+            after("ثبت\u{200c}قوانين  Rule  ۲\u{200c}ي", SET_RULES),
+            Some("Rule  ۲\u{200c}ي")
+        );
+        assert_eq!(after("نمايش\u{200c}یادداشت", NOTE_CMD), Some(""));
+        assert_eq!(after("تگ اعضا ۵", TAG_ALL), Some("۵"));
+        assert_eq!(after("ثبت قوانینم متن", SET_RULES), None);
+    }
+
+    #[test]
+    fn slow_mode_accepts_units_and_explicit_off_without_extra_text() {
+        assert_eq!(slow_seconds("۳۰"), Some(30));
+        assert_eq!(slow_seconds("۵ دقيقه"), Some(300));
+        assert_eq!(slow_seconds("1 HOUR"), Some(3600));
+        assert_eq!(slow_seconds("غير\u{200c}فعال"), Some(0));
+        for text in ["خاموش کن", "30 پیام", "30 60", "", "1 hour later"] {
+            assert_eq!(slow_seconds(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn only_explicit_tag_aliases_carry_the_default_batch() {
         assert_eq!(batch_size(""), Some(TAG_PER_MESSAGE));
+        for word in ["تگ", "منشن", "فراخوان"] {
+            assert_eq!(after(word, TAG_ALL), None);
+        }
         for command in TAG_ALL {
             let rest = after(command, TAG_ALL).expect("the alias matches itself");
             assert_eq!(

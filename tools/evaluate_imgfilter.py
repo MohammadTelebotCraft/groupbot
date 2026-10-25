@@ -5,9 +5,12 @@ The bot's decision is:
 
     dot(image_embedding, phrase_embedding) - dot(image_embedding, BACKGROUND) >= cut
 
-This tool reproduces that path with the exported ONNX image/text towers, the Rust BPE files,
-and the generated background vector.  It reports the deployed fixed cut, a threshold sweep,
-class-balanced metrics, and the largest false-positive scores.  A high raw accuracy on an
+This tool approximates that path with the selected ONNX image/text towers, the Rust BPE files,
+and the generated background vector. It uses raw text vectors and cached dataset images; Rust
+also quantizes stored filter vectors and scores Telegram-selected thumbnails. The default
+target/release text tower may differ from the documented production artifact, so compare the
+printed artifact hashes before using the results. It reports the deployed fixed cut, a threshold
+sweep, class-balanced metrics, and the highest-scoring negative images. A high raw accuracy on an
 imbalanced one-vs-rest set is not enough, so the useful gates are balanced accuracy, recall,
 and false-positive rate.
 
@@ -26,6 +29,7 @@ the class labels used for the positive and negative sides of every phrase.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import pathlib
@@ -42,7 +46,7 @@ from PIL import Image
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
 ROWS = "https://datasets-server.huggingface.co/rows"
-SIDE = 224
+SIDE = 384
 TOKENS = 64
 TEMPLATES = [
     "{}",
@@ -93,6 +97,14 @@ def page(dataset: str, config: str, split: str, offset: int) -> dict:
 
 def safe_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or "class"
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def download(url: str, path: pathlib.Path) -> bool:
@@ -251,15 +263,25 @@ def unescape(text: str) -> str:
     return "".join(out)
 
 
+def rust_lines(text: str) -> list[str]:
+    """Match Rust str::lines plus the production trailing-CR trim."""
+    if not text:
+        return []
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return [line.rstrip("\r") for line in lines]
+
+
 class Bpe:
     def __init__(self, vocab: pathlib.Path, merges: pathlib.Path):
-        self.ids = {unescape(line.rstrip("\r")): at for at, line in enumerate(vocab.read_text(encoding="utf-8").splitlines())}
+        self.ids = {unescape(line): at for at, line in enumerate(rust_lines(vocab.read_text(encoding="utf-8")))}
         self.eos = self.ids["<eos>"]
         unk = self.ids["<unk>"]
         self.bytes = [self.ids.get(f"<0x{value:02X}>", unk) for value in range(256)]
         self.merges: dict[tuple[int, int], tuple[int, int]] = {}
-        for rank, line in enumerate(merges.read_text(encoding="utf-8").splitlines()):
-            pair = line.rstrip("\r").split(" ", 1)
+        for rank, line in enumerate(rust_lines(merges.read_text(encoding="utf-8"))):
+            pair = line.split(" ", 1)
             if len(pair) != 2:
                 continue
             left, right = (unescape(piece) for piece in pair)
@@ -324,9 +346,10 @@ def background_vector() -> np.ndarray:
 
 def image_vector(session: ort.InferenceSession, path: pathlib.Path) -> np.ndarray:
     shape = session.get_inputs()[0].shape
-    side = next((int(value) for value in shape[-2:] if isinstance(value, int) and value > 0), SIDE)
+    if shape[-2:] != [SIDE, SIDE]:
+        raise RuntimeError(f"vision graph input is {shape}, expected the pinned {SIDE}x{SIDE} contract")
     with Image.open(path) as image:
-        image = image.convert("RGB").resize((side, side), Image.Resampling.BILINEAR)
+        image = image.convert("RGB").resize((SIDE, SIDE), Image.Resampling.BILINEAR)
         pixels = np.asarray(image, dtype=np.float32).transpose(2, 0, 1) / 127.5 - 1.0
     outputs = session.run(None, {session.get_inputs()[0].name: pixels[None, ...]})
     for output in outputs:
@@ -391,14 +414,14 @@ def evaluate(samples: list[Sample], image_session: ort.InferenceSession, text_se
     else:
         print("none")
 
-    print("\nPer-class deployed-cut summary (largest false positives first):")
+    print("\nPer-class deployed-cut summary (highest-scoring negatives first):")
     for index, name in enumerate(names):
         result = metrics(scores[:, index], labels == name, MODEL_CUT)
         false_positive = sorted(
             ((float(score), sample.name, sample.path.name) for score, sample in zip(scores[:, index], samples) if sample.name != name),
             reverse=True,
         )[:3]
-        print(f"{name}: recall={result[2]:.3f} fpr={result[3]:.3f} balanced={result[1]:.3f} top_fp={false_positive}")
+        print(f"{name}: recall={result[2]:.3f} fpr={result[3]:.3f} balanced={result[1]:.3f} top_negative={false_positive}")
 
 
 def main() -> None:
@@ -411,6 +434,9 @@ def main() -> None:
     args = parser.parse_args()
     if args.per_class < 2:
         raise SystemExit("--per-class must be at least 2")
+    for name in ("vision.onnx", "vision_text.onnx", "vision_text_vocab.txt", "vision_text_merges.txt"):
+        path = args.vision_files / name
+        print(f"artifact {name} sha256={sha256_file(path)}", flush=True)
     cache = HERE / "target" / "imgfilter-eval"
     all_samples: list[Sample] = []
     for name in dict.fromkeys(args.dataset or ["imagenette"]):

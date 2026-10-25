@@ -8,7 +8,14 @@ use super::Ctx;
 
 pub const CLEANER_ADDED: &str = "cln_added";
 
-pub const STATUS: &[&str] = &["وضعیت نصب", "بررسی نصب"];
+pub const STATUS: &[&str] = &[
+    "وضعیت نصب",
+    "بررسی نصب",
+    "وضعیت راه اندازی",
+    "بررسی دسترسی ربات",
+    "/installstatus",
+    "/checkinstall",
+];
 
 pub struct Need {
     pub label: &'static str,
@@ -413,7 +420,7 @@ async fn cleaner_line(ctx: &Ctx, chat_ref: PeerRef, joining: bool) -> &'static s
 }
 
 pub async fn handle(ctx: &Arc<Ctx>, message: &Message) -> bool {
-    if !STATUS.contains(&message.text().trim()) {
+    if !super::commands::contains(STATUS, message.text()) {
         return false;
     }
     if !super::limits::allows(ctx, message, super::limits::SET).await {

@@ -5,14 +5,23 @@ use grammers_client::update::CallbackQuery;
 use super::{Ctx, esc, name_of};
 use crate::response::ResponseKind;
 
-pub const COMMANDS: &[&str] = &["گزارش", "ریپورت", "report", "!report"];
+pub const COMMANDS: &[&str] = &[
+    "گزارش",
+    "ریپورت",
+    "گزارش تخلف",
+    "report",
+    "!report",
+    "/report",
+    "گزارش پیام",
+    "/reportmsg",
+];
 
 const ANCHOR: &str = "\u{2063}";
 
 pub const EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
-    if !COMMANDS.contains(&message.text().trim()) {
+    if !super::commands::contains(COMMANDS, message.text()) {
         return false;
     }
     let (Some(chat), Some(user)) = (

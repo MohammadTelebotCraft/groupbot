@@ -14,8 +14,21 @@ pub const EVEN_ADMINS: &str = "bot_even_admins";
 
 pub const ALLOWED: &str = "botok:";
 
-pub const ALLOW: &[&str] = &["ربات مجاز", "افزودن ربات مجاز"];
-pub const DISALLOW: &[&str] = &["حذف ربات مجاز", "لغو ربات مجاز"];
+pub const ALLOW: &[&str] = &[
+    "ربات مجاز",
+    "افزودن ربات مجاز",
+    "اضافه کردن ربات مجاز",
+    "/allowbot",
+    "مجاز کردن ربات",
+    "/whitelistbot",
+];
+pub const DISALLOW: &[&str] = &[
+    "حذف ربات مجاز",
+    "لغو ربات مجاز",
+    "برداشتن ربات مجاز",
+    "/disallowbot",
+    "/unwhitelistbot",
+];
 
 const SPARED_REPORT_MAX: usize = 512;
 
@@ -104,14 +117,14 @@ pub async fn allow(ctx: &Ctx, message: &Message) -> bool {
 fn parse_allow(text: &str) -> Option<(bool, Option<&str>)> {
     for (commands, adding) in [(ALLOW, true), (DISALLOW, false)] {
         for command in commands {
-            let Some(rest) = text.strip_prefix(command) else {
+            let Some(rest) = super::commands::strip_prefix(text, command) else {
                 continue;
             };
             let rest = rest.trim();
             if rest.is_empty() {
                 return Some((adding, None));
             }
-            if text[command.len()..].starts_with(char::is_whitespace) && !rest.contains(' ') {
+            if rest.split_whitespace().count() == 1 && super::arg_names_a_user(rest) {
                 return Some((adding, Some(rest)));
             }
         }
@@ -357,7 +370,7 @@ pub async fn sweep(ctx: &Ctx, chat: i64) -> usize {
         .client
         .iter_participants(chat_ref)
         .filter(tl::enums::ChannelParticipantsFilter::ChannelParticipantsBots);
-    let mut removed = 0;
+    let mut doomed: Vec<(i64, PeerRef, String)> = Vec::new();
     let mut seen = 0;
     let mut spared: Vec<String> = Vec::new();
     loop {
@@ -397,10 +410,7 @@ pub async fn sweep(ctx: &Ctx, chat: i64) -> usize {
                     spared.push(format!("{user} (no ref)"));
                     continue;
                 };
-                if remove(ctx, chat, chat_ref, target, &expanded.full_name()).await {
-                    super::cleaner::wipe_user(ctx, chat, user).await;
-                    removed += 1;
-                }
+                doomed.push((user, target, expanded.full_name()));
             }
             Ok(None) => break,
             Err(e) => {
@@ -409,6 +419,7 @@ pub async fn sweep(ctx: &Ctx, chat: i64) -> usize {
             }
         }
     }
+    let removed = remove_all(ctx, chat, chat_ref, doomed).await;
     println!(
         "bot lock: {chat}: {seen} bot(s) listed, {removed} removed{}",
         if spared.is_empty() {
@@ -418,6 +429,26 @@ pub async fn sweep(ctx: &Ctx, chat: i64) -> usize {
         }
     );
     removed
+}
+
+async fn remove_all(
+    ctx: &Ctx,
+    chat: i64,
+    chat_ref: PeerRef,
+    bots: Vec<(i64, PeerRef, String)>,
+) -> usize {
+    let removed = std::sync::atomic::AtomicUsize::new(0);
+    super::bounded(bots, super::FLEET_CAMPAIGNS, |(user, target, name)| {
+        let removed = &removed;
+        async move {
+            if remove(ctx, chat, chat_ref, target, &name).await {
+                super::cleaner::wipe_user(ctx, chat, user).await;
+                removed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    })
+    .await;
+    removed.into_inner()
 }
 
 async fn kick(ctx: &Ctx, chat: i64, chat_ref: PeerRef, user: i64) -> bool {
@@ -465,14 +496,16 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
         .into_iter()
         .filter(|joined| joined.is_bot)
         .collect();
-    let mut kicked = Vec::new();
-    for joined in &bots {
-        if remove(ctx, chat, chat_ref, joined.peer, &joined.name).await {
-            super::cleaner::wipe_user(ctx, chat, joined.id).await;
-            kicked.push(joined.id);
-        }
-    }
-    if kicked.is_empty() {
+    let removed = remove_all(
+        ctx,
+        chat,
+        chat_ref,
+        bots.into_iter()
+            .map(|joined| (joined.id, joined.peer, joined.name))
+            .collect(),
+    )
+    .await;
+    if removed == 0 {
         return false;
     }
 
@@ -504,6 +537,26 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn allow_aliases_accept_only_one_explicit_target() {
+        assert_eq!(
+            parse_allow("اضافه\tکردن ربات مجاز @Some_Bot"),
+            Some((true, Some("@Some_Bot")))
+        );
+        assert_eq!(
+            parse_allow("/ALLOWBOT @Some_Bot"),
+            Some((true, Some("@Some_Bot")))
+        );
+        assert_eq!(parse_allow("حذف ربات مجاز ۱۲٣"), Some((false, Some("۱۲٣"))));
+        for text in [
+            "ربات مجاز است",
+            "ربات مجاز @one @two",
+            "ربات مجاز @one\t@two",
+            "/allowbot@otherbot @one",
+        ] {
+            assert_eq!(parse_allow(text), None, "{text}");
+        }
+    }
     use super::*;
 
     #[test]

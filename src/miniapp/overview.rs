@@ -1,4 +1,3 @@
-
 use std::sync::Arc;
 
 use axum::Json;
@@ -28,7 +27,7 @@ pub async fn groups(State(ctx): State<Arc<Ctx>>, gate: UserGate) -> Response {
             ::log::warn!("miniapp: group lookup for {} failed: {error}", gate.user);
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "فهرست گروه‌ها خوانده نشد؛ دوباره تلاش کنید." })),
+                Json(json!({ "error": "فهرست گروه ها خوانده نشد؛ دوباره تلاش کنید." })),
             )
                 .into_response();
         }

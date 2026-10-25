@@ -35,6 +35,11 @@ pub async fn handle(ctx: &Ctx, query: &CallbackQuery) {
 
     let target_admitted = if here >= 0 && chat < 0 {
         let Some(peer) = ctx.resolve_group(chat).await else {
+            let _ = query
+                .answer()
+                .alert("این گروه در دسترس نیست؛ پنل را یک بار داخل گروه باز کنید.")
+                .send()
+                .await;
             return;
         };
         match ctx.admit_chat(chat, peer).await {
@@ -120,6 +125,7 @@ pub async fn handle(ctx: &Ctx, query: &CallbackQuery) {
         Some("pg" | "cln") => Some(limits::CLEAN),
         Some("r") => Some(limits::CASE),
         Some("mc") => Some(limits::CASE),
+        Some("p") if is_group_picker(data) => None,
         Some("s" | "p" | "q" | "t") => Some(limits::SET),
         _ => None,
     } && let Some(presser) = query.sender_id().bare_id()
@@ -168,6 +174,12 @@ pub async fn handle(ctx: &Ctx, query: &CallbackQuery) {
     if let Some(action) = data.strip_prefix("t:") {
         super::toggles::on_callback(ctx, query, action, chat).await;
     }
+}
+
+fn is_group_picker(data: &str) -> bool {
+    data.splitn(4, ':')
+        .nth(3)
+        .is_some_and(|action| action == "grp" || action.starts_with("grp:"))
 }
 
 fn callback_target_chat(data: &str, here: i64) -> i64 {
@@ -235,6 +247,15 @@ mod tests {
         assert_eq!(callback_target_chat("h:7:-1001:root", -9), -1001);
         assert_eq!(callback_target_chat("k:7:-1001:root", -9), -1001);
         assert_eq!(callback_target_chat("s:unrelated", -9), -9);
+    }
+
+    #[test]
+    fn only_the_picker_skips_the_settings_limit() {
+        assert!(super::is_group_picker("p:7:-1001:grp"));
+        assert!(super::is_group_picker("p:7:-1001:grp:3"));
+        assert!(!super::is_group_picker("p:7:-1001:grpx"));
+        assert!(!super::is_group_picker("p:7:-1001:root"));
+        assert!(!super::is_group_picker("p:7:-1001:fl_on"));
     }
 
     #[test]

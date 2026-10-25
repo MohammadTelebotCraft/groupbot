@@ -2,6 +2,7 @@
 
 mod dispatcher;
 mod handlers;
+mod media_eval;
 mod miniapp;
 mod response;
 mod state;
@@ -985,6 +986,12 @@ async fn capacity_probe() -> Result {
 
 #[tokio::main]
 async fn main() -> Result {
+    if env::args().skip(1).any(|arg| arg == "--media-eval") {
+        if env::args().count() != 2 {
+            return Err("usage: groupbot --media-eval < requests.jsonl".into());
+        }
+        return media_eval::run();
+    }
     let log_value = match env::var("LOG") {
         Ok(value) => Some(value),
         Err(env::VarError::NotPresent) => None,
@@ -999,14 +1006,51 @@ async fn main() -> Result {
     handlers::nsfw::configure_from_environment()
         .map_err(|error| format!("model configuration: {error}"))?;
     if env::args().skip(1).any(|arg| arg == "--model-probe") {
-        let classifier = handlers::nsfw::capacity_probe();
+        let classifier = handlers::nsfw::capacity_probe()?;
         let ocr = handlers::ocr::capacity_probe();
+        let image = image::RgbImage::from_pixel(384, 384, image::Rgb([127; 3]));
         let vision = handlers::vision::present();
+        let mut intent = false;
+        for _ in 0..2 * handlers::nsfw::infer_sessions() {
+            handlers::vision::embed_of(&image)?;
+            intent |= matches!(
+                handlers::intent::score("این کتاب برای فروش است")?,
+                handlers::intent::ScoreOutcome::Scored(_)
+            );
+        }
+        let text = matches!(
+            handlers::imgtext::try_embed("کتاب")?,
+            handlers::imgtext::EmbedOutcome::Embedding(_)
+        );
+        let mut intent_big = false;
+        for _ in 0..2 {
+            intent_big |= matches!(
+                handlers::intent::score_big("این کتاب برای فروش است")?,
+                handlers::intent::ScoreOutcome::Scored(_)
+            );
+        }
+        if ocr != 0 {
+            handlers::ocr::read(&image)?;
+        }
+        let mut faces = false;
+        for _ in 0..2 * handlers::nsfw::infer_sessions() {
+            faces |= handlers::facelock::detect(&image)?.is_some();
+            let face = handlers::facelock::Face {
+                score: 1.0,
+                bbox: [100.0, 100.0, 180.0, 200.0],
+                marks: [[140.0, 160.0], [220.0, 158.0], [180.0, 200.0], [148.0, 250.0], [212.0, 248.0]],
+            };
+            faces &= handlers::facelock::embed(&image, &face)?.is_some();
+        }
         println!(
-            "model-probe: nsfw_pools={} ocr_pools={} vision_pool={}",
+            "model-probe: warmed=true nsfw_pools={} ocr_workers={} vision_pool={} text_tower={} intent_pool={} intent_big={} face_lock={}",
             classifier,
             ocr,
             usize::from(vision),
+            usize::from(text),
+            usize::from(intent),
+            usize::from(intent_big),
+            usize::from(faces),
         );
         return Ok(());
     }
@@ -1057,15 +1101,6 @@ async fn main() -> Result {
         0 => {}
         n => println!("imported {n} settings from {SETTINGS_FILE}"),
     }
-    let normalized = settings
-        .try_normalize_fixed_image_filters(handlers::imgfilter::FIXED_MODEL_CUT)
-        .await?;
-    if normalized > 0 {
-        println!(
-            "image filters: normalized {normalized} fixed cut(s) to {:.3}",
-            handlers::imgfilter::FIXED_MODEL_CUT
-        );
-    }
     let space_flag = format!("vision:{}", handlers::vision::CHECKPOINT);
     let migrating = !settings.is_locked(0, &space_flag);
     if migrating {
@@ -1089,13 +1124,11 @@ async fn main() -> Result {
         }
         settings.try_clear_samples().await?;
     }
-    let fixed_filters = if migrating {
-        settings.try_phrase_image_filter_keys().await?
-    } else {
-        settings.try_fixed_image_filter_keys().await?
-    };
+    let learner_flag = format!("learner:{}", handlers::imgfilter::LEARNER);
+    let relearn_all = migrating || !settings.is_locked(0, &learner_flag);
+    let phrase_filters = settings.try_phrase_image_filter_keys().await?;
     let mut refreshed = 0usize;
-    for (chat, name) in fixed_filters {
+    for (chat, name) in phrase_filters {
         let row = settings
             .try_image_filter(chat, &name)
             .await?
@@ -1104,17 +1137,39 @@ async fn main() -> Result {
                     "vision migration row disappeared for {chat}/{name}"
                 ))
             })?;
+        if !relearn_all
+            && handlers::imgfilter::written_by_learn(&handlers::imgfilter::dequantize(
+                &row.vector,
+                row.scale,
+            ))
+        {
+            continue;
+        }
         let phrase = name.clone();
-        let vector = tokio::task::spawn_blocking(move || handlers::imgtext::embed(&phrase))
+        let outcome = tokio::task::spawn_blocking(move || handlers::imgfilter::refresh(&phrase))
             .await
             .map_err(|error| {
                 std::io::Error::other(format!("vision embedding worker failed: {error}"))
-            })?
-            .ok_or_else(|| {
-                std::io::Error::other(format!(
+            })?;
+        let (vector, cut, live) = match outcome {
+            handlers::imgfilter::Refresh::Learned(learned) => {
+                (learned.vector, learned.cut, row.live)
+            }
+            handlers::imgfilter::Refresh::Inert(why) => {
+                println!("image filters: «{name}» in {chat} kept but inert: {why}");
+                (
+                    handlers::imgfilter::inert_vector(),
+                    handlers::imgfilter::NEVER,
+                    false,
+                )
+            }
+            handlers::imgfilter::Refresh::Unavailable => {
+                return Err(std::io::Error::other(format!(
                     "vision embedding unavailable while migrating {chat}/{name}"
                 ))
-            })?;
+                .into());
+            }
+        };
         let (bytes, scale) = handlers::imgfilter::quantize(&vector);
         let saved = settings
             .try_save_image_filter(
@@ -1123,11 +1178,13 @@ async fn main() -> Result {
                     name: &name,
                     vector: &bytes,
                     scale,
-                    cut: row.cut,
+                    cut,
                     rate: row.rate,
-                    live: row.live,
+                    live,
                     samples: row.samples,
                     calibrated: row.calibrated,
+                    examples: None,
+                    faces: None,
                 },
             )
             .await?;
@@ -1141,6 +1198,9 @@ async fn main() -> Result {
     }
     if refreshed > 0 {
         println!("image filters: refreshed {refreshed} phrase vector(s)");
+    }
+    if relearn_all {
+        settings.try_set(0, &learner_flag, true).await?;
     }
     if migrating {
         settings.try_set(0, &space_flag, true).await?;
@@ -1628,6 +1688,7 @@ async fn main() -> Result {
                 _ = tick.tick() => {
                     let _epoch = deferred_ctx.background_epoch().await;
                     handlers::tempmedia::sweep_deferred(&deferred_ctx).await;
+                    handlers::nsfw::sweep_pending_webpages(&deferred_ctx).await;
                 },
             }
         }
@@ -1696,6 +1757,7 @@ async fn main() -> Result {
                         0 => {}
                         dropped => log::debug!("forgot the state of {dropped} quiet chats"),
                     }
+                    let _ = tokio::task::spawn_blocking(handlers::nsfw::trim::release_freed).await;
                 }
             }
         }

@@ -97,10 +97,44 @@ pub const RIGHTS: &[Right] = &[
     },
 ];
 
-const OPEN_WORDS: &[&str] = &["باز", "آزاد", "روشن"];
-const CLOSED_WORDS: &[&str] = &["بسته", "قفل", "خاموش"];
-pub const SHOW: &[&str] = &["اختیارات گروه", "اختیارات", "مجوزها", "مجوزهای گروه"];
-pub const SET: &[&str] = &["اختیار", "مجوز"];
+const OPEN_WORDS: &[&str] = &["باز", "آزاد", "روشن", "فعال", "مجاز", "on", "allow"];
+const CLOSED_WORDS: &[&str] = &[
+    "بسته",
+    "قفل",
+    "خاموش",
+    "غیرفعال",
+    "غیر فعال",
+    "ممنوع",
+    "off",
+    "deny",
+];
+pub const SHOW: &[&str] = &[
+    "اختیارات گروه",
+    "اختیارات",
+    "مجوزها",
+    "مجوز ها",
+    "مجوزهای گروه",
+    "دسترسی اعضا",
+    "/rights",
+    "/permissions",
+];
+pub const SET: &[&str] = &[
+    "اختیار",
+    "مجوز",
+    "/permission",
+    "/setright",
+];
+pub const BULK_CLOSE: &[&str] = &[
+    "بستن گروه",
+    "/closegroup",
+    "/closechat",
+];
+pub const BULK_OPEN: &[&str] = &[
+    "باز کردن گروه",
+    "بازکردن گروه",
+    "/opengroup",
+    "/openchat",
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeliveryOutcome {
@@ -263,6 +297,25 @@ pub async fn set_right(
     let accepted = ctx
         .settings
         .set_default_right(chat, right.bit, shut, now())
+        .await?;
+    if !accepted.delivery_required {
+        return Ok(DeliveryOutcome::Applied);
+    }
+    Ok(reconcile_guarded(ctx, &guard, Some(chat_ref)).await)
+}
+
+pub async fn set_rights(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    chat: i64,
+    rights: &[&Right],
+    shut: bool,
+) -> Result<DeliveryOutcome, DefaultRightsError> {
+    let bits: Vec<u8> = rights.iter().map(|right| right.bit).collect();
+    let guard = ctx.group_rights(chat).await;
+    let accepted = ctx
+        .settings
+        .set_default_rights(chat, &bits, shut, now())
         .await?;
     if !accepted.delivery_required {
         return Ok(DeliveryOutcome::Applied);
@@ -567,12 +620,153 @@ pub fn status(snapshot: &RightsSnapshot) -> String {
     )
 }
 
+fn permission_choice(rest: &str) -> Option<(&str, bool)> {
+    [(OPEN_WORDS, false), (CLOSED_WORDS, true)]
+        .into_iter()
+        .flat_map(|(words, shut)| words.iter().map(move |word| (*word, shut)))
+        .filter_map(|(word, shut)| {
+            let name = rest.strip_suffix(word)?.strip_suffix(' ')?;
+            (!name.is_empty()).then_some((word.len(), name, shut))
+        })
+        .max_by_key(|(len, _, _)| *len)
+        .map(|(_, name, shut)| (name, shut))
+}
+
+fn named_right(name: &str) -> Option<&'static Right> {
+    let name = super::commands::normalize(name);
+    let alias = match name.as_ref() {
+        "تصویر" | "تصاویر" => "photos",
+        "فیلم" | "ویدئو" => "videos",
+        "ویدیو پیام" | "ویدئو پیام" => "rounds",
+        "موزیک" | "موسیقی" | "اهنگ" => "audios",
+        "صدا" | "پیام صوتی" => "voices",
+        "سند" => "docs",
+        "استیکر" | "گیف" => "stickers",
+        "نظرسنجی" | "نظرسنجی ها" => "polls",
+        "لینک" => "links",
+        "ری اکشن" | "ریاکشن" | "واکنش" => "reactions",
+        "اطلاعات" | "تغییر اطلاعات" => "info",
+        "دعوت" | "افزودن عضو" => "invite",
+        "پین" | "سنجاق" => "pin",
+        other => other,
+    };
+    RIGHTS.iter().find(|right| {
+        right.key == alias
+            || super::commands::matches(&name, right.label)
+            || right
+                .label
+                .strip_suffix(name.as_ref())
+                .is_some_and(|head| head.ends_with(' '))
+    })
+}
+
+fn bulk_choice(text: &str) -> Option<bool> {
+    if super::commands::contains(BULK_CLOSE, text) {
+        Some(true)
+    } else if super::commands::contains(BULK_OPEN, text) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
-    if SHOW.contains(&text) {
+    if let Some(shut) = bulk_choice(text) {
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
+            return true;
+        }
+        let before = match seed(ctx, message, chat).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                log::warn!("rights: could not seed {chat}: {error}");
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    "اختیارات گروه خوانده نشد؛ دوباره تلاش کنید.",
+                )
+                .await;
+                return true;
+            }
+        };
+        let Ok(Some(chat_ref)) = message.peer_ref().await else {
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                "گروه پیدا نشد؛ دستور را داخل گروه دوباره بفرستید.",
+            )
+            .await;
+            return true;
+        };
+        let mut pending = false;
+        let mut delivery_unknown = false;
+        let changing: Vec<&Right> = RIGHTS
+            .iter()
+            .filter(|right| closed(&before, right) != shut)
+            .collect();
+        if !changing.is_empty() {
+            match set_rights(ctx, chat_ref, chat, &changing, shut).await {
+                Ok(DeliveryOutcome::Applied) => {}
+                Ok(DeliveryOutcome::PendingRetry { .. } | DeliveryOutcome::Superseded) => {
+                    pending = true;
+                }
+                Ok(DeliveryOutcome::AcceptedDeliveryUnknown { .. }) => {
+                    delivery_unknown = true;
+                }
+                Err(error) => {
+                    log::warn!("rights: bulk change for {chat} failed: {error}");
+                    let detail = if error.acceptance_unknown() {
+                        "وضعیت ذخیره سازی نامشخص است؛ پیش از تکرار، «اختیارات گروه» را بررسی کنید."
+                    } else {
+                        "تنظیم همه اختیارات کامل نشد؛ وضعیت را با «اختیارات گروه» بررسی کنید."
+                    };
+                    super::respond(ctx, message, ResponseKind::CommandError, detail).await;
+                    return true;
+                }
+            }
+        }
+        let delivery_note = if delivery_unknown {
+            "تغییر ذخیره شد، اما وضعیت تحویل آن به تلگرام مشخص نیست."
+        } else if pending {
+            "تغییر ذخیره شد و تحویل آن به تلگرام دوباره تلاش می شود."
+        } else {
+            ""
+        };
+        match snapshot(ctx, chat).await {
+            Ok(Some(after)) => {
+                let note = if delivery_note.is_empty()
+                    || (pending && !delivery_unknown && after.pending(now()))
+                {
+                    String::new()
+                } else {
+                    format!("\n\n<i>{delivery_note}</i>")
+                };
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::LockManagement,
+                    super::premium::html(format!("{}{note}", status(&after))),
+                )
+                .await;
+            }
+            _ => {
+                super::respond(
+                    ctx,
+                    message,
+                    ResponseKind::CommandError,
+                    format!("تغییر ثبت شد، اما وضعیت تازه اختیارات خوانده نشد. {delivery_note}"),
+                )
+                .await;
+            }
+        }
+        return true;
+    }
+    if super::commands::contains(SHOW, text) {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
@@ -606,25 +800,17 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         .await;
         return true;
     }
-    let Some(rest) = SET.iter().find_map(|command| {
-        let rest = text.strip_prefix(command)?;
-        rest.starts_with(char::is_whitespace).then(|| rest.trim())
-    }) else {
-        return false;
-    };
-    let Some((name, state)) = rest.rsplit_once(char::is_whitespace) else {
-        return false;
-    };
-    let shut = match (OPEN_WORDS.contains(&state), CLOSED_WORDS.contains(&state)) {
-        (true, _) => false,
-        (_, true) => true,
-        _ => return false,
-    };
-    let name = name.trim();
-    let Some(right) = RIGHTS
+    let Some(rest) = SET
         .iter()
-        .find(|right| right.label == name || right.label.ends_with(name))
+        .find_map(|command| super::commands::strip_prefix(text, command))
     else {
+        return false;
+    };
+    let normalized = super::commands::normalize(rest);
+    let Some((name, shut)) = permission_choice(&normalized) else {
+        return false;
+    };
+    let Some(right) = named_right(name) else {
         super::respond(
             ctx,
             message,
@@ -704,6 +890,31 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn permission_aliases_do_not_match_partial_words() {
+        assert_eq!(named_right("ويدئو").map(|right| right.key), Some("videos"));
+        assert_eq!(
+            named_right("ری\u{200c}اکشن").map(|right| right.key),
+            Some("reactions")
+        );
+        assert_eq!(
+            named_right("استیکر").map(|right| right.key),
+            Some("stickers")
+        );
+        assert_eq!(named_right("پین").map(|right| right.key), Some("pin"));
+        assert_eq!(named_right("ام").map(|right| right.key), None);
+        assert_eq!(permission_choice("عکس غیر فعال"), Some(("عکس", true)));
+        assert_eq!(permission_choice("photos allow"), Some(("photos", false)));
+        assert_eq!(permission_choice("عکس روشن کن"), None);
+    }
+    #[test]
+    fn bulk_commands_require_the_whole_message() {
+        assert_eq!(bulk_choice("بستن گروه"), Some(true));
+        assert_eq!(bulk_choice("باز کردن گروه"), Some(false));
+        assert_eq!(bulk_choice("/opengroup"), Some(false));
+        assert_eq!(bulk_choice("بستن گروه الان"), None);
+        assert_eq!(bulk_choice("/closegroup@otherbot"), None);
+    }
     use super::*;
 
     #[test]

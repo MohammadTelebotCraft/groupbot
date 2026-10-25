@@ -1,4 +1,3 @@
-
 use unicode_normalization::UnicodeNormalization;
 
 const WORDS: &[(&str, &str)] = &[

@@ -1,4 +1,3 @@
-
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -9,7 +8,16 @@ use scraper::{ElementRef, Html, Selector};
 use super::Ctx;
 use crate::response::ResponseKind;
 
-pub const COMMANDS: &[&str] = &["نرخ ارز", "قیمت ارز"];
+pub const COMMANDS: &[&str] = &[
+    "نرخ ارز",
+    "قیمت ارز",
+    "نرخ ارزها",
+    "قیمت ارزها",
+    "قیمت دلار",
+    "نرخ دلار",
+    "/rates",
+    "/currency",
+];
 
 const SOURCE_URL: &str = "https://alanchand.com/currencies-price";
 const CACHE_TTL: Duration = Duration::from_secs(60);
@@ -60,14 +68,14 @@ static HTTP: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
 });
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
-    if !is_command(message.text().trim()) {
+    let Some((refresh, asked_page)) = parse_command(message.text().trim()) else {
         return false;
-    }
+    };
 
-    let body = match snapshot(false).await {
+    let body = match snapshot(refresh).await {
         Ok(served) => {
-            let page = 0;
             let total = page_count(served.snapshot.rows.len());
+            let page = asked_page.min(total.saturating_sub(1));
             Some((
                 render_page(&served.snapshot, served.stale, page),
                 page,
@@ -97,8 +105,41 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     true
 }
 
-fn is_command(text: &str) -> bool {
-    COMMANDS.contains(&text)
+fn parse_command(text: &str) -> Option<(bool, usize)> {
+    let (command, tail) = COMMANDS.iter().find_map(|command| {
+        super::commands::strip_prefix(text, command).map(|tail| (*command, tail))
+    })?;
+    let tail = super::commands::normalize(tail);
+    let tail = tail.as_ref();
+    if tail.is_empty() {
+        return Some((false, 0));
+    }
+    if [
+        "بروزرسانی",
+        "بروز رسانی",
+        "به روز رسانی",
+        "تازه سازی",
+        "refresh",
+    ]
+    .contains(&tail)
+    {
+        return Some((true, 0));
+    }
+    let (refresh, page) = if let Some(page) = tail.strip_prefix("بروزرسانی صفحه ") {
+        (true, page)
+    } else if let Some(page) = tail.strip_prefix("refresh ") {
+        (true, page)
+    } else if let Some(page) = tail.strip_prefix("صفحه ") {
+        (false, page)
+    } else if command.starts_with('/') {
+        (false, tail)
+    } else {
+        return None;
+    };
+    page.parse::<usize>()
+        .ok()?
+        .checked_sub(1)
+        .map(|page| (refresh, page))
 }
 
 async fn snapshot(force_refresh: bool) -> Result<ServedSnapshot, String> {
@@ -467,10 +508,16 @@ mod tests {
 
     #[test]
     fn commands_are_exact_after_trimming() {
-        assert!(is_command("نرخ ارز"));
-        assert!(is_command(" قیمت ارز ".trim()));
-        assert!(!is_command("نرخ ارز امروز"));
-        assert!(!is_command("ارز"));
+        assert_eq!(parse_command("نرخ ارز"), Some((false, 0)));
+        assert_eq!(parse_command(" قیمت ارز ".trim()), Some((false, 0)));
+        assert_eq!(parse_command("نرخ ارز صفحه ۲"), Some((false, 1)));
+        assert_eq!(parse_command("نرخ ارز بروزرسانی"), Some((true, 0)));
+        assert_eq!(parse_command("/rates refresh 3"), Some((true, 2)));
+        assert_eq!(parse_command("/rates 3"), Some((false, 2)));
+        assert_eq!(parse_command("نرخ ارز امروز"), None);
+        assert_eq!(parse_command("/rates 0"), None);
+        assert_eq!(parse_command("نرخ ارز صفحه ۲ چیز دیگه"), None);
+        assert_eq!(parse_command("ارز"), None);
     }
 
     #[test]

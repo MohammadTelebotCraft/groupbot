@@ -1,4 +1,3 @@
-
 use std::sync::Arc;
 
 use axum::Json;
@@ -70,15 +69,38 @@ pub struct AllBody {
     on: bool,
 }
 
+#[derive(Deserialize)]
+pub struct SetBody {
+    keys: Vec<String>,
+    on: bool,
+}
+
+pub async fn set(
+    State(ctx): State<Arc<Ctx>>,
+    gate: AdminGate,
+    Json(body): Json<SetBody>,
+) -> Response {
+    let chosen: Vec<&'static str> = locks::plain()
+        .filter(|lock| body.keys.iter().any(|key| key == lock.key))
+        .map(|lock| lock.key)
+        .collect();
+    if chosen.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if let Err(error) = locks::try_set_many(&ctx, gate.chat, &chosen, body.on).await {
+        return write_error(gate.chat, "category lock write", &error);
+    }
+    dashboard(State(ctx), gate.into()).await.into_response()
+}
+
 pub async fn all(
     State(ctx): State<Arc<Ctx>>,
     gate: AdminGate,
     Json(body): Json<AllBody>,
 ) -> Response {
-    for lock in locks::plain() {
-        if let Err(error) = locks::try_set(&ctx, gate.chat, lock.key, body.on).await {
-            return write_error(gate.chat, "bulk lock write", &error);
-        }
+    let keys: Vec<&'static str> = locks::plain().map(|lock| lock.key).collect();
+    if let Err(error) = locks::try_set_many(&ctx, gate.chat, &keys, body.on).await {
+        return write_error(gate.chat, "bulk lock write", &error);
     }
     dashboard(State(ctx), gate.into()).await.into_response()
 }

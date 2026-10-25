@@ -1,4 +1,3 @@
-
 use std::sync::Arc;
 
 use grammers_client::message::Message;
@@ -250,7 +249,6 @@ fn armed_under(settings: &super::super::state::ChatSettings<'_>) -> Option<Armed
         live: !settings.is_locked(SHADOW),
     })
 }
-
 
 const MARKS: &[&str] = &[
     "فروش",
@@ -539,7 +537,6 @@ fn listing_in(text: &str, digits: &str) -> bool {
     }
     !rhetorical && has_card_number(digits)
 }
-
 
 fn message_text(message: &Message) -> std::borrow::Cow<'_, str> {
     let tl::enums::Message::Message(raw) = &message.raw else {

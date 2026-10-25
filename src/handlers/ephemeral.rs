@@ -1,33 +1,44 @@
-
 use grammers_client::message::Message;
 
 use super::{Ctx, limits};
 use crate::response::{ResponseKind, VisibilityOverride};
 
-pub const COMMANDS: &[&str] = &["پیام ربات", "کاهش شلوغی", "/ephemeral"];
+pub const COMMANDS: &[&str] = &[
+    "پیام های ربات",
+    "پیام ربات",
+    "کاهش شلوغی",
+    "/ephemeral",
+    "/botmessages",
+];
 
 fn tail(text: &str) -> Option<&str> {
     COMMANDS.iter().find_map(|command| {
-        if text == *command {
-            Some("")
-        } else {
-            text.strip_prefix(command)
-                .and_then(|rest| rest.strip_prefix(char::is_whitespace))
-                .map(str::trim)
-        }
+        let rest = super::commands::strip_prefix(text, command)?;
+        (command.starts_with('/') || valid_action(rest)).then_some(rest)
     })
 }
 
+fn valid_action(action: &str) -> bool {
+    let normalized = super::commands::normalize(action);
+    matches!(
+        normalized.as_ref(),
+        "" | "status" | "وضعیت" | "reset" | "بازنشانی" | "off" | "خاموش"
+    ) || parse_choice(&normalized).is_some()
+}
+
 fn parse_choice(value: &str) -> Option<(ResponseKind, VisibilityOverride)> {
-    let mut parts = value.split_whitespace();
-    let kind = match parts.next()? {
-        "notice" | "notices" | "اعلان" | "اعلان‌ها" | "اعلانها" => {
+    let normalized = super::commands::normalize(value);
+    let mut parts = normalized.rsplitn(2, ' ');
+    let state = parts.next()?;
+    let family = parts.next()?;
+    let kind = match family {
+        "notice" | "notices" | "اعلان" | "اعلان ها" | "اعلانها" => {
             ResponseKind::ContentRemovalNotice
         }
-        "welcome" | "خوشامد" => ResponseKind::WelcomeNotice,
+        "welcome" | "خوشامد" | "خوش آمد" => ResponseKind::WelcomeNotice,
         _ => return None,
     };
-    let visibility = match parts.next()? {
+    let visibility = match state {
         "private" | "خصوصی" => VisibilityOverride::Private,
         "public" | "normal" | "عمومی" | "عادی" => VisibilityOverride::Public,
         _ => return None,
@@ -64,7 +75,8 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     };
 
-    let result = match action {
+    let normalized = super::commands::normalize(action);
+    let result = match normalized.as_ref() {
         "" | "status" | "وضعیت" => None,
         "reset" | "بازنشانی" => match crate::response::reset(&ctx.settings, chat).await {
             Ok(_) => Some("اعلان ها و خوشامد به حالت عمومی برگشتند؛ بقیه پیام ها عادی می مانند."),
@@ -116,12 +128,40 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn visibility_aliases_normalize_closed_choices() {
+        assert_eq!(
+            tail("پيام\u{200c}های\tربات اعلان\u{200c}ها خصوصی"),
+            Some("اعلان\u{200c}ها خصوصی")
+        );
+        assert_eq!(
+            parse_choice("اعلان\u{200c}ها خصوصي"),
+            Some((
+                ResponseKind::ContentRemovalNotice,
+                VisibilityOverride::Private
+            ))
+        );
+        assert_eq!(
+            parse_choice("WELCOME\tPUBLIC"),
+            Some((ResponseKind::WelcomeNotice, VisibilityOverride::Public))
+        );
+        assert_eq!(
+            parse_choice("خوش آمد عمومی"),
+            Some((ResponseKind::WelcomeNotice, VisibilityOverride::Public))
+        );
+        assert_eq!(parse_choice("اعلان ها خصوصی بیشتر"), None);
+        assert_eq!(tail("/ephemeral@otherbot reset"), None);
+    }
     use super::*;
 
     #[test]
     fn command_tail_is_closed_and_only_two_families_are_selectable() {
         assert_eq!(tail("/ephemeral"), Some(""));
         assert_eq!(tail("/ephemeral notice private"), Some("notice private"));
+        assert_eq!(tail("/ephemeral unknown"), Some("unknown"));
+        assert_eq!(tail("پیام ربات خوبه"), None);
+        assert_eq!(tail("پیام های ربات چیه"), None);
+        assert_eq!(tail("کاهش شلوغی رو میگی"), None);
         assert_eq!(tail("/ephemerally"), None);
         assert_eq!(
             parse_choice("notice private"),

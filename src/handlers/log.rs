@@ -37,8 +37,26 @@ pub const KINDS: &[(&str, &str)] = &[
     ("log_join", "ورود و خروج"),
 ];
 
-pub const SET: &[&str] = &["تنظیم لاگ", "تنظیم کانال لاگ", "لاگ"];
-pub const CLEAR: &[&str] = &["حذف لاگ", "خاموش لاگ", "حذف کانال لاگ"];
+pub const SET: &[&str] = &[
+    "تنظیم لاگ",
+    "تنظیم کانال لاگ",
+    "تنظیم کانال گزارش",
+    "تنظیم گزارش",
+    "/setlog",
+    "/log",
+    "لاگ",
+    "/logchannel",
+];
+pub const CLEAR: &[&str] = &[
+    "حذف لاگ",
+    "خاموش لاگ",
+    "حذف کانال لاگ",
+    "حذف کانال گزارش",
+    "لغو لاگ",
+    "/clearlog",
+    "/dellog",
+    "/unsetlog",
+];
 
 pub fn channel(ctx: &Ctx, chat: i64) -> Option<PeerRef> {
     let stored = ctx.settings.value(chat, CHANNEL)?;
@@ -337,7 +355,10 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
-    if CLEAR.contains(&text) {
+    if CLEAR
+        .iter()
+        .any(|command| super::commands::matches(text, command))
+    {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
@@ -365,17 +386,14 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    let Some(rest) = SET.iter().find_map(|command| {
-        let rest = text.strip_prefix(command)?;
-        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
-    }) else {
+    let Some(rest) = parse_set(text) else {
         return false;
     };
     if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
 
-    if rest.is_empty() {
+    if rest.is_empty() && message.reply_to_message_id().is_none() {
         super::respond(
             ctx,
             message,
@@ -389,9 +407,6 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    if super::named(message, Some(rest)).is_none() {
-        return false;
-    }
     let target = resolve(ctx, message, rest).await;
     let Some(target) = target else {
         super::respond(
@@ -496,6 +511,66 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     true
 }
 
+pub enum ConnectError {
+    NotFound,
+    Unwritable(String),
+    Invalid,
+    Settings(SettingsWriteError),
+}
+
+pub async fn connect(ctx: &Ctx, chat: i64, name: &str) -> Result<(), ConnectError> {
+    let name = name.trim();
+    let name = name
+        .strip_prefix("https://t.me/")
+        .or_else(|| name.strip_prefix("t.me/"))
+        .unwrap_or(name);
+    let name = name.trim_start_matches('@').trim_end_matches('/');
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(ConnectError::NotFound);
+    }
+    let target = match ctx.client.resolve_username(name).await {
+        Ok(Some(peer)) => peer.to_ref().await.ok().flatten(),
+        _ => None,
+    }
+    .ok_or(ConnectError::NotFound)?;
+    ctx.client
+        .send_message(
+            target,
+            super::premium::icon_html_on(
+                super::premium::Surface::Channel,
+                Some(super::premium::Icon::DocumentActivity),
+                "<b>کانال لاگ</b>\n\nاز این پس رویدادهای گروه اینجا نوشته می شود.",
+            ),
+        )
+        .await
+        .map_err(|error| ConnectError::Unwritable(error.to_string()))?;
+    let stored = stored_channel(target).ok_or(ConnectError::Invalid)?;
+    let mut mutations = Vec::with_capacity(KINDS.len() + 2);
+    mutations.push(SettingMutation::Put {
+        key: CHANNEL,
+        value: &stored,
+    });
+    mutations.push(SettingMutation::Put { key: ON, value: "" });
+    mutations.extend(
+        KINDS
+            .iter()
+            .map(|(key, _)| SettingMutation::Put { key, value: "" }),
+    );
+    ctx.settings
+        .try_apply_batch(chat, &mutations)
+        .await
+        .map(|_| ())
+        .map_err(ConnectError::Settings)
+}
+
+fn parse_set(text: &str) -> Option<&str> {
+    SET.iter().find_map(|command| {
+        let rest = super::commands::strip_prefix(text, command)?;
+        (rest.is_empty() || (!rest.contains(char::is_whitespace) && super::arg_names_a_user(rest)))
+            .then_some(rest)
+    })
+}
+
 fn setting_failure_text(
     error: &SettingsWriteError,
     rejected: &str,
@@ -565,5 +640,25 @@ pub fn status(ctx: &Ctx, chat: i64) -> String {
         None => "<b>کانال لاگ</b>\n\n\
              خاموش است. ربات را در کانال خود ادمین کنید و «تنظیم لاگ @channel» را بفرستید."
             .to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_aliases_preserve_targets_and_decline_sentences_before_permissions() {
+        assert_eq!(
+            parse_set("تنظيم\u{200c}كانال\u{200c}گزارش @LogChannel"),
+            Some("@LogChannel")
+        );
+        assert_eq!(parse_set("/SetLog @LogChannel"), Some("@LogChannel"));
+        assert_eq!(parse_set("/LOG -۱۰۰۱۲۳"), Some("-۱۰۰۱۲۳"));
+        assert_eq!(parse_set("تنظیم لاگ"), Some(""));
+        assert_eq!(parse_set("لاگ چیه"), None);
+        assert_eq!(parse_set("تنظیم لاگ @channel please"), None);
+        assert_eq!(parse_set("/log @channel\tplease"), None);
+        assert_eq!(parse_set("/logger @channel"), None);
     }
 }

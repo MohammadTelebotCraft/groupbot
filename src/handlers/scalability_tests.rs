@@ -141,7 +141,7 @@ fn replay_message(
     message
 }
 
-fn raw_message(chat: i64, id: i32, text: &str) -> tl::enums::Message {
+pub(super) fn raw_message(chat: i64, id: i32, text: &str) -> tl::enums::Message {
     tl::types::Message {
         out: false,
         mentioned: false,

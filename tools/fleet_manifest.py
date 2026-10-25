@@ -112,7 +112,7 @@ def _fleet_values(fleet: dict[str, Any]) -> dict[str, Any]:
     if isinstance(reserve, bool) or not isinstance(reserve, (int, float)) or not 0 <= reserve < 1:
         raise ManifestError("fleet.db_reserve_ratio must be in [0, 1)")
     memory_per_shard = _positive_int(
-        fleet.get("memory_per_shard_mb", 2_048), "fleet.memory_per_shard_mb"
+        fleet.get("memory_per_shard_mb", 4_096), "fleet.memory_per_shard_mb"
     )
     host_memory = _positive_int(
         fleet.get("host_memory_mb", 22_000), "fleet.host_memory_mb"

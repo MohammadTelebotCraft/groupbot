@@ -27,9 +27,48 @@ pub const ADD_COMMANDS: &[&str] = &[
     "فیلتر ویس",
     "افزودن کلمه ویس",
     "افزودن فیلتر ویس",
+    "افزودن کلمه صوتی",
+    "اضافه کردن فیلتر ویس",
+    "فیلتر صوتی",
+    "/voicefilter",
+    "/addvoicefilter",
+    "/addvoiceword",
 ];
-pub const REMOVE_COMMANDS: &[&str] = &["حذف کلمه ویس", "حذف فیلتر ویس", "لغو فیلتر ویس"];
-pub const LIST_COMMANDS: &[&str] = &["لیست کلمات ویس", "کلمات ویس"];
+const REPLY_ONLY_ADD: &[&str] = &["فیلتر ویس", "فیلتر صوتی"];
+pub const REMOVE_COMMANDS: &[&str] = &[
+    "حذف کلمه ویس",
+    "حذف فیلتر ویس",
+    "لغو فیلتر ویس",
+    "حذف کلمه صوتی",
+    "حذف فیلتر صوتی",
+    "/unvoicefilter",
+    "/delvoicefilter",
+    "/delvoiceword",
+];
+pub const LIST_COMMANDS: &[&str] = &[
+    "لیست کلمات ویس",
+    "کلمات ویس",
+    "لیست فیلتر ویس",
+    "فهرست کلمات ویس",
+    "لیست کلمات صوتی",
+    "/voicefilters",
+    "/voicewords",
+];
+pub const CLEAR_COMMANDS: &[&str] = &[
+    "پاکسازی لیست کلمات ویس",
+    "پاکسازی لیست فیلتر ویس",
+    "پاکسازی کلمات ویس",
+    "خالی کردن لیست کلمات ویس",
+    "/clearvoicefilters",
+    "/clearvoicewords",
+];
+pub const RESTORE_DEFAULTS_COMMANDS: &[&str] =
+    &[
+    "بازگردانی کلمات پیش فرض ویس",
+    "/restorevoicewords",
+    "بازگردانی کلمات ویس",
+    "/resetvoicewords",
+];
 const MAX_WORDS: usize = 200;
 const MAX_WORD_CHARS: usize = 64;
 
@@ -740,6 +779,34 @@ pub async fn restore_all_defaults(
     Ok(disabled.len())
 }
 
+pub async fn clear_all_words(
+    ctx: &Ctx,
+    chat: i64,
+) -> Result<usize, crate::state::SettingsWriteError> {
+    let active = words(ctx, chat).len();
+    let custom: Vec<String> = ctx
+        .settings
+        .flags_with_prefix(chat, WORDS_PREFIX)
+        .into_iter()
+        .map(|word| format!("{WORDS_PREFIX}{word}"))
+        .collect();
+    let disabled: Vec<String> = DEFAULT_BAD_WORDS
+        .iter()
+        .map(|word| format!("{DISABLED_DEFAULT_PREFIX}{word}"))
+        .collect();
+    let mutations: Vec<_> = custom
+        .iter()
+        .map(|key| crate::state::SettingMutation::Delete { key })
+        .chain(
+            disabled
+                .iter()
+                .map(|key| crate::state::SettingMutation::Put { key, value: "" }),
+        )
+        .collect();
+    ctx.settings.try_apply_batch(chat, &mutations).await?;
+    Ok(active)
+}
+
 pub enum AddWordError {
     Empty,
     TooLong,
@@ -806,7 +873,55 @@ pub fn word_profile(active_words: &[String]) -> u64 {
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
-    if LIST_COMMANDS.contains(&text) {
+    if super::commands::contains(CLEAR_COMMANDS, text) {
+        let Some(chat) = message.peer_id().bot_api_dialog_id() else {
+            return false;
+        };
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
+            return true;
+        }
+        let body = match clear_all_words(ctx, chat).await {
+            Ok(count) => format!(
+                "✓ {count} کلمه از فیلتر ویس حذف شد. کلمه های پیش فرض با «بازگردانی کلمات پیش فرض ویس» بر می گردند."
+            ),
+            Err(error) => {
+                log::warn!("voice filter: clear for {chat} failed: {error}");
+                if error.commit_outcome_unknown() {
+                    "نتیجه پاکسازی نامشخص است؛ پیش از تلاش دوباره فهرست را بررسی کنید.".to_owned()
+                } else {
+                    "فهرست پاک نشد؛ دوباره تلاش کنید.".to_owned()
+                }
+            }
+        };
+        super::respond(ctx, message, ResponseKind::AntiSpamControl, body).await;
+        return true;
+    }
+    if super::commands::contains(RESTORE_DEFAULTS_COMMANDS, text) {
+        let Some(chat) = message.peer_id().bot_api_dialog_id() else {
+            return false;
+        };
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
+            return true;
+        }
+        let body = match restore_all_defaults(ctx, chat).await {
+            Ok(count) => format!("✓ {count} کلمه پیش فرض ویس بازگردانده شد."),
+            Err(error) => {
+                log::warn!("voice filter: restore defaults for {chat} failed: {error}");
+                if error.commit_outcome_unknown() {
+                    "نتیجه بازگردانی کلمات نامشخص است؛ پیش از تلاش دوباره فهرست را بررسی کنید."
+                        .to_owned()
+                } else {
+                    "کلمات پیش فرض بازگردانده نشدند؛ دوباره تلاش کنید.".to_owned()
+                }
+            }
+        };
+        super::respond(ctx, message, ResponseKind::AntiSpamControl, body).await;
+        return true;
+    }
+    if LIST_COMMANDS
+        .iter()
+        .any(|command| super::commands::matches(text, command))
+    {
         let Some(chat) = message.peer_id().bot_api_dialog_id() else {
             return false;
         };
@@ -843,6 +958,9 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let Some((add, command, inline)) = parse_command(text) else {
         return false;
     };
+    if REPLY_ONLY_ADD.contains(&command) && message.reply_to_message_id().is_none() {
+        return false;
+    }
     if !super::limits::allows(ctx, message, super::limits::SET).await {
         return true;
     }
@@ -1030,12 +1148,13 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
 fn parse_command(text: &str) -> Option<(bool, &'static str, &str)> {
     for (commands, add) in [(ADD_COMMANDS, true), (REMOVE_COMMANDS, false)] {
         for command in commands {
-            let Some(rest) = text.strip_prefix(command) else {
+            let Some(rest) = super::commands::strip_prefix(text, command) else {
                 continue;
             };
-            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                return Some((add, command, rest.trim()));
+            if REPLY_ONLY_ADD.contains(command) && !rest.is_empty() {
+                continue;
             }
+            return Some((add, command, rest));
         }
     }
     None
@@ -1297,12 +1416,13 @@ fn active_words(disabled: &[String], custom: &[String]) -> Vec<String> {
         .map(|word| (*word).to_owned())
         .filter(|word| !disabled.contains(&normalize(word)))
         .collect::<Vec<_>>();
+    let mut known: HashSet<String> = active.iter().map(|word| normalize(word)).collect();
     for word in custom
         .iter()
         .map(|word| normalize(word))
         .filter(|word| !word.is_empty())
     {
-        if !active.iter().any(|known| normalize(known) == word) {
+        if known.insert(word.clone()) {
             active.push(word);
         }
     }
@@ -1310,12 +1430,17 @@ fn active_words(disabled: &[String], custom: &[String]) -> Vec<String> {
     active
 }
 
+static DEFAULTS_BY_FORM: std::sync::LazyLock<std::collections::HashMap<String, &'static str>> =
+    std::sync::LazyLock::new(|| {
+        let mut forms = std::collections::HashMap::new();
+        for word in DEFAULT_BAD_WORDS {
+            forms.entry(normalize(word)).or_insert(*word);
+        }
+        forms
+    });
+
 fn is_default_word(word: &str) -> Option<&'static str> {
-    let normalized = normalize(word);
-    DEFAULT_BAD_WORDS
-        .iter()
-        .copied()
-        .find(|default| normalize(default) == normalized)
+    DEFAULTS_BY_FORM.get(&normalize(word)).copied()
 }
 
 #[cfg(test)]
@@ -1394,7 +1519,59 @@ mod tests {
             Some((false, "حذف کلمه ویس", "تبلیغ"))
         );
         assert!(parse_command("فیلتر ویس کلمه دیگری").is_some());
-        assert!(parse_command("فیلتر ویس کلمات").is_some());
+        assert!(parse_command("فیلتر ویس کلمات").is_none());
         assert!(parse_command("فیلتر ویسکلمه تبلیغ").is_none());
+    }
+
+    #[test]
+    fn voice_command_aliases_preserve_words_and_decline_other_filter_commands() {
+        assert!(super::super::commands::contains(
+            RESTORE_DEFAULTS_COMMANDS,
+            "بازگردانی کلمات پیش فرض ویس"
+        ));
+        assert!(super::super::commands::contains(
+            RESTORE_DEFAULTS_COMMANDS,
+            "/RESTOREVOICEWORDS"
+        ));
+        assert!(!super::super::commands::contains(
+            RESTORE_DEFAULTS_COMMANDS,
+            "/restorevoicewords please"
+        ));
+        assert_eq!(
+            parse_command("افزودن\u{200c}كلمه\u{200c}صوتي Mixed كيان ۱۲"),
+            Some((true, "افزودن کلمه صوتی", "Mixed كيان ۱۲"))
+        );
+        assert_eq!(
+            parse_command("/VoiceFilter Mixed Case"),
+            Some((true, "/voicefilter", "Mixed Case"))
+        );
+        assert_eq!(
+            parse_command("/DelVoiceFilter Mixed Case"),
+            Some((false, "/delvoicefilter", "Mixed Case"))
+        );
+        assert_eq!(
+            parse_command("حذف فیلتر صوتی کلمه"),
+            Some((false, "حذف فیلتر صوتی", "کلمه"))
+        );
+        assert_eq!(parse_command("/voicefilters"), None);
+        assert_eq!(parse_command("/filter word"), None);
+        assert_eq!(parse_command("فیلتر تصویری خودرو"), None);
+        assert_eq!(parse_command("فیلتر ویسها"), None);
+        assert_eq!(parse_command("فیلتر ویس خوبه"), None);
+        assert_eq!(parse_command("فیلتر صوتی خوبه"), None);
+        assert_eq!(parse_command("فیلتر ویس"), Some((true, "فیلتر ویس", "")));
+        assert!(
+            LIST_COMMANDS
+                .iter()
+                .any(|command| super::super::commands::matches(
+                    "فهرست\u{200c}كلمات\u{200c}ويس",
+                    command
+                ))
+        );
+        assert!(
+            !LIST_COMMANDS
+                .iter()
+                .any(|command| super::super::commands::matches("لیست کلمات ویس کجاست", command))
+        );
     }
 }

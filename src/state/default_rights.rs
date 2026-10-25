@@ -571,6 +571,23 @@ impl Settings {
         .await
     }
 
+    pub async fn set_default_rights(
+        &self,
+        chat: i64,
+        bits: &[u8],
+        closed: bool,
+        now: i64,
+    ) -> Result<AcceptedRightsMutation, DefaultRightsError> {
+        self.mutate_default_rights(chat, now, move |row| {
+            if !row.snapshot.seeded {
+                return Err(DefaultRightsError::SeedRequired);
+            }
+            bits.iter()
+                .try_for_each(|&bit| row.snapshot.base.set(bit, closed))
+        })
+        .await
+    }
+
     pub async fn set_default_rights_manual_lock(
         &self,
         chat: i64,

@@ -1308,6 +1308,11 @@ mod tests {
     async fn failed_and_uncertain_statistics_commits_replay_once() {
         let chat = -999_777_001;
         let mut settings = Settings::connect(URL).await.unwrap();
+        sqlx::query("INSERT INTO durable_chats (chat_id, access_hash, admitted_at) VALUES ($1, 0, 0) ON CONFLICT DO NOTHING")
+            .bind(chat)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
         let batch = StatsBatch::new(
             20_000,
             vec![(chat, "audit_durable".into(), 7)],
@@ -1541,6 +1546,11 @@ mod tests {
     async fn stale_award_ack_cannot_erase_a_newer_counter_update() {
         let chat = -999_777_002;
         let settings = Settings::connect(URL).await.unwrap();
+        sqlx::query("INSERT INTO durable_chats (chat_id, access_hash, admitted_at) VALUES ($1, 0, 0) ON CONFLICT DO NOTHING")
+            .bind(chat)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
         sqlx::query("DELETE FROM pending_rank_awards WHERE chat_id=$1")
             .bind(chat)
             .execute(&settings.pool)
@@ -1697,6 +1707,11 @@ mod tests {
         let disabled_chat = -999_777_004;
         let settings = Settings::connect(URL).await.unwrap();
         for chat in [enabled_chat, disabled_chat] {
+            sqlx::query("INSERT INTO durable_chats (chat_id, access_hash, admitted_at) VALUES ($1, 0, 0) ON CONFLICT DO NOTHING")
+                .bind(chat)
+                .execute(&settings.pool)
+                .await
+                .unwrap();
             sqlx::query("DELETE FROM pending_rank_awards WHERE chat_id=$1")
                 .bind(chat)
                 .execute(&settings.pool)

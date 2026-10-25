@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 
 use super::imgfilter::DIM;
@@ -9,6 +8,44 @@ type MergeTable = HashMap<(u32, u32), (u32, u32)>;
 const MODEL_FILE: &str = "vision_text.onnx";
 const VOCAB_FILE: &str = "vision_text_vocab.txt";
 const MERGES_FILE: &str = "vision_text_merges.txt";
+
+const MODEL_SHA256: &str = "3ef95a696a9503dfb1fbd2121910d4bdcae2e1458b069f5d99d3c1167fd9cf6f";
+const VOCAB_SHA256: &str = "8a6f76ca6767969cb17e1c356167105fd6f585294d6da0c5fe54663708254c0c";
+const MERGES_SHA256: &str = "626454b548d013402acc84f01c56716e506b36d01395f1bd1252720c5edecd28";
+
+pub(crate) fn initialize_once_retry<'a, T, E>(
+    cell: &'a std::sync::OnceLock<T>,
+    gate: &std::sync::Mutex<()>,
+    build: impl FnOnce() -> Result<Option<T>, E>,
+) -> Result<Option<&'a T>, E> {
+    if let Some(value) = cell.get() {
+        return Ok(Some(value));
+    }
+    let _guard = gate
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(value) = cell.get() {
+        return Ok(Some(value));
+    }
+    let Some(value) = build()? else {
+        return Ok(None);
+    };
+    Ok(Some(cell.get_or_init(|| value)))
+}
+
+fn validate_artifact(
+    path: &std::path::Path,
+    expected: &str,
+) -> Result<(), super::nsfw::ModelError> {
+    let actual = super::vision::sha256_file(path)?;
+    if actual == expected {
+        return Ok(());
+    }
+    Err(super::nsfw::ModelError::artifact(format!(
+        "{} SHA-256 is {actual}, expected reviewed {expected}; refusing an unpaired vision text bundle",
+        path.display()
+    )))
+}
 
 const TOKENS: usize = 64;
 
@@ -25,27 +62,58 @@ const TEMPLATES: &[&str] = &[
     "a close-up photo of {}",
 ];
 
-fn model() -> Result<Option<&'static super::nsfw::Session>, super::nsfw::ModelError> {
-    static CELL: std::sync::OnceLock<
-        Result<Option<super::nsfw::Session>, super::nsfw::ModelError>,
-    > = std::sync::OnceLock::new();
-    match CELL.get_or_init(|| {
-        let Some(path) = beside_the_binary(MODEL_FILE)? else {
-            eprintln!("imgtext: {MODEL_FILE} is not beside the binary, so text filters are inert");
-            return Ok(None);
-        };
-        super::nsfw::open_path(&path, "text tower")
-            .map(Some)
-            .ok_or_else(|| {
-                super::nsfw::ModelError::Runtime("vision text tower would not load".to_owned())
-            })
-    }) {
-        Ok(Some(model)) => Ok(Some(model)),
-        Ok(None) => Ok(None),
-        Err(error) => Err(error.clone()),
+const IDLE: std::time::Duration = std::time::Duration::from_secs(600);
+
+static LOADED: std::sync::Mutex<Option<(std::sync::Arc<super::nsfw::Session>, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+static REAPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn model() -> Result<Option<std::sync::Arc<super::nsfw::Session>>, super::nsfw::ModelError> {
+    static MISSING_WARNING: std::sync::Once = std::sync::Once::new();
+    let mut loaded = LOADED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((session, used)) = loaded.as_mut() {
+        *used = std::time::Instant::now();
+        return Ok(Some(std::sync::Arc::clone(session)));
     }
+    let Some(path) = beside_the_binary(MODEL_FILE)? else {
+        MISSING_WARNING.call_once(|| {
+            eprintln!("imgtext: {MODEL_FILE} is not beside the binary, so text filters are inert");
+        });
+        return Ok(None);
+    };
+    validate_artifact(&path, MODEL_SHA256)?;
+    let session = super::nsfw::open_path(&path, "text tower").ok_or_else(|| {
+        super::nsfw::ModelError::Runtime("vision text tower would not load".to_owned())
+    })?;
+    let session = std::sync::Arc::new(session);
+    *loaded = Some((std::sync::Arc::clone(&session), std::time::Instant::now()));
+    if !REAPING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        std::thread::spawn(reap);
+    }
+    Ok(Some(session))
 }
 
+fn reap() {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        let mut loaded = LOADED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if loaded.as_ref().is_none_or(|(_, used)| used.elapsed() >= IDLE) {
+            let dropped = loaded.take();
+            REAPING.store(false, std::sync::atomic::Ordering::Release);
+            drop(loaded);
+            if let Some(dropped) = dropped {
+                drop(dropped);
+                super::nsfw::trim::release_freed();
+                log::info!("imgtext: text tower dropped after {}s without a phrase", IDLE.as_secs());
+            }
+            return;
+        }
+    }
+}
 
 pub struct Bpe {
     ids: HashMap<String, u32>,
@@ -159,30 +227,31 @@ fn load(vocab: &std::path::Path, merges: &std::path::Path) -> Result<Bpe, super:
 }
 
 fn bpe() -> Result<Option<&'static Bpe>, super::nsfw::ModelError> {
-    static CELL: std::sync::OnceLock<Result<Option<Bpe>, super::nsfw::ModelError>> =
-        std::sync::OnceLock::new();
-    match CELL.get_or_init(|| {
+    static CELL: std::sync::OnceLock<Bpe> = std::sync::OnceLock::new();
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static MISSING_WARNING: std::sync::Once = std::sync::Once::new();
+    initialize_once_retry(&CELL, &GATE, || {
         let (Some(vocab), Some(merges)) = (
             beside_the_binary(VOCAB_FILE)?,
             beside_the_binary(MERGES_FILE)?,
         ) else {
-            eprintln!(
-                "imgtext: {VOCAB_FILE} or {MERGES_FILE} is not beside the binary, so text filters are inert"
-            );
+            MISSING_WARNING.call_once(|| {
+                eprintln!(
+                    "imgtext: {VOCAB_FILE} or {MERGES_FILE} is not beside the binary, so text filters are inert"
+                );
+            });
             return Ok(None);
         };
+        validate_artifact(&vocab, VOCAB_SHA256)?;
+        validate_artifact(&merges, MERGES_SHA256)?;
         let bpe = load(&vocab, &merges)?;
-        println!(
+        eprintln!(
             "imgtext: {} vocabulary pieces, {} merges",
             bpe.ids.len(),
             bpe.merges.len()
         );
         Ok(Some(bpe))
-    }) {
-        Ok(Some(bpe)) => Ok(Some(bpe)),
-        Ok(None) => Ok(None),
-        Err(error) => Err(error.clone()),
-    }
+    })
 }
 
 impl Bpe {
@@ -246,7 +315,6 @@ impl Bpe {
     }
 }
 
-
 fn run(session: &super::nsfw::Session, ids: Vec<i64>) -> Result<Vec<f32>, super::nsfw::ModelError> {
     let value =
         ort::value::Value::from_array((vec![1i64, TOKENS as i64], ids)).map_err(|error| {
@@ -280,13 +348,29 @@ pub enum EmbedOutcome {
     Embedding(Vec<f32>),
 }
 
+const ENGLISH_TEMPLATES: &[&str] = &[
+    "{}",
+    "a photo of {}",
+    "a photograph of {}",
+    "a picture of {}",
+    "an image of {}",
+    "a close-up photo of {}",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Frames {
+    Typed,
+    English,
+}
+
 fn ensemble(
     phrase: &str,
     bpe: &Bpe,
+    templates: &[&str],
     mut infer: impl FnMut(Vec<i64>) -> Result<Vec<f32>, super::nsfw::ModelError>,
 ) -> Result<Vec<f32>, super::nsfw::ModelError> {
     let mut sum = vec![0f32; DIM];
-    for template in TEMPLATES {
+    for template in templates {
         let framed = template.replace("{}", phrase);
         let out = infer(bpe.encode(&framed))?;
         for (at, value) in out.into_iter().enumerate() {
@@ -296,20 +380,35 @@ fn ensemble(
     super::vision::validated_unit(&sum, "vision text template ensemble")
 }
 
+fn canonical_phrase(phrase: &str) -> &str {
+    match phrase {
+        "english springer" => "english springer spaniel",
+        _ => phrase,
+    }
+}
+
 pub fn try_embed(phrase: &str) -> Result<EmbedOutcome, super::nsfw::ModelError> {
-    let phrase = phrase.trim();
+    try_embed_framed(phrase, Frames::Typed)
+}
+
+pub fn try_embed_framed(phrase: &str, frames: Frames) -> Result<EmbedOutcome, super::nsfw::ModelError> {
+    let phrase = phrase.trim().to_lowercase();
     if phrase.is_empty() {
         return Ok(EmbedOutcome::Empty);
     }
     let (Some(session), Some(bpe)) = (model()?, bpe()?) else {
         return Ok(EmbedOutcome::Unavailable);
     };
-
-    ensemble(phrase, bpe, |ids| run(session, ids)).map(EmbedOutcome::Embedding)
+    let templates = match frames {
+        Frames::Typed => TEMPLATES,
+        Frames::English => ENGLISH_TEMPLATES,
+    };
+    ensemble(canonical_phrase(&phrase), bpe, templates, |ids| run(&session, ids))
+        .map(EmbedOutcome::Embedding)
 }
 
-pub fn embed(phrase: &str) -> Option<Vec<f32>> {
-    match try_embed(phrase) {
+pub fn embed_framed(phrase: &str, frames: Frames) -> Option<Vec<f32>> {
+    match try_embed_framed(phrase, frames) {
         Ok(EmbedOutcome::Embedding(vector)) => Some(vector),
         Ok(EmbedOutcome::Unavailable | EmbedOutcome::Empty) => None,
         Err(error) => {
@@ -322,6 +421,36 @@ pub fn embed(phrase: &str) -> Option<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_or_missing_initialization_retries_then_caches_success() {
+        let cell = std::sync::OnceLock::new();
+        let gate = std::sync::Mutex::new(());
+        let mut calls = 0;
+        let mut build = || {
+            calls += 1;
+            match calls {
+                1 => Ok(None),
+                2 => Err("transient load error"),
+                3 => Ok(Some(42)),
+                _ => panic!("successful initialization should be cached"),
+            }
+        };
+        assert_eq!(initialize_once_retry(&cell, &gate, &mut build), Ok(None));
+        assert_eq!(
+            initialize_once_retry(&cell, &gate, &mut build),
+            Err("transient load error")
+        );
+        assert_eq!(
+            initialize_once_retry(&cell, &gate, &mut build),
+            Ok(Some(&42))
+        );
+        assert_eq!(
+            initialize_once_retry(&cell, &gate, &mut build),
+            Ok(Some(&42))
+        );
+        assert_eq!(calls, 3);
+    }
 
     fn tiny() -> Bpe {
         let mut pieces: Vec<String> = vec![
@@ -407,7 +536,7 @@ mod tests {
     fn one_failed_template_rejects_the_whole_ensemble() {
         let bpe = tiny();
         let mut calls = 0usize;
-        let result = ensemble("abc", &bpe, |_| {
+        let result = ensemble("abc", &bpe, TEMPLATES, |_| {
             calls += 1;
             if calls == 2 {
                 return Err(super::super::nsfw::ModelError::Runtime(
@@ -479,26 +608,50 @@ mod tests {
 
     #[test]
     #[ignore = "needs vision_text.onnx and its two files from an export"]
-    fn a_persian_phrase_lands_next_to_its_own_concept() {
-        let vector = embed("سیگار").expect("the text tower beside the test binary");
-        assert_eq!(vector.len(), DIM);
-        let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-3, "not unit length: {norm}");
-
+    fn a_persian_phrase_lands_next_to_its_own_direction() {
+        super::super::nsfw::configure_model_tests()
+            .expect("configure the test's VISION_FILES bundle before loading the text tower");
         use super::super::concept_vectors as vectors;
         use super::super::vision::dot;
-        let cigarette = dot(&vector, &vectors::CIGARETTE);
-        for (name, other) in [
-            ("alcohol", &vectors::ALCOHOL),
-            ("blood", &vectors::BLOOD),
-            ("gambling", &vectors::GAMBLING),
+        for (phrase, near, far, what) in [
+            ("عکس خانوادگی", &vectors::SAFE, &vectors::EXPLICIT, "ordinary"),
+            ("پورن", &vectors::EXPLICIT, &vectors::SAFE, "explicit"),
         ] {
-            let other = dot(&vector, other);
+            let vector = embed_framed(phrase, Frames::Typed).expect("the text tower beside the test binary");
+            assert_eq!(vector.len(), DIM);
+            let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!((norm - 1.0).abs() < 1e-3, "not unit length: {norm}");
+            let (near, far) = (dot(&vector, near), dot(&vector, far));
             assert!(
-                cigarette > other,
-                "«سیگار» is nearer {name} ({other:.4}) than cigarette ({cigarette:.4})"
+                near > far,
+                "«{phrase}» is not nearer the {what} direction ({near:.4} against {far:.4})"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "needs vision_text.onnx and its two files from an export"]
+    fn dropping_the_tower_returns_its_memory() {
+        super::super::nsfw::configure_model_tests()
+            .expect("configure the test's VISION_FILES bundle before loading the text tower");
+        let anonymous_mb = || {
+            let status = std::fs::read_to_string("/proc/self/status").expect("status");
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("RssAnon:"))
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|kb| kb.parse::<u64>().ok())
+                .expect("RssAnon")
+                / 1024
+        };
+        embed_framed("کتاب", Frames::Typed).expect("the text tower beside the test binary");
+        let held = anonymous_mb();
+        drop(LOADED.lock().unwrap().take());
+        super::super::nsfw::trim::release_freed();
+        let freed = held.saturating_sub(anonymous_mb());
+        eprintln!("text tower: {held} MB anonymous while held, {freed} MB returned on drop");
+        assert!(freed >= 400, "only {freed} MB came back when the tower was dropped");
+        embed_framed("کتاب", Frames::Typed).expect("the tower reloads after a drop");
     }
 
     #[test]
@@ -507,6 +660,27 @@ mod tests {
             assert!(template.contains("{}"), "«{template}» drops the phrase");
             assert!(!template.contains('\u{200c}'));
             assert_ne!(template.replace("{}", "خودرو"), *template);
+        }
+    }
+
+    #[test]
+    fn only_the_abbreviated_breed_name_is_expanded() {
+        assert_eq!(
+            canonical_phrase("english springer"),
+            "english springer spaniel"
+        );
+        assert_eq!(
+            canonical_phrase("english springer dog"),
+            "english springer dog"
+        );
+        assert_eq!(canonical_phrase("سیگار"), "سیگار");
+    }
+
+    #[test]
+    fn every_english_frame_carries_the_phrase_and_is_lowercase() {
+        for template in ENGLISH_TEMPLATES {
+            assert!(template.contains("{}"), "«{template}» drops the phrase");
+            assert_eq!(*template, template.to_lowercase());
         }
     }
 }

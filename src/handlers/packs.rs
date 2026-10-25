@@ -5,8 +5,26 @@ use super::Ctx;
 
 pub const PREFIX: &str = "pack:";
 
-pub const LOCK: &[&str] = &["قفل پک", "قفل پک ایموجی", "قفل استیکرپک"];
-pub const UNLOCK: &[&str] = &["بازکردن پک", "باز کردن پک", "حذف پک", "آنلاک پک"];
+pub const LOCK: &[&str] = &[
+    "قفل پک ایموجی",
+    "قفل پک استیکر",
+    "قفل استیکر پک",
+    "قفل استیکرپک",
+    "قفل پک",
+    "/lockpack",
+    "/banpack",
+];
+pub const UNLOCK: &[&str] = &[
+    "باز کردن پک ایموجی",
+    "باز کردن پک استیکر",
+    "بازکردن پک",
+    "باز کردن پک",
+    "حذف قفل پک",
+    "حذف پک",
+    "آنلاک پک",
+    "/unlockpack",
+    "/unbanpack",
+];
 
 pub(crate) fn key(set: i64) -> String {
     format!("{PREFIX}{set}")
@@ -37,11 +55,9 @@ pub fn is_banned(ctx: &Ctx, chat: i64, view: &super::locks::View<'_>) -> bool {
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
-    let locking = LOCK.iter().any(|c| text == *c || starts(text, c));
-    let unlocking = UNLOCK.iter().any(|c| text == *c || starts(text, c));
-    if !locking && !unlocking {
+    let Some((locking, name)) = parse_command(text) else {
         return false;
-    }
+    };
     let Some(chat) = message.peer_id().bot_api_dialog_id() else {
         return false;
     };
@@ -49,26 +65,33 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    let arg = LOCK
-        .iter()
-        .chain(UNLOCK.iter())
-        .find_map(|c| text.strip_prefix(*c))
-        .map(str::trim)
-        .unwrap_or("");
-
-    let found = match message
-        .get_reply()
-        .await
-        .ok()
-        .flatten()
-        .as_ref()
-        .and_then(set_of)
-    {
-        Some(set) => Some((set, String::new())),
-        None => match short_name(arg) {
-            Some(name) => resolve(ctx, &name).await,
-            None => None,
-        },
+    let found = match name {
+        Some(name) => {
+            if !locking {
+                if let Ok(set) = name.parse::<i64>() {
+                    if let Some(title) = (set > 0)
+                        .then(|| ctx.settings.value(chat, &key(set)))
+                        .flatten()
+                    {
+                        Some((set, title))
+                    } else {
+                        resolve(ctx, &name).await
+                    }
+                } else {
+                    resolve(ctx, &name).await
+                }
+            } else {
+                resolve(ctx, &name).await
+            }
+        }
+        None => message
+            .get_reply()
+            .await
+            .ok()
+            .flatten()
+            .as_ref()
+            .and_then(set_of)
+            .map(|set| (set, String::new())),
     };
     let Some((set, title)) = found else {
         super::respond(
@@ -145,15 +168,35 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
 
 fn short_name(text: &str) -> Option<String> {
     let text = text.trim();
-    if text.is_empty() {
+    if text.is_empty() || text.chars().any(char::is_whitespace) {
         return None;
     }
-    let name = text
-        .rsplit_once("addstickers/")
-        .map(|(_, name)| name)
+    let path = text
+        .strip_prefix("https://")
+        .or_else(|| text.strip_prefix("http://"))
         .unwrap_or(text);
-    let name = name.split(['?', '/', ' ']).next()?.trim();
-    (!name.is_empty() && !name.contains("://")).then(|| name.to_owned())
+    let linked = path
+        .strip_prefix("t.me/addstickers/")
+        .or_else(|| path.strip_prefix("telegram.me/addstickers/"));
+    let name = linked.unwrap_or(text);
+    let name = if let Some((name, query)) = name.split_once('?') {
+        if linked.is_none() || !query.contains('=') {
+            return None;
+        }
+        name
+    } else {
+        name
+    };
+    let name = if linked.is_some() {
+        name.strip_suffix('/').unwrap_or(name)
+    } else {
+        name
+    };
+    (!name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+    .then(|| name.to_owned())
 }
 
 async fn resolve(ctx: &Ctx, short_name: &str) -> Option<(i64, String)> {
@@ -177,15 +220,69 @@ async fn resolve(ctx: &Ctx, short_name: &str) -> Option<(i64, String)> {
     }
 }
 
-fn starts(text: &str, command: &str) -> bool {
-    text.strip_prefix(command)
-        .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+fn parse_command(text: &str) -> Option<(bool, Option<String>)> {
+    [(LOCK, true), (UNLOCK, false)]
+        .into_iter()
+        .flat_map(|(commands, locking)| {
+            commands.iter().filter_map(move |command| {
+                super::commands::strip_prefix(text, command)
+                    .map(|tail| (command.chars().count(), locking, tail))
+            })
+        })
+        .max_by_key(|(len, _, _)| *len)
+        .and_then(|(_, locking, tail)| {
+            if tail.is_empty() {
+                Some((locking, None))
+            } else {
+                short_name(&super::digits(tail)).map(|name| (locking, Some(name)))
+            }
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn pack_aliases_keep_link_casing_and_boundaries() {
+        let link = "https://t.me/addstickers/MyPack";
+        for command in [
+            "قفل پک ایموجی",
+            "قفل پک استیکر",
+            "قفل\tپک ايموجي",
+            "/LOCKPACK",
+        ] {
+            assert_eq!(
+                parse_command(&format!("{command} {link}")),
+                Some((true, Some("MyPack".to_owned()))),
+                "{command}"
+            );
+        }
+        assert_eq!(parse_command("باز کردن پک ایموجی"), Some((false, None)));
+        assert_eq!(
+            parse_command("حذف قفل پک CatPack"),
+            Some((false, Some("CatPack".to_owned())))
+        );
+        assert_eq!(
+            parse_command("باز کردن پک 123456789"),
+            Some((false, Some("123456789".to_owned())))
+        );
+        assert_eq!(
+            parse_command("باز کردن پک ۱۲۳۴۵۶۷۸۹"),
+            Some((false, Some("123456789".to_owned())))
+        );
+        assert_eq!(parse_command("قفل پکهای من"), None);
+        assert_eq!(parse_command("/lockpack@otherbot CatPack"), None);
+        for text in [
+            "قفل پک CatPack چیه",
+            "قفل پک https://t.me/addstickers/CatPack چیه",
+            "قفل پک CatPack?",
+            "قفل پک چرا؟",
+            "باز کردن پک CatPack/other",
+        ] {
+            assert_eq!(parse_command(text), None, "{text}");
+        }
+    }
     #[test]
     fn reads_pack_names_from_links() {
         assert_eq!(
@@ -198,5 +295,8 @@ mod tests {
         );
         assert_eq!(short_name("CatPack"), Some("CatPack".to_owned()));
         assert_eq!(short_name(""), None);
+        assert_eq!(short_name("CatPack?"), None);
+        assert_eq!(short_name("CatPack because"), None);
+        assert_eq!(short_name("t.me/addstickers/CatPack/other"), None);
     }
 }

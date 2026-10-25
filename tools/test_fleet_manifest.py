@@ -18,9 +18,8 @@ class FleetManifestTests(unittest.TestCase):
         self.assertEqual(result["declared_shards"], 10)
         self.assertEqual(result["assigned_groups"], 500_000)
         self.assertEqual(result["db_connections_with_reserve"], 100)
-        # 10 shards at the measured 2600 MB each — 1.62 GiB worst-case model pools
-        # (--model-probe, patch16-224 set) plus runtime state observed at 2.4 GiB live.
-        self.assertEqual(result["memory_used_mb"], 26_000)
+        # Reserve the full 4 GiB MemoryMax budget for every shard.
+        self.assertEqual(result["memory_used_mb"], 40_960)
         self.assertEqual(result["hosts"], {"host-a": 4, "host-b": 3, "host-c": 3})
 
     def test_shared_token_is_rejected(self):
@@ -50,7 +49,7 @@ class FleetManifestTests(unittest.TestCase):
         document["fleet"]["hosts_available"] = 1
         # Memory would also overcommit at ten shards on one host; give the host enough of it
         # so the check this test pins — the CPU core budget — is the one that fires.
-        document["fleet"]["host_memory_mb"] = 30_000
+        document["fleet"]["host_memory_mb"] = 50_000
         with self.assertRaisesRegex(ManifestError, "needs 20.00 CPU cores"):
             validate_manifest(document)
 

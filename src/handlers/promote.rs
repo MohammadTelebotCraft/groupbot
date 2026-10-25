@@ -8,10 +8,26 @@ use grammers_client::update::CallbackQuery;
 use super::{Ctx, bot_admin_key, esc, is_owner, sender_is_creator};
 use crate::response::ResponseKind;
 
-pub const COMMANDS: &[&str] = &["افزودن ادمین", "ادمین کن", "اضافه کردن ادمین"];
-pub const DEMOTE: &[&str] = &["حذف ادمین", "عزل ادمین", "برکناری ادمین"];
-pub const TAG: &[&str] = &["تنظیم تگ", "تنظیم مقام"];
-pub const TAG_CLEAR: &[&str] = &["حذف تگ", "حذف مقام"];
+pub const COMMANDS: &[&str] = &[
+    "افزودن ادمین",
+    "ادمین کن",
+    "اضافه کردن ادمین",
+    "ارتقا ادمین",
+    "ارتقای ادمین",
+    "ترفیع ادمین",
+    "ادمین کردن",
+    "/promote",
+];
+pub const DEMOTE: &[&str] = &[
+    "حذف ادمین",
+    "عزل ادمین",
+    "برکناری ادمین",
+    "تنزل ادمین",
+    "لغو ادمین",
+    "/demote",
+];
+pub const TAG: &[&str] = &["تنظیم تگ", "تنظیم مقام", "تنظیم عنوان ادمین", "/settitle"];
+pub const TAG_CLEAR: &[&str] = &["حذف تگ", "حذف مقام", "حذف عنوان ادمین", "/cleartitle"];
 
 pub const TAG_MAX: usize = 16;
 
@@ -32,11 +48,12 @@ async fn tag(ctx: &Ctx, message: &Message, text: &str) -> bool {
         .map(|command| (command, false))
         .chain(TAG_CLEAR.iter().map(|command| (command, true)))
         .find_map(|(command, clearing)| {
-            let rest = text.strip_prefix(command)?;
-            (rest.is_empty() || rest.starts_with(char::is_whitespace))
-                .then(|| (rest.trim(), clearing))
+            super::commands::strip_prefix(text, command).map(|rest| (rest, clearing))
         })
     else {
+        return false;
+    };
+    let Some((arg, title)) = title_arguments(rest, clearing) else {
         return false;
     };
     if !super::limits::allows(ctx, message, super::limits::SET).await {
@@ -46,14 +63,6 @@ async fn tag(ctx: &Ctx, message: &Message, text: &str) -> bool {
         return false;
     };
 
-    let (arg, title) = match rest.split_once(char::is_whitespace) {
-        Some((first, tail)) if first.starts_with('@') || first.parse::<i64>().is_ok() => {
-            (Some(first), tail.trim())
-        }
-        _ if rest.starts_with('@') || rest.parse::<i64>().is_ok() => (Some(rest), ""),
-        _ => (None, rest),
-    };
-    let title = if clearing { "" } else { title };
     let Some(named) = super::named(message, arg) else {
         return false;
     };
@@ -176,9 +185,56 @@ const RIGHTS: &[(&str, u32)] = &[
 
 const DEFAULT_RIGHTS: u32 = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3);
 
+fn direct_rights(rest: &str) -> Option<(Option<String>, u32)> {
+    let normalized = super::commands::normalize(rest);
+    let rest = normalized.as_ref();
+    let (target, choices) = rest
+        .split_once(" با ")
+        .or_else(|| rest.strip_prefix("با ").map(|choices| ("", choices)))?;
+    let target = if target.is_empty() {
+        None
+    } else if super::arg_names_a_user(target) {
+        Some(target.to_owned())
+    } else {
+        return None;
+    };
+    let rights = match choices {
+        "پیش فرض" | "default" => DEFAULT_RIGHTS,
+        "بدون دسترسی" | "none" => 0,
+        _ => {
+            let mut bits = 0;
+            for choice in choices.split([',', '،']) {
+                let choice = choice.trim();
+                let (_, bit) = RIGHTS
+                    .iter()
+                    .find(|(label, _)| super::commands::matches(choice, label))?;
+                if bits & *bit != 0 {
+                    return None;
+                }
+                bits |= *bit;
+            }
+            bits
+        }
+    };
+    Some((target, rights))
+}
+
+fn title_target(rest: &str) -> (Option<&str>, &str) {
+    match rest.split_once(super::commands::separator) {
+        Some((first, tail)) if super::arg_names_a_user(first) => (Some(first), tail.trim()),
+        _ if super::arg_names_a_user(rest) => (Some(rest), ""),
+        _ => (None, rest),
+    }
+}
+
+fn title_arguments(rest: &str, clearing: bool) -> Option<(Option<&str>, &str)> {
+    let (arg, title) = title_target(rest);
+    (!clearing || title.is_empty()).then_some((arg, title))
+}
+
 pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
     let text = view.digits();
-    if tag(ctx, message, text).await {
+    if tag(ctx, message, view.text()).await {
         return true;
     }
     let matched = COMMANDS
@@ -186,16 +242,18 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
         .map(|command| (command, true))
         .chain(DEMOTE.iter().map(|command| (command, false)))
         .find_map(|(command, adding)| {
-            let rest = text.strip_prefix(command)?;
-            (rest.is_empty() || rest.starts_with(char::is_whitespace))
-                .then(|| (adding, rest.trim().to_owned()))
+            super::commands::strip_prefix(text, command).map(|rest| (adding, rest.to_owned()))
         });
     let Some((adding, arg)) = matched else {
         return false;
     };
 
-    let arg = (!arg.is_empty()).then_some(arg);
-    let Some(named) = super::named(message, arg.as_deref()) else {
+    let direct = adding.then(|| direct_rights(&arg)).flatten();
+    let target_arg = match &direct {
+        Some((target, _)) => target.as_deref(),
+        None => (!arg.is_empty()).then_some(arg.as_str()),
+    };
+    let Some(named) = super::named(message, target_arg) else {
         return false;
     };
     if !is_owner(ctx, message) && !sender_is_creator(ctx, message).await {
@@ -218,6 +276,53 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
 
     if !adding {
         demote(ctx, message, target, &name).await;
+        return true;
+    }
+
+    if let Some((_, rights)) = direct {
+        let (Some(chat), Ok(Some(chat_ref))) = (
+            message.peer_id().bot_api_dialog_id(),
+            message.peer_ref().await,
+        ) else {
+            super::respond(
+                ctx,
+                message,
+                ResponseKind::CommandError,
+                "گروه پیدا نشد؛ دوباره تلاش کنید.",
+            )
+            .await;
+            return true;
+        };
+        let pending = Pending {
+            target,
+            name: esc(&name),
+            rights,
+            started: Instant::now(),
+        };
+        let body = match apply_promotion(
+            ctx,
+            chat_ref,
+            chat,
+            &pending,
+            message
+                .sender_id()
+                .and_then(grammers_client::session::types::PeerId::bare_id),
+        )
+        .await
+        {
+            Ok(body) => super::premium::icon_html(Some(super::premium::Icon::User), body),
+            Err(error) => {
+                ::log::error!(
+                    "promote: {chat}: could not promote {}: {error}",
+                    pending.name
+                );
+                super::premium::icon_text(
+                    Some(super::premium::Icon::ErrorRed),
+                    promote_error_text(&error),
+                )
+            }
+        };
+        super::respond(ctx, message, ResponseKind::AdminTool, body).await;
         return true;
     }
 
@@ -441,13 +546,41 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, chat: 
     }
 }
 
-async fn confirm(ctx: &Ctx, query: &CallbackQuery, chat: i64, pending: &Pending) {
-    let Ok(Some(chat_ref)) = query.peer_ref().await else {
-        return;
-    };
-    let has = |bit: u32| pending.rights & bit != 0;
+enum PromoteError {
+    Rpc(super::restrict::MemberMutationError),
+    State(crate::state::SettingsWriteError),
+}
 
-    let result = super::restrict::set_member_admin_rights(
+impl std::fmt::Display for PromoteError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rpc(error) => write!(formatter, "{error}"),
+            Self::State(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+fn promote_error_text(error: &PromoteError) -> &'static str {
+    match error {
+        PromoteError::Rpc(_) => "انجام نشد. مطمئن شوید ربات ادمین است و اجازه «افزودن ادمین» دارد.",
+        PromoteError::State(error) if error.commit_outcome_unknown() => {
+            "کاربر در تلگرام ادمین شد، اما نتیجه ثبت آن نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+        }
+        PromoteError::State(_) => {
+            "کاربر در تلگرام ادمین شد، اما وضعیت ربات ذخیره نشد؛ دوباره تلاش نکنید و گزارش دهید."
+        }
+    }
+}
+
+async fn apply_promotion(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    chat: i64,
+    pending: &Pending,
+    by: Option<i64>,
+) -> Result<String, PromoteError> {
+    let has = |bit: u32| pending.rights & bit != 0;
+    super::restrict::set_member_admin_rights(
         ctx,
         chat_ref,
         pending.target,
@@ -461,25 +594,13 @@ async fn confirm(ctx: &Ctx, query: &CallbackQuery, chat: i64, pending: &Pending)
             add_admins: has(RIGHTS[6].1),
         },
     )
-    .await;
-
-    if let Err(e) = result {
-        eprintln!("promote: {chat}: could not promote {}: {e}", pending.name);
-        let _ = query
-            .answer()
-            .edit(super::premium::icon_html(
-                Some(super::premium::Icon::ErrorRed),
-                "انجام نشد. مطمئن شوید ربات ادمین است و اجازه «افزودن ادمین» دارد.",
-            ))
-            .await;
-        return;
-    }
+    .await
+    .map_err(PromoteError::Rpc)?;
 
     if let Some(id) = pending.target.id.bare_id() {
         let admin_key = bot_admin_key(id);
         let badge_key = super::stats::badge_key(id);
-        if let Err(error) = ctx
-            .settings
+        ctx.settings
             .try_apply_batch(
                 chat,
                 &[
@@ -491,22 +612,7 @@ async fn confirm(ctx: &Ctx, query: &CallbackQuery, chat: i64, pending: &Pending)
                 ],
             )
             .await
-        {
-            ::log::error!("promote: {chat}: promoted {id}, but state write failed: {error}");
-            let text = if error.commit_outcome_unknown() {
-                "کاربر در تلگرام ادمین شد، اما نتیجه ثبت آن نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
-            } else {
-                "کاربر در تلگرام ادمین شد، اما وضعیت ربات ذخیره نشد؛ دوباره تلاش نکنید و گزارش دهید."
-            };
-            let _ = query
-                .answer()
-                .edit(super::premium::icon_text(
-                    Some(super::premium::Icon::ErrorRed),
-                    text,
-                ))
-                .await;
-            return;
-        }
+            .map_err(PromoteError::State)?;
     }
     ctx.forget_admins(chat);
 
@@ -515,7 +621,6 @@ async fn confirm(ctx: &Ctx, query: &CallbackQuery, chat: i64, pending: &Pending)
         .filter(|(_, bit)| has(*bit))
         .map(|(label, _)| *label)
         .collect();
-    let by = query.sender_id().bare_id();
     super::log::write(
         ctx,
         chat,
@@ -539,25 +644,40 @@ async fn confirm(ctx: &Ctx, query: &CallbackQuery, chat: i64, pending: &Pending)
         },
     )
     .await;
-    let _ = query
-        .answer()
-        .edit(super::premium::icon_html(
-            Some(super::premium::Icon::User),
-            format!(
-                "<b>ادمین جدید</b>\n\n<b>{}</b> ادمین گروه و ربات شد.\n\n<b>دسترسی ها</b>\n{}",
-                pending.name,
-                if granted.is_empty() {
-                    "‹ بدون دسترسی خاص".to_owned()
-                } else {
-                    granted
-                        .iter()
-                        .map(|label| format!("✓ {label}"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
-            ),
-        ))
-        .await;
+    Ok(format!(
+        "<b>ادمین جدید</b>\n\n<b>{}</b> ادمین گروه و ربات شد.\n\n<b>دسترسی ها</b>\n{}",
+        pending.name,
+        if granted.is_empty() {
+            "‹ بدون دسترسی خاص".to_owned()
+        } else {
+            granted
+                .iter()
+                .map(|label| format!("✓ {label}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    ))
+}
+
+async fn confirm(ctx: &Ctx, query: &CallbackQuery, chat: i64, pending: &Pending) {
+    let Ok(Some(chat_ref)) = query.peer_ref().await else {
+        return;
+    };
+    let body =
+        match apply_promotion(ctx, chat_ref, chat, pending, query.sender_id().bare_id()).await {
+            Ok(body) => super::premium::icon_html(Some(super::premium::Icon::User), body),
+            Err(error) => {
+                ::log::error!(
+                    "promote: {chat}: could not promote {}: {error}",
+                    pending.name
+                );
+                super::premium::icon_text(
+                    Some(super::premium::Icon::ErrorRed),
+                    promote_error_text(&error),
+                )
+            }
+        };
+    let _ = query.answer().edit(body).await;
 }
 
 fn title(pending: &Pending) -> String {
@@ -615,6 +735,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn admin_title_keeps_original_spelling_digits_case_and_spacing() {
+        let text = "تنظيم\u{200c}تگ ۱۲۳ Admin  ۲\u{200c}ي";
+        let rest = super::super::commands::strip_prefix(text, "تنظیم تگ").unwrap();
+        assert_eq!(title_target(rest), (Some("۱۲۳"), "Admin  ۲\u{200c}ي"));
+        assert_eq!(title_target("@Ali Team Lead"), (Some("@Ali"), "Team Lead"));
+        assert_eq!(title_target("Team Lead"), (None, "Team Lead"));
+        assert_eq!(title_arguments("", true), Some((None, "")));
+        assert_eq!(title_arguments("@Ali", true), Some((Some("@Ali"), "")));
+        assert_eq!(title_arguments("@Ali unexpected", true), None);
+        assert_eq!(title_arguments("چطوریه", true), None);
+    }
+
+    #[test]
     fn rights_bits_are_distinct_and_indexable() {
         let mut seen = 0u32;
         for (index, (label, bit)) in RIGHTS.iter().enumerate() {
@@ -626,5 +759,25 @@ mod tests {
             assert!(payload.len() <= 64, "payload too long: {payload}");
         }
         assert_eq!(DEFAULT_RIGHTS & !seen, 0, "default grants an unknown right");
+    }
+
+    #[test]
+    fn direct_promotion_rights_are_a_closed_list() {
+        assert_eq!(
+            direct_rights("@Ali با حذف پیام، بن کاربران"),
+            Some((Some("@ali".to_owned()), RIGHTS[0].1 | RIGHTS[1].1))
+        );
+        assert_eq!(direct_rights("با پیش فرض"), Some((None, DEFAULT_RIGHTS)));
+        assert_eq!(
+            direct_rights("123 با بدون دسترسی"),
+            Some((Some("123".to_owned()), 0))
+        );
+        for (label, bit) in RIGHTS {
+            assert_eq!(direct_rights(&format!("با {label}")), Some((None, *bit)));
+        }
+        assert_eq!(direct_rights("@ali با حذف پیام، حذف پیام"), None);
+        assert_eq!(direct_rights("@ali با حذف پیام، ناشناخته"), None);
+        assert_eq!(direct_rights("@ali با حذف پیام امروز"), None);
+        assert_eq!(direct_rights("@ali با"), None);
     }
 }

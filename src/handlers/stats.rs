@@ -127,12 +127,80 @@ const HOURS: [&str; 24] = [
     "h15", "h16", "h17", "h18", "h19", "h20", "h21", "h22", "h23",
 ];
 
-pub const STATS: &[&str] = &["امار", "آمار", "امار گروه", "آمار گروه"];
-pub const REPORT_SET: &[&str] = &["تنظیم گزارش روزانه", "گزارش روزانه"];
-pub const REPORT_CLEAR: &[&str] = &["حذف گزارش روزانه", "خاموش گزارش روزانه"];
-pub const INFO: &[&str] = &["اطلاعات", "پروفایل", "کاربر", "ایدی", "آیدی"];
+pub const STATS: &[&str] = &[
+    "امار",
+    "آمار",
+    "امار گروه",
+    "آمار گروه",
+    "/stats",
+    "/statistics",
+];
+pub const IDLE: &[&str] = &[
+    "غیرفعال ها",
+    "/idle",
+    "کاربران غیرفعال",
+    "اعضای غیرفعال",
+    "/inactive",
+];
+pub const IDLE_KICK: &[&str] = &[
+    "اخراج غیرفعال",
+    "/kickidle",
+    "اخراج کاربران غیرفعال",
+    "اخراج اعضای غیرفعال",
+    "/kickinactive",
+];
+pub const SECTION_COMMANDS: &[(&str, &str)] = &[
+    ("آمار خلاصه", "sum"),
+    ("آمار پرچت ها", "top"),
+    ("آمار هفته", "week"),
+    ("آمار ماه", "month"),
+    ("آمار غیرفعال ها", "idle"),
+    ("آمار ساعت ها", "hours"),
+    ("آمار نوع پیام", "kinds"),
+    ("آمار اعضا", "members"),
+    ("آمار مدیریت", "mod"),
+    ("آمار هفتگی", "week"),
+    ("آمار ماهانه", "month"),
+];
+pub const REPORT_SET: &[&str] = &[
+    "تنظیم گزارش روزانه",
+    "گزارش روزانه",
+    "/dailyreport",
+    "/setdailyreport",
+];
+pub const REPORT_CLEAR: &[&str] = &[
+    "حذف گزارش روزانه",
+    "خاموش گزارش روزانه",
+    "غیرفعال گزارش روزانه",
+    "غیر فعال گزارش روزانه",
+    "گزارش روزانه خاموش",
+    "/stopdailyreport",
+    "/nodailyreport",
+];
+pub const INFO: &[&str] = &[
+    "اطلاعات کاربر",
+    "شناسه کاربر",
+    "اطلاعات",
+    "پروفایل",
+    "کاربر",
+    "ایدی",
+    "آیدی",
+    "شناسه",
+    "/info",
+    "/id",
+    "/whois",
+];
 
-pub const RANK: &[&str] = &["مقام", "رتبه", "سطح", "لول", "مدال"];
+pub const RANK: &[&str] = &[
+    "رتبه کاربر",
+    "مقام",
+    "رتبه",
+    "سطح",
+    "لول",
+    "مدال",
+    "/rank",
+    "/level",
+];
 
 pub const TEHRAN_OFFSET: u64 = 3 * 3600 + 1800;
 
@@ -165,7 +233,51 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
-    if STATS.contains(&text) {
+    if let Some(user) = idle_kick_target(text) {
+        if !super::limits::allows(ctx, message, super::limits::SET).await
+            || !super::limits::allows(ctx, message, super::limits::CLEAN).await
+        {
+            return true;
+        }
+        let result = match kick_idle(ctx, chat, user).await {
+            Ok(()) => "✓ کاربر غیرفعال از گروه اخراج شد.".to_owned(),
+            Err(error) => error,
+        };
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::ModerationConfirmation,
+            result,
+        )
+        .await;
+        return true;
+    }
+    if let Some(section) =
+        stats_section(text).or_else(|| super::commands::contains(IDLE, text).then_some("idle"))
+    {
+        if !super::limits::allows(ctx, message, super::limits::SET).await {
+            return true;
+        }
+        let Some(opener) = message.sender_id().and_then(PeerId::bare_id) else {
+            return false;
+        };
+        let card = match section_card(ctx, chat, opener, section).await {
+            Ok(card) => card,
+            Err(error) => {
+                log::warn!("stats: could not build {section} for {chat}: {error}");
+                unavailable_card()
+            }
+        };
+        super::respond_shared(
+            ctx,
+            message,
+            crate::response::ResponseKind::Statistics,
+            card,
+        )
+        .await;
+        return true;
+    }
+    if super::commands::contains(STATS, text) {
         let Some(opener) = message.sender_id().and_then(PeerId::bare_id) else {
             return false;
         };
@@ -185,7 +297,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         .await;
         return true;
     }
-    if REPORT_CLEAR.contains(&text) {
+    if super::commands::contains(REPORT_CLEAR, text) {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
@@ -211,28 +323,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         .await;
         return true;
     }
-    if let Some((command, rest)) = REPORT_SET.iter().find_map(|command| {
-        let rest = text.strip_prefix(command)?;
-        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| (*command, rest.trim()))
-    }) {
-        let typed = super::digits(rest);
-        let at = match typed.split_once([':', '.']) {
-            Some((hour, minute)) => {
-                match (hour.trim().parse::<u32>(), minute.trim().parse::<u32>()) {
-                    (Ok(hour), Ok(minute)) if hour < 24 && minute < 60 => Some(hour * 60 + minute),
-                    _ => None,
-                }
-            }
-            None => typed
-                .trim()
-                .parse::<u32>()
-                .ok()
-                .filter(|h| *h < 24)
-                .map(|h| h * 60),
-        };
-        if at.is_none() && !rest.is_empty() && !super::phrase_carries_text(command) {
-            return false;
-        }
+    if let Some(at) = daily_report_argument(text) {
         if !super::limits::allows(ctx, message, super::limits::SET).await {
             return true;
         }
@@ -288,19 +379,63 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     false
 }
 
+fn idle_kick_target(text: &str) -> Option<i64> {
+    IDLE_KICK
+        .iter()
+        .find_map(|command| super::commands::strip_prefix(text, command))
+        .and_then(|tail| super::digits(tail).parse::<i64>().ok())
+        .filter(|user| *user > 0)
+}
+
+fn stats_section(text: &str) -> Option<&'static str> {
+    if let Some(tail) = super::commands::strip_prefix(text, "/stats") {
+        return SECTIONS
+            .iter()
+            .find(|(section, _)| super::commands::matches(tail, section))
+            .map(|(section, _)| *section);
+    }
+    SECTION_COMMANDS
+        .iter()
+        .find(|(command, _)| super::commands::matches(text, command))
+        .map(|(_, section)| *section)
+}
+
+fn daily_report_argument(text: &str) -> Option<Option<u32>> {
+    let rest = REPORT_SET
+        .iter()
+        .find_map(|command| super::commands::strip_prefix(text, command))?;
+    if rest.is_empty() {
+        return Some(None);
+    }
+    let typed = super::digits(rest);
+    let at = match typed.split_once([':', '.']) {
+        Some((hour, minute)) => match (hour.trim().parse::<u32>(), minute.trim().parse::<u32>()) {
+            (Ok(hour), Ok(minute)) if hour < 24 && minute < 60 => Some(hour * 60 + minute),
+            _ => None,
+        },
+        None => typed
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|hour| *hour < 24)
+            .map(|hour| hour * 60),
+    };
+    at.map(Some)
+}
+
 fn names_a_user(commands: &[&str], text: &str) -> bool {
     commands.iter().any(|command| {
-        text == *command
-            || text
-                .strip_prefix(command)
-                .is_some_and(|r| r.starts_with(' '))
+        super::commands::strip_prefix(text, command).is_some_and(|tail| {
+            tail.is_empty()
+                || (tail.split_whitespace().count() == 1 && super::arg_names_a_user(tail))
+        })
     })
 }
 
 fn tail_of(commands: &[&str], text: &str) -> Option<String> {
     commands
         .iter()
-        .find_map(|command| text.strip_prefix(command))
+        .find_map(|command| super::commands::strip_prefix(text, command))
         .map(str::trim)
         .filter(|rest| !rest.is_empty())
         .map(str::to_owned)
@@ -328,9 +463,17 @@ pub async fn on_callback(ctx: &Ctx, query: &grammers_client::update::CallbackQue
     }
 
     if let Some(user) = section.strip_prefix("kick:") {
-        if let Ok(user) = user.parse::<i64>()
-            && let Err(error) = kick_idle(ctx, chat, user).await
-        {
+        let Ok(user) = user.parse::<i64>() else {
+            return;
+        };
+        let Some(actor) = query.sender_id().bare_id() else {
+            return;
+        };
+        if !super::limits::permits(ctx, chat, actor, super::limits::CLEAN) {
+            super::limits::refuse(query, super::limits::CLEAN).await;
+            return;
+        }
+        if let Err(error) = kick_idle(ctx, chat, user).await {
             let _ = query.answer().alert(error).send().await;
             return;
         }
@@ -366,6 +509,17 @@ pub async fn on_callback(ctx: &Ctx, query: &grammers_client::update::CallbackQue
 }
 
 async fn kick_idle(ctx: &Ctx, chat: i64, user: i64) -> Result<(), String> {
+    let (listed, _) = ctx
+        .settings
+        .idle(chat, today(), IDLE_DAYS, IDLE_SHOWN)
+        .await
+        .map_err(|error| {
+            log::warn!("stats: idle member lookup for {chat}/{user} failed: {error}");
+            "فهرست غیرفعال ها خوانده نشد؛ دوباره تلاش کنید.".to_owned()
+        })?;
+    if !listed.iter().any(|(id, _, _)| *id == user) {
+        return Err("این کاربر در فهرست غیرفعال ها نیست؛ فهرست را تازه کنید.".to_owned());
+    }
     let (Some(chat_ref), Some(target)) = (
         ctx.chat_ref(chat),
         PeerId::user(user).map(PeerId::to_ambient_ref),
@@ -508,13 +662,26 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> Result<String, sql
             ))
         }
         "idle" => {
-            let (_, idle) = ctx.settings.idle(chat, day, IDLE_DAYS, IDLE_SHOWN).await?;
+            let (listed, idle) = ctx.settings.idle(chat, day, IDLE_DAYS, IDLE_SHOWN).await?;
+            let users = listed
+                .iter()
+                .map(|(user, name, quiet)| {
+                    format!("‹ {} · <code>{user}</code> · {quiet} روز", esc(name))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             Ok(format!(
                 "{head} › <b>غیرفعال ها</b>\n\n\
                  کسانی که بیش از <b>{IDLE_DAYS}</b> روز پیامی نفرستاده اند ({}).\n\
-                 برای اخراج روی هر نام بزنید.\n\n\
+                 برای اخراج روی نام بزنید یا «اخراج غیرفعال 123» را با شناسه بفرستید.\n\n\
+                 {}\n\n\
                  <i>تنها کسانی شمرده می شوند که از زمان نصب ربات پیامی فرستاده اند.</i>",
-                idle
+                idle,
+                if users.is_empty() {
+                    "‹ موردی نیست"
+                } else {
+                    &users
+                },
             ))
         }
         "hours" => {
@@ -1556,7 +1723,65 @@ pub async fn count_add(ctx: &Ctx, message: &Message, added: usize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn daily_report_accepts_only_bare_status_or_a_complete_clock() {
+        for command in REPORT_SET {
+            assert_eq!(daily_report_argument(command), Some(None));
+            assert_eq!(
+                daily_report_argument(&format!("{command} ۲۱:۳۰")),
+                Some(Some(1290))
+            );
+            for tail in ["چطوره", "21 please", "21:30 extra", "24", "21:60", "25:00"] {
+                assert_eq!(
+                    daily_report_argument(&format!("{command} {tail}")),
+                    None,
+                    "{command} {tail}"
+                );
+            }
+        }
+        assert_eq!(daily_report_argument("/DAILYREPORT 21"), Some(Some(1260)));
+        assert_eq!(daily_report_argument("/dailyreport@otherbot 21"), None);
+        assert_eq!(daily_report_argument("گزارش روزانه\u{200c}اش چطوره"), None);
+    }
+
+    #[test]
+    fn card_aliases_keep_the_named_target() {
+        for text in [
+            "اطلاعات\tکاربر @Some_User",
+            "شناسه\u{200c}کاربر @Some_User",
+            "/INFO @Some_User",
+        ] {
+            assert!(names_a_user(INFO, text), "{text}");
+            assert_eq!(tail_of(INFO, text).as_deref(), Some("@Some_User"));
+        }
+        assert_eq!(tail_of(RANK, "رتبه کاربر ۱۲۳").as_deref(), Some("۱۲۳"));
+        assert!(!names_a_user(INFO, "/info@otherbot @someone"));
+        assert!(!names_a_user(RANK, "رتبه\u{200c}اش"));
+    }
     use super::*;
+
+    #[test]
+    fn idle_commands_require_a_complete_user_id() {
+        assert!(super::super::commands::contains(IDLE, "غیرفعال ها"));
+        assert!(super::super::commands::contains(IDLE, "/IDLE"));
+        for (command, section) in SECTION_COMMANDS {
+            assert_eq!(stats_section(command), Some(*section), "{command}");
+            assert_eq!(stats_section(&format!("/stats {section}")), Some(*section));
+        }
+        assert_eq!(stats_section("/stats"), None);
+        assert_eq!(stats_section("/stats week please"), None);
+        assert_eq!(stats_section("آمار هفته چیه"), None);
+        assert_eq!(idle_kick_target("اخراج غیرفعال ۱۲۳"), Some(123));
+        assert_eq!(idle_kick_target("/KICKIDLE 123"), Some(123));
+        for text in [
+            "اخراج غیرفعال",
+            "اخراج غیرفعال -1",
+            "اخراج غیرفعال 123 please",
+            "/kickidle@otherbot 123",
+        ] {
+            assert_eq!(idle_kick_target(text), None, "{text}");
+        }
+    }
 
     #[test]
     fn titles_fit_telegram() {

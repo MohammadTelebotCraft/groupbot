@@ -2,8 +2,24 @@ use grammers_client::message::Message;
 
 use super::Ctx;
 
-pub const ADD: &[&str] = &["ویژه", "افزودن ویژه", "تنظیم ویژه"];
-pub const REMOVE: &[&str] = &["حذف ویژه", "لغو ویژه"];
+pub const ADD: &[&str] = &[
+    "افزودن کاربر ویژه",
+    "کاربر ویژه",
+    "افزودن ویژه",
+    "تنظیم ویژه",
+    "ویژه",
+    "/vip",
+    "/addvip",
+];
+pub const REMOVE: &[&str] = &[
+    "حذف کاربر ویژه",
+    "لغو کاربر ویژه",
+    "حذف ویژه",
+    "لغو ویژه",
+    "برداشتن ویژه",
+    "/unvip",
+    "/delvip",
+];
 
 pub const PREFIX: &str = "vip:";
 
@@ -97,7 +113,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
 fn parse(text: &str) -> Option<(bool, Option<&str>)> {
     for (commands, add) in [(ADD, true), (REMOVE, false)] {
         for command in commands {
-            let Some(rest) = text.strip_prefix(command) else {
+            let Some(rest) = super::commands::strip_prefix(text, command) else {
                 continue;
             };
             let rest = rest.trim();
@@ -105,7 +121,7 @@ fn parse(text: &str) -> Option<(bool, Option<&str>)> {
                 return Some((add, None));
             }
 
-            if text[command.len()..].starts_with(char::is_whitespace) && !rest.contains(' ') {
+            if rest.split_whitespace().count() == 1 && super::arg_names_a_user(rest) {
                 return Some((add, Some(rest)));
             }
         }
@@ -115,6 +131,26 @@ fn parse(text: &str) -> Option<(bool, Option<&str>)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vip_aliases_decline_conversation_and_extra_targets() {
+        assert_eq!(
+            parse("افزودن کاربر ويژه @Some_User"),
+            Some((true, Some("@Some_User")))
+        );
+        assert_eq!(parse("/VIP @Some_User"), Some((true, Some("@Some_User"))));
+        assert_eq!(
+            parse("حذف\u{200c}کاربر ویژه ۱۲۳"),
+            Some((false, Some("۱۲۳")))
+        );
+        for text in [
+            "ویژه ماست",
+            "ویژه @one @two",
+            "ویژه @one\t@two",
+            "/vip@otherbot @one",
+        ] {
+            assert_eq!(parse(text), None, "{text}");
+        }
+    }
     use super::*;
 
     #[test]

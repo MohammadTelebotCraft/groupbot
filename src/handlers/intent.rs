@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 
 use super::vision::beside_the_binary;
@@ -114,37 +113,83 @@ fn model() -> Result<Option<&'static super::nsfw::SessionPool>, super::nsfw::Mod
     }
 }
 
-fn big_model() -> Result<Option<&'static super::nsfw::SessionPool>, super::nsfw::ModelError> {
-    static CELL: std::sync::OnceLock<
-        Result<Option<super::nsfw::SessionPool>, super::nsfw::ModelError>,
-    > = std::sync::OnceLock::new();
-    match CELL.get_or_init(|| {
-        let Some(path) = artifact_path(BIG_MODEL_FILE)? else {
-            eprintln!("intent: {BIG_MODEL_FILE} is not beside the binary, so undecided scores are not escalated");
-            return Ok(None);
-        };
-        let pool = super::nsfw::open_path_pool(&path, "intent escalation model", 1)
-            .ok_or_else(|| {
-                super::nsfw::ModelError::Runtime(
-                    "intent escalation model would not load".to_owned(),
-                )
-            })?;
-        let frame_count = frames()?
-            .ok_or_else(|| {
-                super::nsfw::ModelError::artifact(format!(
-                    "{FRAMES_FILE} is required by {BIG_MODEL_FILE}"
-                ))
-            })?
-            .len();
-        if let Err(error) = validate_declared_outputs(&pool, frame_count) {
-            log::error!("intent: {BIG_MODEL_FILE} is incompatible: {error}");
-            return Err(error);
+const BIG_IDLE: std::time::Duration = std::time::Duration::from_secs(600);
+
+static BIG_LOADED: std::sync::Mutex<
+    Option<(std::sync::Arc<super::nsfw::SessionPool>, std::time::Instant)>,
+> = std::sync::Mutex::new(None);
+static BIG_REAPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn load_big_model() -> Result<Option<super::nsfw::SessionPool>, super::nsfw::ModelError> {
+    let Some(path) = artifact_path(BIG_MODEL_FILE)? else {
+        eprintln!("intent: {BIG_MODEL_FILE} is not beside the binary, so undecided scores are not escalated");
+        return Ok(None);
+    };
+    let pool = super::nsfw::open_path_pool(&path, "intent escalation model", 1).ok_or_else(|| {
+        super::nsfw::ModelError::Runtime("intent escalation model would not load".to_owned())
+    })?;
+    let frame_count = frames()?
+        .ok_or_else(|| {
+            super::nsfw::ModelError::artifact(format!(
+                "{FRAMES_FILE} is required by {BIG_MODEL_FILE}"
+            ))
+        })?
+        .len();
+    if let Err(error) = validate_declared_outputs(&pool, frame_count) {
+        log::error!("intent: {BIG_MODEL_FILE} is incompatible: {error}");
+        return Err(error);
+    }
+    Ok(Some(pool))
+}
+
+fn big_model() -> Result<Option<std::sync::Arc<super::nsfw::SessionPool>>, super::nsfw::ModelError> {
+    static UNUSABLE: std::sync::OnceLock<Result<(), super::nsfw::ModelError>> =
+        std::sync::OnceLock::new();
+    if let Some(unusable) = UNUSABLE.get() {
+        return unusable.clone().map(|()| None);
+    }
+    let mut loaded = BIG_LOADED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((pool, used)) = loaded.as_mut() {
+        *used = std::time::Instant::now();
+        return Ok(Some(std::sync::Arc::clone(pool)));
+    }
+    if let Some(unusable) = UNUSABLE.get() {
+        return unusable.clone().map(|()| None);
+    }
+    let pool = match load_big_model() {
+        Ok(Some(pool)) => std::sync::Arc::new(pool),
+        Ok(None) => return UNUSABLE.get_or_init(|| Ok(())).clone().map(|()| None),
+        Err(error) => return Err(UNUSABLE.get_or_init(|| Err(error)).clone().unwrap_err()),
+    };
+    *loaded = Some((std::sync::Arc::clone(&pool), std::time::Instant::now()));
+    if !BIG_REAPING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        std::thread::spawn(reap_big);
+    }
+    Ok(Some(pool))
+}
+
+fn reap_big() {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        let mut loaded = BIG_LOADED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if loaded.as_ref().is_none_or(|(_, used)| used.elapsed() >= BIG_IDLE) {
+            let dropped = loaded.take();
+            BIG_REAPING.store(false, std::sync::atomic::Ordering::Release);
+            drop(loaded);
+            if let Some(dropped) = dropped {
+                drop(dropped);
+                super::nsfw::trim::release_freed();
+                log::info!(
+                    "intent: escalation model dropped after {}s without an undecided score",
+                    BIG_IDLE.as_secs()
+                );
+            }
+            return;
         }
-        Ok(Some(pool))
-    }) {
-        Ok(Some(model)) => Ok(Some(model)),
-        Ok(None) => Ok(None),
-        Err(error) => Err(error.clone()),
     }
 }
 
@@ -250,7 +295,6 @@ pub enum ScoreOutcome {
     Abstained(AbstainReason),
     Scored(Scored),
 }
-
 
 pub struct Unigram {
     ids: HashMap<Box<str>, u32>,
@@ -417,7 +461,6 @@ impl Unigram {
     }
 }
 
-
 #[path = "intent_normalize.rs"]
 mod normalization;
 pub use normalization::descramble;
@@ -558,7 +601,7 @@ pub fn score_big(text: &str) -> Result<ScoreOutcome, super::nsfw::ModelError> {
     let Some(model) = big_model()? else {
         return Ok(ScoreOutcome::Unavailable);
     };
-    score_with(model, text)
+    score_with(&model, text)
 }
 
 #[cfg(test)]
@@ -772,6 +815,30 @@ mod tests {
         ("😀 چه روز خوبی", &[0, 12409, 3969, 2207, 20397, 2]),
         ("中文测试", &[0, 6, 3, 2]),
     ];
+
+    #[test]
+    #[ignore = "needs intent_big.onnx, intent_vocab.txt and intent_frames.txt from an export"]
+    fn dropping_the_escalation_model_returns_its_memory() {
+        let anonymous_mb = || {
+            let status = std::fs::read_to_string("/proc/self/status").expect("status");
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("RssAnon:"))
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|kb| kb.parse::<u64>().ok())
+                .expect("RssAnon")
+                / 1024
+        };
+        let scores = || matches!(score_big("گوشی فروشی، ۲۰ میلیون"), Ok(ScoreOutcome::Scored(_)));
+        assert!(scores(), "the escalation model beside the test binary");
+        let held = anonymous_mb();
+        drop(BIG_LOADED.lock().unwrap().take());
+        super::super::nsfw::trim::release_freed();
+        let freed = held.saturating_sub(anonymous_mb());
+        eprintln!("escalation model: {held} MB anonymous while held, {freed} MB returned on drop");
+        assert!(freed >= 300, "only {freed} MB came back when the model was dropped");
+        assert!(scores(), "the escalation model reloads after a drop");
+    }
 
     #[test]
     #[ignore = "needs intent.onnx, intent_vocab.txt and intent_frames.txt from an export"]

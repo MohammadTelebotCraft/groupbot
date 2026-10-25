@@ -1,0 +1,626 @@
+# What «قفل تصویر ‹موضوع›» means, decided before any model is asked. Read by `imgsubject`.
+#
+# route <TAB> argument <TAB> names, separated by |
+#
+#   visual     the general model knows it by these English words (lowercase: the text tower
+#              was trained on lowercased captions, and «Beach» ranks pictures at random where
+#              «beach» finds them)
+#   explicit   sexual content: the NSFW lock's job, which has its own measured models
+#   concept    one of the six concept locks, by its settings key
+#   person     somebody's face: the face lock, from a reference photo
+#   game, app  things the general model cannot tell apart by sight; refused with a reason
+#
+# Names are matched after `commands::normalize`, so Arabic and Persian letter forms, digits,
+# ZWNJ and case all fold. A name may appear once in the whole file.
+
+explicit	-	کص|کس|کوس|کسکش|کیر|کون|کون لخت|جنده|فاحشه|روسپی|سکس|سکسی|سکس فیلم|فیلم سکسی|پورن|پورنو|پورنوگرافی|لخت|لختی|برهنه|برهنگی|عریان|عریانی|نیمه برهنه|ممه|ممه ها|سینه|سینه ها|پستان|آلت|آلت تناسلی|تناسلی|شهوت|شهوانی|شهوتی|محتوای جنسی|جنسی|سوپر|فیلم سوپر|عکس سوپر|هنتای|اروتیک|سکسی چت|xxx|porn|porno|pornography|sex|sexy|nude|nudes|naked|nudity|nsfw|pussy|vagina|dick|penis|cock|boobs|tits|breasts|hentai|erotic|onlyfans|adult content
+concept	c_cig	سیگار|سیگارت|سیگار برگ|دخانیات|قلیان|قلیون|ویپ|تنباکو|توتون|پیپ|سیگار کشیدن|cigarette|cigarettes|cigar|smoking|hookah|shisha|vape|vaping|tobacco
+concept	c_alc	مشروب|مشروبات|مشروبات الکلی|الکل|الکلی|آبجو|ابجو|شراب|ویسکی|ودکا|شامپاین|کوکتل|کنیاک|تکیلا|عرق سگی|alcohol|alcoholic drinks|liquor|beer|wine|whisky|whiskey|vodka|champagne|cocktail|tequila
+concept	c_gun	اسلحه|سلاح|سلاح گرم|اسلحه گرم|تفنگ|کلت|تپانچه|کلاشینکف|کلاش|مسلسل|تیربار|شاتگان|اسنایپر|چاقو|قمه|چاقو ضامن دار|کارد|ضامن دار|gun|guns|pistol|handgun|rifle|firearm|firearms|weapon|weapons|knife|knives|ak47|ak-47|kalashnikov
+concept	c_bet	قمار|شرط بندی|شرطبندی|سایت شرط بندی|بت|کازینو|پوکر|رولت|اسلات|بازی انفجار|ورق بازی پولی|gambling|casino|betting|bet|poker|roulette|slot machine|slots
+concept	c_drg	مواد|مواد مخدر|مخدر|ماری جوانا|ماریجوانا|علف|گراس|حشیش|هروئین|هرویین|کوکائین|کوکایین|تریاک|کراک|اکستازی|قرص اکس|ال اس دی|drugs|drug|marijuana|cannabis|weed|hashish|heroin|cocaine|meth|opium|ecstasy
+concept	c_bld	خون|خونریزی|خون آلود|خونی|blood|bloody|bleeding|gore
+
+person	ali khamenei	خامنه ای|علی خامنه ای|آیت الله خامنه ای|ایت الله خامنه ای|سید علی خامنه ای|رهبر|رهبری|رهبر ایران|خامنه|khamenei|ali khamenei|ayatollah khamenei
+person	ruhollah khomeini	خمینی|امام خمینی|روح الله خمینی|آیت الله خمینی|khomeini|ruhollah khomeini
+person	mojtaba khamenei	مجتبی خامنه ای|mojtaba khamenei
+person	ebrahim raisi	رئیسی|رییسی|ابراهیم رئیسی|raisi|ebrahim raisi
+person	hassan rouhani	حسن روحانی|rouhani|hassan rouhani
+person	mahmoud ahmadinejad	احمدی نژاد|احمدینژاد|محمود احمدی نژاد|ahmadinejad
+person	akbar hashemi rafsanjani	رفسنجانی|هاشمی رفسنجانی|rafsanjani
+person	mohammad khatami	خاتمی|محمد خاتمی|khatami
+person	qasem soleimani	سلیمانی|قاسم سلیمانی|حاج قاسم|soleimani|qasem soleimani
+person	masoud pezeshkian	پزشکیان|مسعود پزشکیان|pezeshkian
+person	mohammad bagher ghalibaf	قالیباف|محمدباقر قالیباف|ghalibaf
+person	mohammad javad zarif	ظریف|جواد ظریف|zarif
+person	ali larijani	لاریجانی|علی لاریجانی|larijani
+person	ahmad jannati	جنتی|احمد جنتی|jannati
+person	hassan nasrallah	نصرالله|حسن نصرالله|nasrallah
+person	reza pahlavi	رضا پهلوی|شاهزاده رضا پهلوی|پهلوی|reza pahlavi|pahlavi
+person	mohammad reza pahlavi	محمدرضا شاه|محمد رضا شاه|شاه|محمدرضا پهلوی|the shah
+person	farah pahlavi	فرح پهلوی|farah pahlavi
+person	donald trump	ترامپ|دونالد ترامپ|trump|donald trump
+person	joe biden	بایدن|جو بایدن|biden|joe biden
+person	vladimir putin	پوتین|ولادیمیر پوتین|putin|vladimir putin
+person	benjamin netanyahu	نتانیاهو|بنیامین نتانیاهو|netanyahu
+person	barack obama	اوباما|باراک اوباما|obama
+person	volodymyr zelensky	زلنسکی|zelensky
+person	recep tayyip erdogan	اردوغان|erdogan
+person	mohammed bin salman	بن سلمان|محمد بن سلمان|bin salman
+person	saddam hussein	صدام|صدام حسین|saddam
+person	adolf hitler	هیتلر|آدولف هیتلر|hitler
+person	osama bin laden	بن لادن|اسامه بن لادن|bin laden
+person	abu bakr al-baghdadi	ابوبکر بغدادی|بغدادی|baghdadi
+person	elon musk	ایلان ماسک|elon musk
+person	lionel messi	مسی|لیونل مسی|messi|lionel messi
+person	cristiano ronaldo	رونالدو|کریستیانو رونالدو|کریس رونالدو|ronaldo|cristiano ronaldo
+person	ali daei	علی دایی|ali daei
+person	ali karimi	علی کریمی|ali karimi
+person	mehdi taremi	طارمی|مهدی طارمی|taremi
+person	sardar azmoun	سردار آزمون|azmoun
+person	amir tataloo	تتلو|امیر تتلو|tataloo
+person	sasy mankan	ساسی|ساسی مانکن|sasy
+person	mohammad reza shajarian	شجریان|محمدرضا شجریان|shajarian
+person	ebi	ابی خواننده|ebi
+person	googoosh	گوگوش|googoosh
+person	dariush	داریوش|dariush
+person	mohsen chavoshi	چاوشی|محسن چاوشی|chavoshi
+person	mahsa amini	مهسا امینی|ژینا امینی|mahsa amini
+person	toomaj salehi	توماج|توماج صالحی|toomaj
+
+game	pubg	پابجی|پاپجی|پاب جی|پابجی موبایل|pubg|pubg mobile|battlegrounds
+game	call of duty	کالاف|کال آف دیوتی|کال اف دیوتی|کالاف دیوتی|کالاف موبایل|call of duty|cod|codm|warzone
+game	free fire	فری فایر|فریفایر|free fire|freefire
+game	clash of clans	کلش|کلش آف کلنز|کلش اف کلنز|کلش رویال|clash of clans|clash royale
+game	fortnite	فورتنایت|فورت نایت|fortnite
+game	minecraft	ماینکرافت|ماین کرافت|minecraft
+game	grand theft auto	جی تی ای|جی تی آ|gta|gta v|gta 5
+game	fifa	فیفا|fifa|ea fc
+game	pes	پس|پی اس|pes|efootball
+game	roblox	روبلاکس|roblox
+game	counter-strike	کانتر|کانتر استرایک|counter strike|counter-strike|csgo|cs go
+game	valorant	والورانت|valorant
+game	league of legends	لیگ آف لجندز|league of legends
+game	candy crush	کندی کراش|candy crush
+game	among us	امانگ اس|among us
+game	hamster kombat	همستر|همستر کامبت|hamster kombat
+game	tapswap	تپ سواپ|tapswap
+game	notcoin	نات کوین|notcoin
+app	instagram	اینستاگرام|اینستا|instagram
+app	telegram	تلگرام|telegram
+app	whatsapp	واتساپ|واتس اپ|whatsapp
+app	rubika	روبیکا|rubika
+app	eitaa	ایتا|eitaa
+app	bale	پیام رسان بله|bale messenger
+app	tiktok	تیک تاک|تیکتاک|tiktok
+app	youtube	یوتیوب|youtube
+app	twitter	توییتر|تویتر|twitter
+app	snapp	اسنپ|snapp
+app	digikala	دیجی کالا|دیجیکالا|digikala
+app	vpn	فیلترشکن|فیلتر شکن|وی پی ان|vpn
+app	persepolis fc	پرسپولیس|persepolis
+app	esteghlal fc	استقلال|esteghlal
+
+visual	a dog	سگ|سگ ها|سگها|توله سگ|توله|dog|dogs|puppy|puppies
+visual	a cat	گربه|گربه ها|بچه گربه|پیشی|cat|cats|kitten|kittens
+visual	a pig	خوک|خوک ها|گراز|pig|pigs|swine|boar
+visual	a snake	مار|مارها|snake|snakes
+visual	a spider	عنکبوت|spider|spiders
+visual	a scorpion	عقرب|scorpion
+visual	a cockroach	سوسک|سوسک ها|cockroach|cockroaches
+visual	a mouse or a rat	موش|موش ها|موش صحرایی|mouse|mice|rat|rats
+visual	a monkey	میمون|میمون ها|monkey|monkeys|ape
+visual	a horse	اسب|اسب ها|horse|horses
+visual	horse racing	اسب دوانی|horse racing
+visual	a donkey	الاغ|خر|donkey
+visual	a cow	گاو|گاو ها|cow|cows|cattle
+visual	a sheep	گوسفند|بره|sheep|lamb
+visual	a goat	بز|goat
+visual	a camel	شتر|camel
+visual	a chicken	مرغ|خروس|جوجه|chicken|rooster|chick
+visual	a bird	پرنده|پرنده ها|bird|birds
+visual	a parrot	طوطی|parrot
+visual	a pigeon	کبوتر|pigeon
+visual	an owl	جغد|owl
+visual	an eagle	عقاب|eagle
+visual	a crow	کلاغ|crow
+visual	a duck	اردک|duck
+visual	a fish	ماهی|fish
+visual	a shark	کوسه|shark
+visual	a lion	شیر جنگل|lion
+visual	a tiger	ببر|tiger
+visual	a bear	خرس|bear
+visual	a wolf	گرگ|wolf
+visual	a fox	روباه|fox
+visual	a rabbit	خرگوش|rabbit|bunny
+visual	a frog	قورباغه|frog
+visual	a lizard	مارمولک|سوسمار|lizard
+visual	a crocodile	تمساح|crocodile|alligator
+visual	a turtle	لاک پشت|turtle|tortoise
+visual	an elephant	فیل|elephant
+visual	a giraffe	زرافه|giraffe
+visual	a deer	آهو|گوزن|deer
+visual	a butterfly	پروانه|butterfly
+visual	a bee	زنبور|bee|wasp
+visual	an insect	حشره|حشرات|insect|insects|bug
+visual	a worm	کرم خاکی|worm
+visual	a dinosaur	دایناسور|dinosaur
+
+visual	a car	ماشین|ماشین ها|خودرو|اتومبیل|car|cars
+visual	a luxury sports car	خودرو لوکس|ماشین لوکس|ماشین اسپرت|سوپر اسپرت|luxury car|sports car|supercar
+visual	a motorcycle	موتور|موتورسیکلت|موتور سیکلت|motorcycle|motorbike
+visual	a bicycle	دوچرخه|bicycle|bike
+visual	a truck	کامیون|truck
+visual	a bus	اتوبوس|bus
+visual	a train	قطار|train
+visual	an airplane	هواپیما|airplane|plane|aircraft
+visual	a helicopter	هلیکوپتر|بالگرد|helicopter
+visual	a ship	کشتی|ship
+visual	a boat	قایق|boat
+visual	a tank (military vehicle)	تانک|tank
+visual	a missile	موشک|missile|rocket
+visual	a fighter jet	جنگنده|fighter jet
+visual	a drone	پهپاد|drone
+visual	a bomb	بمب|bomb
+visual	an explosion	انفجار|انفجار بمب|explosion|blast
+visual	a sword	شمشیر|sword
+visual	bullets	گلوله|فشنگ|bullet|bullets|ammunition
+visual	handcuffs	دستبند پلیس|handcuffs
+
+visual	money and banknotes	پول|اسکناس|دلار|تومان|ریال|یورو|money|cash|banknotes|dollars
+visual	coins	سکه|سکه ها|coin|coins
+visual	gold	طلا|شمش طلا|gold|gold bars
+visual	a credit card	کارت بانکی|کارت اعتباری|عابر بانک|credit card|bank card
+visual	jewelry	جواهرات|جواهر|زیورآلات|jewelry|jewellery
+visual	a ring	انگشتر|حلقه|ring
+visual	a necklace	گردنبند|necklace
+visual	a watch	ساعت مچی|watch|wristwatch
+visual	a clock	ساعت|ساعت دیواری|clock
+visual	a mobile phone	موبایل|گوشی|گوشی موبایل|تلفن همراه|phone|smartphone|mobile phone|iphone
+visual	a laptop	لپ تاپ|لپتاپ|laptop
+visual	a computer	کامپیوتر|رایانه|computer|pc
+visual	a television	تلویزیون|tv|television
+visual	a camera	دوربین|دوربین عکاسی|camera
+visual	headphones	هدفون|هدست|headphones|headset
+visual	a game console	کنسول بازی|پلی استیشن|ایکس باکس|playstation|xbox|game console
+visual	a book	کتاب|کتاب ها|book|books
+visual	a newspaper	روزنامه|newspaper
+visual	a map	نقشه|map
+visual	a flag	پرچم|flag|flags
+visual	the flag of israel	پرچم اسرائیل|پرچم اسراییل|israeli flag|flag of israel
+visual	the flag of the united states	پرچم آمریکا|پرچم امریکا|american flag|us flag
+visual	the flag of iran	پرچم ایران|iranian flag|flag of iran
+visual	the lion and sun flag of iran	شیر و خورشید|پرچم شیر و خورشید|lion and sun|lion and sun flag
+visual	a rainbow pride flag	پرچم رنگین کمان|پرچم همجنسگرایان|pride flag|rainbow flag|lgbt flag
+visual	a swastika	صلیب شکسته|سواستیکا|swastika|nazi symbol
+visual	the isis flag	پرچم داعش|داعش|isis|isis flag
+visual	a christian cross	صلیب|cross|crucifix
+visual	a qr code	کیو آر کد|کیوآر کد|بارکد|qr code|qrcode|barcode
+visual	a screenshot of a phone screen	اسکرین شات|اسکرینشات|عکس صفحه|screenshot|screenshots
+visual	a meme	میم|میم ها|meme|memes
+visual	a cartoon	کارتون|انیمیشن|cartoon|animation
+visual	anime	انیمه|انیمه ای|anime|manga
+visual	a drawing	نقاشی|طراحی|drawing|painting|sketch
+visual	a sticker	استیکر کارتونی|sticker art
+visual	an emoji	ایموجی|شکلک|emoji
+visual	a poster	پوستر|poster
+visual	an advertisement banner	بنر تبلیغاتی|بیلبورد|billboard|banner ad
+
+visual	flowers	گل|گل ها|گلها|دسته گل|flower|flowers|bouquet
+visual	a rose	گل رز|رز|rose|roses
+visual	a tree	درخت|درختان|tree|trees
+visual	a forest	جنگل|forest|woods
+visual	a mountain	کوه|کوه ها|mountain|mountains
+visual	the sea	دریا|اقیانوس|sea|ocean
+visual	a beach	ساحل|beach
+visual	a lake	دریاچه|lake
+visual	a river	رودخانه|رود|river
+visual	a waterfall	آبشار|waterfall
+visual	a desert	بیابان|کویر|صحرا|desert
+visual	snow	برف|snow
+visual	fog	مه|مه آلود|fog|mist
+visual	rain	باران|rain
+visual	the sky	آسمان|sky
+visual	clouds	ابر|ابرها|cloud|clouds
+visual	the moon	ماه|کره ماه|moon
+visual	the sun	خورشید|sun
+visual	a sunset	غروب|غروب خورشید|sunset
+visual	a rainbow	رنگین کمان|rainbow
+visual	stars at night	ستاره|ستاره ها|آسمان شب|stars|night sky
+visual	fire	آتش|شعله|حریق|fire|flames
+visual	smoke	دود|smoke
+visual	a fireworks display	آتش بازی|ترقه|fireworks|firecracker
+visual	a cave	غار|cave
+visual	a city	شهر|city|cityscape
+visual	a building	ساختمان|building
+visual	a skyscraper	آسمان خراش|برج|skyscraper|tower
+visual	a house	خانه|house|home
+visual	a mosque	مسجد|mosque
+visual	a church	کلیسا|church
+visual	a cemetery	قبرستان|گورستان|cemetery|graveyard
+visual	a grave	قبر|گور|grave|tombstone
+visual	a bridge	پل|bridge
+visual	a road	جاده|خیابان|road|street
+visual	a stadium	استادیوم|ورزشگاه|stadium
+visual	a hospital	بیمارستان|hospital
+visual	a prison	زندان|prison|jail
+visual	a classroom	کلاس درس|classroom
+visual	a swimming pool	استخر|swimming pool|pool
+
+visual	food	غذا|غذاها|food|meal
+visual	pizza	پیتزا|pizza
+visual	a hamburger	همبرگر|برگر|hamburger|burger
+visual	a sandwich	ساندویچ|sandwich
+visual	french fries	سیب زمینی سرخ کرده|سیب زمینی|french fries|fries
+visual	fast food	فست فود|fast food
+visual	kebab	کباب|کباب کوبیده|جوجه کباب|kebab
+visual	rice	برنج|پلو|rice
+visual	bread	نان|bread
+visual	a cake	کیک|cake
+visual	a birthday cake	کیک تولد|birthday cake
+visual	ice cream	بستنی|ice cream
+visual	chocolate	شکلات|chocolate
+visual	candy	آبنبات|شیرینی|پاستیل|candy|sweets
+visual	fruit	میوه|میوه ها|fruit|fruits
+visual	an apple	سیب|apple
+visual	a banana	موز|banana
+visual	a watermelon	هندوانه|watermelon
+visual	strawberries	توت فرنگی|strawberry|strawberries
+visual	tomatoes	گوجه|گوجه فرنگی|tomato|tomatoes
+visual	ketchup	سس گوجه|سس گوجه فرنگی|کچاپ|ketchup
+visual	spinach	اسفناج|spinach
+visual	vegetables	سبزیجات|سبزی|vegetables
+visual	meat	گوشت|meat
+visual	eggs	تخم مرغ|egg|eggs
+visual	tea	چای|چایی|tea
+visual	coffee	قهوه|coffee
+visual	a soft drink	نوشابه|کوکاکولا|پپسی|soda|soft drink|cola
+visual	juice	آبمیوه|آب میوه|juice
+visual	milk	شیر گاو|milk
+
+visual	a baby	نوزاد|نی نی|بچه کوچک|baby|infant
+visual	a child	کودک|بچه|بچه ها|کودکان|child|children|kid|kids
+visual	a woman	زن|خانم|زن ها|woman|women
+visual	a man	مرد|آقا|مردها|man|men
+visual	a girl	دختر|دختر بچه|girl
+visual	a boy	پسر|پسر بچه|boy
+visual	an old man	پیرمرد|old man
+visual	an old woman	پیرزن|old woman
+visual	a selfie	سلفی|selfie
+visual	a kiss	بوسه|ماچ|بوس|kiss|kissing
+visual	a couple hugging	بغل|در آغوش|آغوش|hug|hugging|couple
+visual	a wedding	عروسی|جشن عروسی|wedding
+visual	a bride	عروس|لباس عروس|bride|wedding dress
+visual	a party	پارتی|جشن|مهمانی|party
+visual	people dancing	رقص|رقصیدن|dance|dancing
+visual	a concert	کنسرت|concert
+visual	a crowd of people	جمعیت|crowd
+visual	a street protest	تظاهرات|اعتراض|اعتراضات|تجمع|protest|demonstration
+visual	soldiers	سرباز|سربازها|ارتش|نظامی|soldier|soldiers|army|military
+visual	police officers	پلیس|مامور|ماموران|police|police officer
+visual	a muslim cleric wearing a turban	آخوند|روحانی|ملا|معمم|cleric|mullah|turban
+visual	a woman wearing a hijab	حجاب|روسری|محجبه|hijab|headscarf
+visual	a woman wearing a black chador	چادر|چادری|چادر مشکی|chador
+visual	a woman in a bikini	بیکینی|مایو|لباس شنا|bikini|swimsuit|swimwear
+visual	lingerie and underwear	لباس زیر|شورت|سوتین|لانژری|underwear|lingerie|bra
+visual	a tattoo	تتو|خالکوبی|tattoo|tattoos
+visual	makeup and lipstick	آرایش|رژ لب|رژلب|میکاپ|makeup|lipstick
+visual	a beard	ریش|beard
+visual	a face	صورت|چهره|face|faces
+visual	feet	پا|پاها|feet|foot
+visual	hands	دست|دست ها|hand|hands
+visual	a middle finger gesture	انگشت وسط|middle finger
+visual	a dead body	جسد|جنازه|مرده|dead body|corpse
+visual	a skull	جمجمه|اسکلت|skull|skeleton
+visual	a car accident	تصادف|تصادف رانندگی|car accident|car crash
+visual	a wound	زخم|جراحت|wound|injury
+visual	a hanging execution	اعدام|طناب دار|execution|hanging
+visual	war	جنگ|war|battle
+visual	a syringe	سرنگ|آمپول|syringe|injection
+visual	pills and medicine	قرص|دارو|کپسول|pills|medicine
+visual	a doctor	دکتر|پزشک|doctor
+visual	a nurse	پرستار|nurse
+
+visual	football (soccer)	فوتبال|توپ فوتبال|football|soccer
+visual	basketball	بسکتبال|basketball
+visual	volleyball	والیبال|volleyball
+visual	wrestling	کشتی گیر|wrestling
+visual	boxing	بوکس|boxing
+visual	a gym and bodybuilding	بدنسازی|باشگاه|gym|bodybuilding
+visual	chess	شطرنج|chess
+visual	playing cards	ورق|ورق بازی|کارت بازی|پاسور|playing cards|cards
+visual	dice	تاس|dice
+visual	a ball	توپ|ball
+visual	a toy	اسباب بازی|عروسک|toy|toys|doll
+visual	a teddy bear	خرس عروسکی|teddy bear
+
+visual	a chair	صندلی|chair
+visual	a table	میز|table
+visual	a bed	تخت خواب|تخت|bed
+visual	a sofa	مبل|کاناپه|sofa|couch
+visual	a bathroom and toilet	توالت|دستشویی|حمام|toilet|bathroom
+visual	a kitchen	آشپزخانه|kitchen
+visual	a candle	شمع|candle|candles
+visual	a mirror	آینه|mirror
+visual	glasses	عینک|glasses|eyeglasses
+visual	sunglasses	عینک آفتابی|sunglasses
+visual	a hat	کلاه|hat|cap
+visual	shoes	کفش|کتانی|shoe|shoes|sneakers
+visual	clothes	لباس|پوشاک|clothes|clothing
+visual	a dress	پیراهن زنانه|dress
+visual	a suit and tie	کت و شلوار|کراوات|suit|tie
+visual	a bag	کیف|bag|handbag
+visual	a backpack	کوله پشتی|backpack
+visual	an umbrella	چتر|umbrella
+visual	a gift box	کادو|هدیه|gift|present
+visual	balloons	بادکنک|balloon|balloons
+visual	a bottle	بطری|شیشه نوشابه|bottle
+visual	a cup	لیوان|فنجان|cup|mug
+visual	a key	کلید|key
+visual	scissors	قیچی|scissors
+visual	a fork	چنگال|fork
+visual	a spoon	قاشق|spoon
+visual	a chainsaw	اره برقی|chainsaw
+visual	tools	ابزار|آچار|پیچ گوشتی|tools|wrench|screwdriver
+visual	a pen	خودکار|قلم|pen
+visual	a pencil	مداد|pencil
+visual	chalk	گچ|chalk
+visual	a lamp	چراغ|لامپ|lamp|light bulb
+visual	a guitar	گیتار|guitar
+visual	a piano	پیانو|piano
+visual	a microphone	میکروفون|microphone
+visual	musical instruments	ساز|آلات موسیقی|musical instrument
+visual	a statue	مجسمه|تندیس|statue|sculpture
+visual	a christmas tree	درخت کریسمس|christmas tree
+visual	a heart shape	قلب|heart
+visual	a face mask	ماسک|ماسک صورت|face mask|mask
+
+# Everyday words, by hand: what a group types most, ahead of the generated lexicon, whose
+# Wikidata names pick the wrong sense for some of them («یخچال» is a glacier there, «پیاز» a bulb).
+visual	a swan	قو|قوها
+visual	a whale	نهنگ|وال|نهنگ آبی
+visual	a zebra	گورخر
+visual	a rhinoceros	کرگدن
+visual	a panda	پاندا
+visual	a squirrel	سنجاب
+visual	a mosquito	پشه
+visual	a snail	حلزون
+visual	an octopus	هشت پا|اختاپوس
+visual	a guinea pig	خوکچه هندی
+visual	a seal	فک دریایی
+visual	a sea lion	شیر دریایی
+visual	a penguin	پنگوئن|پنگوین
+visual	a llama	لاما
+visual	a turkey (bird)	بوقلمون
+visual	a peacock	طاووس
+visual	a stork	لک لک
+visual	a flamingo	فلامینگو
+visual	a vulture	کرکس
+visual	a falcon	شاهین
+visual	a canary	قناری
+visual	a budgerigar	مرغ عشق
+visual	a grasshopper	ملخ
+visual	a centipede	هزارپا
+visual	a starfish	ستاره دریایی
+visual	a seahorse	اسب دریایی
+visual	seashells	صدف|صدف دریایی
+visual	coral reef	مرجان|صخره مرجانی
+visual	a taxi	تاکسی
+visual	a subway train	مترو|قطار شهری
+visual	a submarine	زیردریایی
+visual	a hand grenade	نارنجک
+visual	a jet aircraft	جت
+visual	a race car	ماشین مسابقه|ماشین مسابقه ای|خودرو مسابقه
+visual	a police car	ماشین پلیس|خودرو پلیس
+visual	a minibus	مینی بوس|مینیبوس
+visual	a porsche sports car	پورشه
+visual	a mercedes-benz car	بنز|مرسدس|مرسدس بنز
+visual	a bmw car	بی ام و|بی ام دبلیو
+visual	a peugeot car	پژو
+visual	a kia pride car	پراید
+visual	a tractor	تراکتور
+visual	a kick scooter	اسکوتر
+visual	a skateboard	اسکیت|اسکیت بورد|اسکیتبورد
+visual	a van	ون
+visual	a pickup truck	وانت
+visual	a bulldozer	بولدوزر
+visual	a construction crane	جرثقیل
+visual	a luxury sports car	ماشین گران قیمت|ماشین گرون|خودرو گران قیمت
+visual	a telephone	تلفن|تلفن ثابت
+visual	a tablet computer	تبلت|آیپد
+visual	a computer monitor	مانیتور
+visual	a computer mouse	ماوس|موس کامپیوتر
+visual	a printer	پرینتر|چاپگر
+visual	a power bank	پاوربانک|پاور بانک
+visual	a phone charger	شارژر|شارژر موبایل
+visual	an electric fan	پنکه
+visual	an air conditioner	کولر|کولر گازی|اسپلیت
+visual	a microwave oven	ماکروویو|مایکروویو
+visual	a washing machine	لباسشویی|ماشین لباسشویی
+visual	a vacuum cleaner	جاروبرقی|جارو برقی
+visual	a refrigerator	یخچال|یخچال فریزر
+visual	a teapot	قوری
+visual	a samovar	سماور
+visual	a tray	سینی
+visual	a smartwatch	ساعت هوشمند
+visual	a loudspeaker	بلندگو|اسپیکر
+visual	a remote control	ریموت|کنترل تلویزیون
+visual	a usb flash drive	فلش|فلش مموری
+visual	a wifi router	مودم|روتر
+visual	a sim card	سیم کارت|سیمکارت
+visual	potato chips	چیپس
+visual	an orange (fruit)	پرتقال
+visual	tangerines	نارنگی
+visual	a lemon	لیمو|لیمو ترش
+visual	sour cherries	آلبالو
+visual	a peach	هلو
+visual	a pomegranate	انار
+visual	a mango	انبه
+visual	an eggplant	بادمجان
+visual	a cabbage	کلم
+visual	yogurt	ماست
+visual	jam	مربا
+visual	soup	سوپ
+visual	a bowl of thick soup	آش|آش رشته
+visual	a salad	سالاد
+visual	pasta	ماکارونی|پاستا|اسپاگتی
+visual	sausages	سوسیس
+visual	an onion	پیاز
+visual	mushrooms	قارچ
+visual	dates (fruit)	خرما
+visual	raisins	کشمش
+visual	walnuts	گردو
+visual	almonds	بادام
+visual	pistachios	پسته
+visual	hazelnuts	فندق
+visual	sunflower seeds	تخمه
+visual	saffron	زعفران
+visual	salt	نمک
+visual	sugar	شکر
+visual	a donut	دونات
+visual	a croissant	کروسان|کروسانت
+visual	pancakes	پنکیک
+visual	a waffle	وافل
+visual	sushi	سوشی
+visual	a steak	استیک
+visual	fried chicken	مرغ سوخاری|سوخاری
+visual	falafel	فلافل
+visual	shawarma	شاورما
+visual	meatballs	کوفته
+visual	an energy drink	انرژی زا|نوشابه انرژی زا
+visual	a bottle of mineral water	آب معدنی|بطری آب
+visual	milk	شیر نوشیدنی|شیر خوراکی
+visual	a lion	شیر|شیر حیوان
+visual	a teacher	معلم
+visual	teeth	دندان|دندان ها|دندون
+visual	a mustache	سبیل
+visual	fingernails	ناخن|ناخن ها
+visual	muscles	عضله|عضلات|بدن عضلانی
+visual	a couple	زوج
+visual	a patient in a hospital bed	بیمار|مریض
+visual	an injured person	زخمی|مجروح
+visual	a hairstyle	مدل مو
+visual	trousers	شلوار
+visual	a skirt	دامن
+visual	a winter jacket	کاپشن
+visual	an overcoat	پالتو
+visual	a scarf	شال|شال گردن
+visual	a long coat	مانتو
+visual	slippers	دمپایی
+visual	socks	جوراب
+visual	a suitcase	چمدان
+visual	a perfume bottle	عطر|ادکلن
+visual	pajamas	لباس خواب
+visual	a wallet	کیف پول
+visual	nail polish	لاک ناخن|لاک
+visual	a belt	کمربند
+visual	a t-shirt	تی شرت|تیشرت
+visual	a hoodie	هودی|سویشرت
+visual	a volcano	آتشفشان|کوه آتشفشان
+visual	a storm	طوفان
+visual	a tornado	گردباد
+visual	lightning	رعد و برق|صاعقه
+visual	a village	روستا
+visual	a villa	ویلا
+visual	a synagogue	کنیسه
+visual	a temple	معبد
+visual	a school	مدرسه
+visual	a university campus	دانشگاه
+visual	a park	پارک
+visual	a shop	مغازه|فروشگاه
+visual	a restaurant	رستوران
+visual	a cafe	کافه|کافی شاپ
+visual	a zoo	باغ وحش
+visual	a train station	ایستگاه قطار|راه آهن
+visual	a vase	گلدان
+visual	a sunrise	طلوع|طلوع خورشید
+visual	a movie theater	سینما
+visual	a hotel	هتل
+visual	a library	کتابخانه|کتابخونه
+visual	a bakery	نانوایی
+visual	a gas station	پمپ بنزین
+visual	stairs	پله|پله ها
+visual	a bedroom	اتاق خواب
+visual	a living room	پذیرایی|اتاق نشیمن
+visual	an island	جزیره
+visual	a farm	مزرعه
+visual	tennis	تنیس
+visual	table tennis	پینگ پنگ|تنیس روی میز
+visual	swimming	شنا
+visual	taekwondo	تکواندو
+visual	skiing	اسکی
+visual	mountain climbing	کوهنوردی|صخره نوردی
+visual	horse riding	اسب سواری
+visual	gymnastics	ژیمناستیک
+visual	yoga	یوگا
+visual	billiards	بیلیارد|اسنوکر
+visual	bowling	بولینگ
+visual	golf	گلف
+visual	baseball	بیسبال
+visual	professional wrestling	کشتی کج
+visual	a bank card	کارت عابر بانک
+visual	bitcoin	بیت کوین|بیتکوین
+visual	cryptocurrency coins	ارز دیجیتال|رمزارز
+visual	a notebook	دفتر|دفترچه
+visual	paper	کاغذ
+visual	a magazine	مجله
+visual	a framed painting	تابلو|تابلو نقاشی
+visual	a national id card	کارت ملی
+visual	a passport	پاسپورت|گذرنامه
+visual	a receipt	رسید|فاکتور
+visual	a violin	ویولن|ویولون
+visual	a long-necked lute	تار|سه تار|سه تار ایرانی
+visual	a goblet drum	تنبک|تمبک
+visual	a sticker	استیکر
+visual	a screenshot of a phone screen	اسکرین
+visual	text on a picture	متن|نوشته|عکس نوشته
+visual	a logo	لوگو|آرم
+visual	the star of david	ستاره داوود|ستاره داود
+visual	a hammer and sickle	داس و چکش
+visual	birthday candles	شمع تولد
+visual	a birthday party	جشن تولد|تولد
+visual	a padlock	قفل
+visual	a hammer	چکش
+visual	a power drill	دریل
+visual	a ladder	نردبان
+visual	a rope	طناب
+visual	a chain	زنجیر
+visual	a bucket	سطل
+visual	a broom	جارو
+visual	a toothbrush	مسواک
+visual	soap	صابون
+visual	a towel	حوله
+visual	a hair dryer	سشوار
+visual	a lighter	فندک
+visual	an ashtray	زیرسیگاری
+visual	a quran	قرآن|قران
+visual	prayer beads	تسبیح
+visual	a prayer rug	سجاده|جانماز
+visual	a bible	انجیل
+visual	a calculator	ماشین حساب
+visual	a ruler	خط کش
+visual	a rug	قالیچه|گلیم
+visual	a blanket	پتو
+visual	a pillow	بالش|متکا
+visual	a baby stroller	کالسکه|کالسکه بچه
+visual	a baby bottle	شیشه شیر
+visual	a diaper	پوشک
+visual	a wheelchair	ویلچر|صندلی چرخدار
+visual	a security camera	دوربین مداربسته
+visual	a satellite	ماهواره
+visual	a planet	سیاره
+visual	a galaxy	کهکشان
+visual	an astronaut	فضانورد
+visual	leaves	برگ|برگ ها
+visual	a cactus	کاکتوس
+visual	a palm tree	نخل|درخت نخل
+visual	a pine tree	کاج|درخت کاج
+visual	a tulip	لاله
+visual	a sunflower	آفتابگردان|گل آفتابگردان
+visual	an orchid	ارکیده
+visual	a funeral	تشییع جنازه|مراسم ختم|ختم
+visual	people praying	نماز|نماز جماعت
+visual	the kaaba in mecca	کعبه|مکه
+visual	a building on fire	آتش سوزی
+visual	a video game screenshot	بازی کامپیوتری|بازی ویدیویی|بازی ویدئویی|گیم|بازی های کامپیوتری
+visual	a cypress tree	سرو|درخت سرو

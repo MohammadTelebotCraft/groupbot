@@ -22,9 +22,32 @@ const RETRY_RECOVERY_SHARE: i64 = 1;
 pub const LIMIT_RANGE: (u32, u32) = (1, 100);
 pub const LIMIT_PRESETS: &[u32] = &[2, 3, 5, 7, 10];
 
-pub const WARN: &[&str] = &["اخطار", "وارن"];
-pub const UNWARN: &[&str] = &["حذف اخطار", "پاک اخطار", "رفع اخطار"];
-pub const SHOW: &[&str] = &["اخطارها", "لیست اخطار"];
+pub const WARN: &[&str] = &["اخطار", "وارن", "هشدار", "ثبت اخطار", "اخطار بده", "/warn"];
+pub const UNWARN: &[&str] = &[
+    "حذف اخطار",
+    "پاک اخطار",
+    "رفع اخطار",
+    "حذف هشدار",
+    "حذف وارن",
+    "رفع هشدار",
+    "رفع وارن",
+    "پاک کردن اخطار",
+    "/unwarn",
+    "/delwarn",
+];
+pub const SHOW: &[&str] = &[
+    "اخطارها",
+    "اخطار ها",
+    "لیست اخطار",
+    "لیست اخطارها",
+    "لیست اخطار ها",
+    "هشدارها",
+    "هشدار ها",
+    "وارن ها",
+    "/warns",
+    "/warnings",
+    "/warnlist",
+];
 
 pub fn limit(ctx: &Ctx, chat: i64) -> u32 {
     ctx.settings
@@ -52,28 +75,27 @@ pub async fn count(ctx: &Ctx, chat: i64, user: i64) -> Result<u32, sqlx::Error> 
     ctx.settings.warns_of(chat, user).await
 }
 
-pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
-    let text = view.digits();
-    let Some(chat) = message.peer_id().bot_api_dialog_id() else {
-        return false;
-    };
-
-    let matched = WARN
-        .iter()
+fn parse(text: &str) -> Option<(Option<bool>, &str)> {
+    WARN.iter()
         .map(|c| (c, Some(true)))
         .chain(UNWARN.iter().map(|c| (c, Some(false))))
         .chain(SHOW.iter().map(|c| (c, None)))
-        .find_map(|(command, adding)| {
-            let rest = text.strip_prefix(command)?;
-            (rest.is_empty() || rest.starts_with(char::is_whitespace))
-                .then(|| (adding, rest.trim().to_owned()))
-        });
-    let Some((adding, arg)) = matched else {
+        .filter_map(|(command, adding)| {
+            super::commands::strip_prefix(text, command).map(|rest| (adding, rest))
+        })
+        .min_by_key(|(_, rest)| rest.len())
+}
+
+pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {
+    let Some(chat) = message.peer_id().bot_api_dialog_id() else {
+        return false;
+    };
+    let Some((adding, arg)) = parse(view.digits()) else {
         return false;
     };
 
     let arg = (!arg.is_empty()).then_some(arg);
-    let Some(named) = super::named(message, arg.as_deref()) else {
+    let Some(named) = super::named(message, arg) else {
         return false;
     };
     if !super::limits::allows(ctx, message, super::limits::WARN).await {
@@ -761,6 +783,18 @@ fn unix_now() -> i64 {
 mod tests {
     use super::*;
     use grammers_client::{InvocationError, sender::RpcError};
+
+    #[test]
+    fn warning_commands_choose_the_longest_alias_and_preserve_targets() {
+        assert_eq!(parse("اخطار\u{200c}ها @Ali"), Some((None, "@Ali")));
+        assert_eq!(parse("ليست  اخطار ها ۱۲۳"), Some((None, "۱۲۳")));
+        assert_eq!(parse("رفع  هشدار @Ali"), Some((Some(false), "@Ali")));
+        assert_eq!(parse("/WARN @Ali"), Some((Some(true), "@Ali")));
+        assert_eq!(parse("وارن ها @Ali"), Some((None, "@Ali")));
+        assert_eq!(parse("اخطار بده @Ali"), Some((Some(true), "@Ali")));
+        assert_eq!(parse("رفع وارن @Ali"), Some((Some(false), "@Ali")));
+        assert_eq!(parse("/warning @Ali"), None);
+    }
 
     fn rpc(code: i32, name: &str) -> restrict::Failed {
         restrict::Failed::Telegram(InvocationError::Rpc(RpcError {

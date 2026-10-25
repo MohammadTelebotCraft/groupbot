@@ -5,13 +5,62 @@ use super::{Ctx, can_manage, esc, is_owner, name_of, owner, sender_is_creator};
 
 pub const OWNER: &str = "owner";
 
-pub const CONFIG: &[&str] = &["کانفیگ", "پیکربندی"];
-pub const ADMIN_LIST: &[&str] = &["لیست ادمین", "لیست ادمین ها", "ادمین ها"];
-pub const PROMOTE: &[&str] = &["ترفیع"];
-pub const DEMOTE: &[&str] = &["تنزل"];
-pub const HELP: &[&str] = &["راهنما", "دستورها", "دستورات"];
+pub const CONFIG: &[&str] = &[
+    "کانفیگ",
+    "پیکربندی",
+    "راه اندازی",
+    "/config",
+    "/setup",
+    "/configure",
+];
+pub const ADMIN_LIST: &[&str] = &[
+    "لیست ادمین",
+    "لیست ادمین ها",
+    "ادمین ها",
+    "فهرست ادمین ها",
+    "لیست مدیران",
+    "/admins",
+    "مدیران گروه",
+    "/adminlist",
+];
+pub const ADMIN_CLEAR: &[&str] = &[
+    "پاکسازی لیست ادمین",
+    "پاکسازی لیست ادمین ها",
+    "پاکسازی لیست مدیران",
+    "خالی کردن لیست ادمین ها",
+    "پاکسازی ادمین های ربات",
+    "/clearbotadmins",
+    "پاک کردن ادمین های ربات",
+];
+pub const PROMOTE: &[&str] = &[
+    "افزودن ادمین ربات",
+    "ترفیع ربات",
+    "ترفیع",
+    "/botpromote",
+    "/addbotadmin",
+];
+pub const DEMOTE: &[&str] = &[
+    "حذف ادمین ربات",
+    "عزل ادمین ربات",
+    "تنزل ربات",
+    "تنزل",
+    "/botdemote",
+    "/delbotadmin",
+];
+pub const HELP: &[&str] = &[
+    "راهنما",
+    "راهنمای ربات",
+    "دستورها",
+    "دستورات",
+    "لیست دستورات",
+    "help",
+    "/help",
+    "/commands",
+    "راهنمای دستورات",
+    "/guide",
+];
 
-const START: &[&str] = &["/start", "شروع"];
+const START: &[&str] = &["/start", "شروع", "استارت"];
 
 const LINKS: &[(&str, &str, Option<super::premium::Icon>)] = &[
     ("CHANNEL", "کانال", Some(super::premium::Icon::TelegramSend)),
@@ -81,13 +130,7 @@ fn normalize_link(value: &str) -> Option<String> {
 
 pub async fn start(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
-    let started = START.iter().any(|command| {
-        text == *command
-            || text
-                .strip_prefix(command)
-                .is_some_and(|rest| rest.starts_with(char::is_whitespace))
-    });
-    if !started {
+    if !is_start(text) {
         return false;
     }
     if let Some(user) = message.sender_id().and_then(PeerId::bare_id) {
@@ -154,8 +197,15 @@ pub async fn start(ctx: &Ctx, message: &Message) -> bool {
     true
 }
 
+fn is_start(text: &str) -> bool {
+    super::commands::strip_prefix(text, "/start").is_some()
+        || START[1..]
+            .iter()
+            .any(|command| super::commands::matches(text, command))
+}
+
 pub async fn help(ctx: &Ctx, message: &Message) -> bool {
-    if !HELP.contains(&message.text().trim()) {
+    if !super::commands::contains(HELP, message.text()) {
         return false;
     }
     let Some(user) = message.sender_id().and_then(PeerId::bare_id) else {
@@ -183,7 +233,7 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
         return false;
     };
 
-    if ADMIN_LIST.contains(&text) {
+    if super::commands::contains(ADMIN_LIST, text) {
         let (creator, admins) = match message.peer_ref().await {
             Ok(Some(chat_ref)) => super::admins(ctx, chat_ref).await,
             _ => (None, Vec::new()),
@@ -229,7 +279,56 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
         return true;
     }
 
-    if CONFIG.contains(&text) {
+    if super::commands::contains(ADMIN_CLEAR, text) {
+        if !is_owner(ctx, message) {
+            if owner(ctx, chat).is_none() && can_manage(ctx, message).await {
+                super::respond(
+                    ctx,
+                    message,
+                    crate::response::ResponseKind::PermissionDenied,
+                    "ابتدا سازنده گروه باید دستور «کانفیگ» را بفرستد.",
+                )
+                .await;
+            }
+            return true;
+        }
+        let keys: Vec<String> = ctx
+            .settings
+            .flags_with_prefix(chat, "admin:")
+            .into_iter()
+            .filter_map(|id| id.parse::<i64>().ok())
+            .map(super::bot_admin_key)
+            .collect();
+        let mutations: Vec<_> = keys
+            .iter()
+            .map(|key| crate::state::SettingMutation::Delete { key })
+            .collect();
+        let body = match ctx.settings.try_apply_batch(chat, &mutations).await {
+            Ok(_) => format!(
+                "✓ {} ادمین ربات حذف شد. ادمین های تلگرام دست نخورده اند.",
+                keys.len()
+            ),
+            Err(error) => {
+                ::log::warn!("bot admin: clear for {chat} failed: {error}");
+                if error.commit_outcome_unknown() {
+                    "نتیجه پاکسازی ادمین های ربات نامشخص است؛ «لیست ادمین» را بررسی کنید."
+                        .to_owned()
+                } else {
+                    "ادمین های ربات حذف نشدند؛ دوباره تلاش کنید.".to_owned()
+                }
+            }
+        };
+        super::respond(
+            ctx,
+            message,
+            crate::response::ResponseKind::SettingsChanged,
+            super::premium::icon_text(Some(super::premium::Icon::Delete), body),
+        )
+        .await;
+        return true;
+    }
+
+    if super::commands::contains(CONFIG, text) {
         if !sender_is_creator(ctx, message).await {
             if super::can_manage(ctx, message).await {
                 super::respond(
@@ -311,14 +410,9 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
         return true;
     }
 
-    let mut words = text.split_whitespace();
-    let (Some(cmd), arg) = (words.next(), words.next()) else {
+    let Some((promote, arg)) = admin_command(text) else {
         return false;
     };
-    let promote = PROMOTE.contains(&cmd);
-    if (!promote && !DEMOTE.contains(&cmd)) || words.next().is_some() {
-        return false;
-    }
 
     let Some(named) = super::named(message, arg) else {
         return false;
@@ -395,8 +489,61 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
     true
 }
 
+fn admin_command(text: &str) -> Option<(bool, Option<&str>)> {
+    [(PROMOTE, true), (DEMOTE, false)]
+        .into_iter()
+        .find_map(|(commands, promote)| {
+            commands.iter().find_map(|command| {
+                let tail = super::commands::strip_prefix(text, command)?;
+                if tail.is_empty() {
+                    Some((promote, None))
+                } else if tail.split_whitespace().count() == 1 && super::arg_names_a_user(tail) {
+                    Some((promote, Some(tail)))
+                } else {
+                    None
+                }
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn persian_start_aliases_do_not_claim_conversation() {
+        assert!(is_start("شروع"));
+        assert!(is_start("استارت"));
+        assert!(is_start("/START campaign"));
+        assert!(!is_start("شروع کار"));
+        assert!(!is_start("استارت پروژه"));
+        assert!(!is_start("/start@otherbot campaign"));
+    }
+
+    #[test]
+    fn admin_aliases_preserve_targets_and_require_a_complete_command() {
+        for text in [
+            "افزودن ادمین ربات @Some_User",
+            "افزودن\tادمين\u{200c}ربات @Some_User",
+            "/BoTPromote @Some_User",
+        ] {
+            assert_eq!(
+                admin_command(text),
+                Some((true, Some("@Some_User"))),
+                "{text}"
+            );
+        }
+        assert_eq!(admin_command("عزل ادمین ربات"), Some((false, None)));
+        assert_eq!(admin_command("/botdemote ۱۲۳"), Some((false, Some("۱۲۳"))));
+        for text in [
+            "ترفیعش بده",
+            "ترفیع خوب است",
+            "/botpromote@otherbot @someone",
+            "ترفیع @someone extra",
+        ] {
+            assert_eq!(admin_command(text), None, "{text}");
+        }
+        assert!(super::super::commands::contains(HELP, "/HELP"));
+        assert!(!super::super::commands::contains(HELP, "/help@otherbot"));
+    }
     use super::*;
 
     #[test]

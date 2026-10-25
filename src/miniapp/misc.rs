@@ -1,4 +1,3 @@
-
 use std::sync::Arc;
 
 use axum::Json;
@@ -29,7 +28,7 @@ fn uncertain_write(chat: i64, operation: &str, error: &dyn std::fmt::Display) ->
         StatusCode::ACCEPTED,
         Json(json!({
             "accepted": "unknown",
-            "error": "وضعیت ذخیره‌سازی مشخص نیست؛ پیش از تکرار دوباره بررسی کنید."
+            "error": "وضعیت ذخیره سازی مشخص نیست؛ پیش از تکرار دوباره بررسی کنید."
         })),
     )
         .into_response()
@@ -41,7 +40,6 @@ fn settings_write_error(chat: i64, operation: &str, error: &SettingsWriteError) 
         _ => write_error(chat, operation, error),
     }
 }
-
 
 pub async fn rights_list(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> Response {
     let snapshot = match rights::snapshot(&ctx, gate.chat).await {
@@ -112,7 +110,6 @@ pub async fn rights_toggle(
     rights_list(State(ctx), gate).await.into_response()
 }
 
-
 pub async fn log_list(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> impl IntoResponse {
     let kinds: Vec<_> = log::KINDS
         .iter()
@@ -123,7 +120,7 @@ pub async fn log_list(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> impl Into
     let channel = ctx
         .settings
         .value(gate.chat, log::CHANNEL)
-        .map(|value| handlers::esc(&value));
+        .map(|value| handlers::esc(value.split('|').next().unwrap_or_default()));
     Json(json!({
         "channel": channel,
         "on": ctx.settings.is_locked(gate.chat, log::ON),
@@ -163,7 +160,6 @@ pub async fn log_off(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> Response {
     log_list(State(ctx), gate).await.into_response()
 }
 
-
 pub async fn join_gate_get(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> impl IntoResponse {
     let channel = ctx
         .settings
@@ -187,7 +183,6 @@ pub async fn join_gate_set(
     }
     join_gate_get(State(ctx), gate).await.into_response()
 }
-
 
 pub async fn welcome_get(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> impl IntoResponse {
     let text = ctx
@@ -238,7 +233,6 @@ pub async fn welcome_off(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> Respon
     welcome_get(State(ctx), gate).await.into_response()
 }
 
-
 pub async fn night_off(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> Response {
     match extras::set_night(&ctx, gate.chat, None).await {
         Ok(rights::DeliveryOutcome::Applied) => {}
@@ -284,7 +278,6 @@ pub async fn purge_off(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> Response
     }
     dashboard(State(ctx), gate.into()).await.into_response()
 }
-
 
 pub async fn admins_list(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> Response {
     let Some(chat_ref) = ctx.chat_ref(gate.chat) else {

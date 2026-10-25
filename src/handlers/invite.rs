@@ -1,4 +1,3 @@
-
 use grammers_client::message::Message;
 use grammers_client::session::types::PeerRef;
 use grammers_client::tl;
@@ -6,9 +5,27 @@ use grammers_client::tl;
 use super::{Ctx, esc};
 use crate::response::ResponseKind;
 
-pub const COMMANDS: &[&str] = &["لینک", "لینک گروه"];
+pub const COMMANDS: &[&str] = &[
+    "لینک",
+    "لینک گروه",
+    "لینک دعوت",
+    "دریافت لینک",
+    "/link",
+    "/invitelink",
+    "/getlink",
+];
 
-pub const RENEW: &[&str] = &["لینک جدید", "باطل کردن لینک", "ابطال لینک"];
+pub const RENEW: &[&str] = &[
+    "لینک جدید",
+    "باطل کردن لینک",
+    "ابطال لینک",
+    "تغییر لینک",
+    "لینک تازه",
+    "تعویض لینک",
+    "/newlink",
+    "/revokelink",
+    "/resetlink",
+];
 
 async fn primary(ctx: &Ctx, chat_ref: PeerRef) -> Option<String> {
     let full = ctx
@@ -92,8 +109,12 @@ fn card(link: &str, fresh: bool) -> String {
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
-    let show = COMMANDS.contains(&text);
-    let renew = RENEW.contains(&text);
+    let show = COMMANDS
+        .iter()
+        .any(|command| super::commands::matches(text, command));
+    let renew = RENEW
+        .iter()
+        .any(|command| super::commands::matches(text, command));
     if !show && !renew {
         return false;
     }
@@ -171,6 +192,37 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalized_link_aliases_keep_show_and_renew_separate() {
+        let show = |text| {
+            COMMANDS
+                .iter()
+                .any(|command| super::super::commands::matches(text, command))
+        };
+        let renew = |text| {
+            RENEW
+                .iter()
+                .any(|command| super::super::commands::matches(text, command))
+        };
+        for text in ["لينك\u{200c}دعوت", "دريافت\t لينك", "/InviteLink"] {
+            assert!(show(text));
+            assert!(!renew(text));
+        }
+        for text in ["تغيير\u{200c}لينك", "لینک تازه", "/NewLink", "/RevokeLink"] {
+            assert!(renew(text));
+            assert!(!show(text));
+        }
+        for text in [
+            "لینک گروه کجاست",
+            "لینک جدید چیه",
+            "/link extra",
+            "/newlinks",
+        ] {
+            assert!(!show(text));
+            assert!(!renew(text));
+        }
+    }
 
     #[test]
     fn the_two_command_sets_do_not_overlap() {

@@ -8,7 +8,9 @@ pub mod captcha;
 pub mod cases;
 pub mod cleaner;
 pub mod cleaner_setup;
+pub mod commands;
 pub mod comment;
+pub mod concept_head_vectors;
 pub mod concept_vectors;
 pub mod concepts;
 pub mod config;
@@ -16,10 +18,12 @@ pub mod currency;
 pub mod emoji_image;
 pub mod ephemeral;
 pub mod extras;
+pub mod facelock;
 pub mod filters;
 pub mod flood;
 pub mod help;
 pub mod imgfilter;
+pub mod imgsubject;
 pub mod imgtext;
 pub mod install;
 pub mod intent;
@@ -34,9 +38,11 @@ pub mod notice;
 pub mod nsfw;
 pub mod nsfw_head;
 pub mod nsfw_head_vectors;
+pub mod nsfw_stack_weights;
 pub mod ocr;
 pub mod packs;
 pub mod panel;
+mod panel_commands;
 pub mod ping;
 pub mod pinlock;
 pub mod premium;
@@ -45,6 +51,7 @@ pub mod purge;
 pub mod raid;
 pub mod report;
 pub mod restrict;
+pub mod rich;
 pub mod rights;
 pub mod setting;
 pub mod stats;
@@ -56,6 +63,7 @@ pub mod toggles;
 pub mod trade;
 pub mod tune;
 pub mod vip;
+pub mod verify;
 pub mod vision;
 pub mod voicemonitor;
 pub mod warns;
@@ -396,11 +404,90 @@ impl Dirty {
 }
 
 type LoadedFilters = RwLock<HashMap<i64, (Instant, Arc<Vec<imgfilter::Filter>>)>>;
+
+fn filter_from_row(row: crate::state::ImageFilterRow) -> Option<imgfilter::Filter> {
+    if let Some(bytes) = row.faces.as_deref() {
+        let references = facelock::decode(bytes)?;
+        let person = match imgsubject::resolve(&row.name) {
+            Some(imgsubject::Route::Person(english)) => facelock::person(english),
+            _ => None,
+        };
+        if references.is_empty() && person.is_none() {
+            return None;
+        }
+        let print = facelock::fingerprint(bytes)
+            ^ person.map_or(0, |person| imgfilter::fingerprint(person.name.as_bytes(), 1.0));
+        return Some(imgfilter::Filter {
+            cut: facelock::CUT,
+            print,
+            vector: Vec::new(),
+            name: row.name,
+            live: row.live,
+            faces: Some(references),
+            person,
+            gate: None,
+            subject: None,
+        });
+    }
+    let print = imgfilter::fingerprint(&row.vector, row.scale);
+    let (vector, cut) = if row.samples == 0 {
+        (imgfilter::dequantize(&row.vector, row.scale), row.cut)
+    } else if let Some(learned) = row
+        .examples
+        .as_deref()
+        .and_then(imgfilter::learned_examples)
+    {
+        learned
+    } else {
+        let vector = vision::unit(&imgfilter::dequantize(&row.vector, row.scale));
+        let cut = imgfilter::cut_for(print, &vector, row.samples);
+        (vector, cut)
+    };
+    let subject = match (row.samples, imgsubject::resolve(&row.name)) {
+        (0, Some(imgsubject::Route::Visual(english))) => Some(english),
+        _ => None,
+    };
+    Some(imgfilter::Filter {
+        cut,
+        print,
+        vector,
+        name: row.name,
+        live: row.live,
+        faces: None,
+        person: None,
+        gate: subject.and_then(imgfilter::Gate::for_english),
+        subject,
+    })
+}
 type VoiceVerdict = (Instant, bool, Option<Arc<str>>);
 type FilteredVoice = (Instant, i64, Option<i64>, String);
-type CachedVerdict = (Instant, nsfw::Judgement, bool);
-type CachedMargins = (Instant, [f32; CONCEPT_SLOTS], bool);
-type CachedCustom = (Instant, f32, bool);
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum VisionSource {
+    Animated,
+    Original,
+    Rung {
+        photo_type: String,
+        width: i32,
+        height: i32,
+        declared_bytes: usize,
+        variant: u8,
+        payload_hash: u64,
+    },
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum VisionRoute {
+    Animated,
+    Original,
+    Rungs {
+        start: VisionSource,
+        sharper: Option<VisionSource>,
+    },
+}
+
+type CachedVerdict = (Instant, nsfw::Judgement, VisionSource);
+type CachedMargins = (Instant, [f32; CONCEPT_SLOTS]);
+type CachedCustom = (Instant, f32);
 
 #[derive(Clone, Copy)]
 pub struct CapacitySnapshot {
@@ -555,6 +642,8 @@ pub struct Ctx {
 
     pending_admins: RwLock<HashMap<u64, promote::Pending>>,
 
+    pending_webpages: std::sync::Mutex<nsfw::PendingWebPages>,
+
     user: RwLock<Option<Client>>,
 
     cleaner_id: AtomicI64,
@@ -563,6 +652,8 @@ pub struct Ctx {
     runtime_config: RuntimeConfig,
 
     user_chats: RwLock<HashMap<i64, PeerRef>>,
+    user_chats_absent: Mutex<HashMap<i64, Instant>>,
+    user_chats_walk: tokio::sync::Mutex<()>,
 
     pending_password: PasswordMailbox,
 
@@ -599,7 +690,9 @@ pub struct Ctx {
 
     tag_runs: OnceLock<Arc<tokio::sync::Semaphore>>,
 
-    verdicts: RwLock<HashMap<i64, CachedVerdict>>,
+    verdicts: RwLock<HashMap<(i64, VisionRoute), CachedVerdict>>,
+
+    raster_kinds: RwLock<HashMap<i64, (Instant, bool)>>,
 
     voice_verdicts: RwLock<HashMap<(i64, u64), VoiceVerdict>>,
 
@@ -613,11 +706,19 @@ pub struct Ctx {
 
     nsfw_tasks: OnceLock<Arc<tokio::sync::Semaphore>>,
 
+    media_buffers: OnceLock<Arc<tokio::sync::Semaphore>>,
+
+    media_decode_slots: OnceLock<Arc<tokio::sync::Semaphore>>,
+
     nsfw_fetches: OnceLock<tokio::sync::Semaphore>,
 
-    margins: RwLock<HashMap<i64, CachedMargins>>,
+    margins: RwLock<HashMap<(i64, VisionSource), CachedMargins>>,
 
-    adverts: RwLock<HashMap<i64, (Instant, Option<&'static str>)>>,
+    adverts: RwLock<HashMap<(i64, VisionSource), CachedAdvert>>,
+    adverts_inflight: Mutex<HashMap<(i64, VisionSource), tokio::sync::watch::Sender<()>>>,
+
+    ocr_slots: OnceLock<Arc<tokio::sync::Semaphore>>,
+    ocr_chat_slots: Box<[Arc<tokio::sync::Semaphore>]>,
 
     image_filters: LoadedFilters,
     stats_pending: tokio::sync::Mutex<Option<crate::state::StatsBatch>>,
@@ -627,7 +728,7 @@ pub struct Ctx {
     filter_versions: [AtomicU64; 256],
     filter_loads: [tokio::sync::Mutex<()>; 256],
 
-    custom: RwLock<HashMap<(i64, u64), CachedCustom>>,
+    custom: RwLock<HashMap<(i64, u64, VisionSource), CachedCustom>>,
 
     intents: RwLock<HashMap<u64, (Instant, f32)>>,
 
@@ -865,10 +966,6 @@ fn configured_usize(
 }
 
 pub const CONCEPT_SLOTS: usize = 8;
-
-fn cache_source_matches(animated: bool, from_animation: bool) -> bool {
-    !animated || from_animation
-}
 
 pub const NOTICE_EVERY: Duration = Duration::from_secs(120);
 
@@ -1113,6 +1210,12 @@ const COMMENT_LOOKUPS: usize = 4;
 const VERDICT_TTL: Duration = Duration::from_secs(86_400);
 
 const VERDICT_MAX: usize = 50_000;
+
+const OCR_CHAT_STRIPES: usize = 256;
+
+fn ocr_chat_stripe(chat: i64) -> usize {
+    (chat.unsigned_abs() as usize) % OCR_CHAT_STRIPES
+}
 const VOICE_CACHE_TTL: Duration = Duration::from_secs(3_600);
 const VOICE_CACHE_MAX: usize = 4_096;
 const VOICE_TEXT_TTL: Duration = Duration::from_secs(900);
@@ -1126,9 +1229,122 @@ const DEFAULT_NSFW_SLOTS: usize = 2;
 
 const NSFW_FETCHES: usize = 4;
 
+async fn media_buffer_slot(
+    gate: &OnceLock<Arc<tokio::sync::Semaphore>>,
+) -> tokio::sync::OwnedSemaphorePermit {
+    Arc::clone(gate.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(NSFW_FETCHES))))
+        .acquire_owned()
+        .await
+        .expect("the media buffer semaphore is never closed")
+}
+
 const NSFW_TASKS: usize = 32;
 
 const INTENT_TASKS: usize = 16;
+
+#[derive(Clone, Copy, Debug)]
+struct CachedAdvert {
+    at: Instant,
+    version: &'static str,
+    verdict: AdvertVerdict,
+}
+
+impl CachedAdvert {
+    fn current(&self) -> bool {
+        self.at.elapsed() < VERDICT_TTL && self.version == ocr::DETECTOR_VERSION
+    }
+}
+
+fn cached_advert_for(
+    adverts: &HashMap<(i64, VisionSource), CachedAdvert>,
+    file: i64,
+    source: &VisionSource,
+) -> Option<AdvertVerdict> {
+    adverts
+        .get(&(file, source.clone()))
+        .filter(|entry| entry.current())
+        .map(|entry| entry.verdict)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct AdvertVerdict {
+    decision: ocr::Decision,
+    why: Option<&'static str>,
+    signal_mask: u16,
+    commercial_hits: u8,
+    ui_markers: u8,
+}
+
+impl AdvertVerdict {
+    pub fn from_classification(classification: &ocr::Classification) -> Self {
+        let signals = &classification.signals;
+        let signal_mask = u16::from(signals.commercial_keywords > 0)
+            | (u16::from(signals.call_to_action) << 1)
+            | (u16::from(signals.phone_number) << 2)
+            | (u16::from(signals.price) << 3)
+            | (u16::from(signals.telegram_link) << 4)
+            | (u16::from(signals.web_url) << 5)
+            | (u16::from(signals.username) << 6)
+            | (u16::from(signals.telegram_ui_markers > 0) << 7)
+            | (u16::from(signals.subscriber_or_group_metric) << 8)
+            | (u16::from(signals.editorial_context) << 9);
+        Self {
+            decision: classification.decision,
+            why: (classification.decision == ocr::Decision::Block)
+                .then(|| classification.legacy_reason()),
+            signal_mask,
+            commercial_hits: signals.commercial_keywords,
+            ui_markers: signals.telegram_ui_markers,
+        }
+    }
+
+    pub const fn why(self) -> Option<&'static str> {
+        self.why
+    }
+
+    pub const fn decision_name(self) -> &'static str {
+        match self.decision {
+            ocr::Decision::Allow => "allow",
+            ocr::Decision::Suspicious => "suspicious",
+            ocr::Decision::Block => "block",
+        }
+    }
+
+    pub fn signal_names(self) -> String {
+        const NAMES: [&str; 10] = [
+            "commercial_keyword",
+            "call_to_action",
+            "phone_number",
+            "price",
+            "telegram_link",
+            "web_url",
+            "username",
+            "telegram_ui",
+            "telegram_metric",
+            "editorial_context",
+        ];
+        let names = NAMES
+            .iter()
+            .enumerate()
+            .filter_map(|(bit, name)| ((self.signal_mask & (1 << bit)) != 0).then_some(*name))
+            .collect::<Vec<_>>();
+        if names.is_empty() {
+            "none".to_owned()
+        } else {
+            format!(
+                "{};commercial_hits={};ui_markers={}",
+                names.join(","),
+                self.commercial_hits,
+                self.ui_markers
+            )
+        }
+    }
+}
+
+pub enum AdvertClaim {
+    Cached(AdvertVerdict),
+    Leader,
+}
 
 pub const FLEET_CONCURRENCY: usize = 8;
 
@@ -1139,10 +1355,10 @@ pub fn recent_minutes(now: u32) -> [String; 3] {
     [now, (now + 1_439) % 1_440, (now + 1_438) % 1_440].map(|minute| minute.to_string())
 }
 
-pub async fn bounded<T, F>(items: Vec<T>, cap: usize, run: impl Fn(T) -> F + Send + 'static)
+pub async fn bounded<T, F>(items: Vec<T>, cap: usize, run: impl Fn(T) -> F + Send)
 where
-    T: Send + 'static,
-    F: std::future::Future<Output = ()> + Send + 'static,
+    T: Send,
+    F: std::future::Future<Output = ()> + Send,
 {
     assert!(cap > 0, "fleet concurrency must be nonzero");
     let mut items = items.into_iter();
@@ -1166,6 +1382,43 @@ where
         })
         .await;
     }
+}
+
+const DELETE_PARALLEL: usize = 4;
+
+pub async fn delete_chunks(
+    client: &Client,
+    chat_ref: PeerRef,
+    ids: &[i32],
+    chunk: usize,
+    critical: bool,
+) -> (usize, Option<grammers_client::InvocationError>) {
+    let deleted = std::sync::atomic::AtomicUsize::new(0);
+    let failed = std::sync::Mutex::new(None);
+    bounded(ids.chunks(chunk).collect(), DELETE_PARALLEL, |chunk| {
+        let deleted = &deleted;
+        let failed = &failed;
+        async move {
+            if failed.lock().unwrap().is_some() {
+                return;
+            }
+            let done = if critical {
+                client.delete_messages_critical(chat_ref, chunk).await
+            } else {
+                client.delete_messages(chat_ref, chunk).await
+            };
+            match done {
+                Ok(n) => {
+                    deleted.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(error) => {
+                    failed.lock().unwrap().get_or_insert(error);
+                }
+            }
+        }
+    })
+    .await;
+    (deleted.into_inner(), failed.into_inner().unwrap())
 }
 
 impl Ctx {
@@ -1193,11 +1446,14 @@ impl Ctx {
             next_deleted_key: AtomicU64::new(1),
             started: Instant::now(),
             pending_admins: RwLock::new(HashMap::new()),
+            pending_webpages: std::sync::Mutex::new(nsfw::PendingWebPages::default()),
             user: RwLock::new(None),
             cleaner_id: AtomicI64::new(0),
             bot_identity,
             runtime_config,
             user_chats: RwLock::new(HashMap::new()),
+            user_chats_absent: Mutex::new(HashMap::new()),
+            user_chats_walk: tokio::sync::Mutex::new(()),
             pending_password: PasswordMailbox::default(),
             cleaner_login: tokio::sync::Mutex::new(()),
             restriction_writes: (0..RESTRICTION_WRITE_STRIPES)
@@ -1223,15 +1479,24 @@ impl Ctx {
             cleaner_joins: OnceLock::new(),
             tag_runs: OnceLock::new(),
             verdicts: RwLock::new(HashMap::new()),
+            raster_kinds: RwLock::new(HashMap::new()),
             voice_verdicts: RwLock::new(HashMap::new()),
             filtered_voices: RwLock::new(HashMap::new()),
             voice_pool: OnceLock::new(),
             voice_jobs: OnceLock::new(),
             nsfw_slots: OnceLock::new(),
             nsfw_tasks: OnceLock::new(),
+            media_buffers: OnceLock::new(),
+            media_decode_slots: OnceLock::new(),
             nsfw_fetches: OnceLock::new(),
             margins: RwLock::new(HashMap::new()),
             adverts: RwLock::new(HashMap::new()),
+            adverts_inflight: Mutex::new(HashMap::new()),
+            ocr_slots: OnceLock::new(),
+            ocr_chat_slots: (0..OCR_CHAT_STRIPES)
+                .map(|_| Arc::new(tokio::sync::Semaphore::new(1)))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             image_filters: RwLock::new(HashMap::new()),
             stats_pending: tokio::sync::Mutex::new(None),
             media_pending: tokio::sync::Mutex::new(Vec::new()),
@@ -1490,23 +1755,50 @@ impl Ctx {
         .expect("the comment semaphore is never closed")
     }
 
-    pub fn known_verdict(&self, file: i64, animated: bool) -> Option<nsfw::Judgement> {
-        let verdicts = self.verdicts.read().unwrap();
-        verdicts
+    pub fn known_raster_animation(&self, file: i64) -> Option<bool> {
+        self.raster_kinds
+            .read()
+            .unwrap()
             .get(&file)
-            .filter(|(at, _, from_animation)| {
-                at.elapsed() < VERDICT_TTL && cache_source_matches(animated, *from_animation)
-            })
-            .map(|(_, judged, _)| *judged)
+            .filter(|(at, _)| at.elapsed() < VERDICT_TTL)
+            .map(|(_, animated)| *animated)
     }
 
-    pub fn remember_verdict(&self, file: i64, judged: nsfw::Judgement, from_animation: bool) {
+    pub fn remember_raster_animation(&self, file: i64, animated: bool) {
+        let mut kinds = self.raster_kinds.write().unwrap();
+        if !kinds.contains_key(&file) && kinds.len() >= VERDICT_MAX {
+            kinds.retain(|_, (at, _)| at.elapsed() < VERDICT_TTL);
+            make_room(&mut kinds, VERDICT_MAX, |(at, _)| *at);
+        }
+        kinds.insert(file, (Instant::now(), animated));
+    }
+
+    pub(crate) fn known_verdict(
+        &self,
+        file: i64,
+        route: &VisionRoute,
+    ) -> Option<(nsfw::Judgement, VisionSource)> {
+        let verdicts = self.verdicts.read().unwrap();
+        verdicts
+            .get(&(file, route.clone()))
+            .filter(|(at, ..)| at.elapsed() < VERDICT_TTL)
+            .map(|(_, judged, source)| (*judged, source.clone()))
+    }
+
+    pub(crate) fn remember_verdict(
+        &self,
+        file: i64,
+        route: VisionRoute,
+        judged: nsfw::Judgement,
+        source: VisionSource,
+    ) {
         let mut verdicts = self.verdicts.write().unwrap();
-        if !verdicts.contains_key(&file) && verdicts.len() >= VERDICT_MAX {
+        let key = (file, route);
+        if !verdicts.contains_key(&key) && verdicts.len() >= VERDICT_MAX {
             verdicts.retain(|_, (at, ..)| at.elapsed() < VERDICT_TTL);
             make_room(&mut verdicts, VERDICT_MAX, |(at, ..)| *at);
         }
-        verdicts.insert(file, (Instant::now(), judged, from_animation));
+        verdicts.insert(key, (Instant::now(), judged, source));
     }
 
     pub fn known_voice(&self, file: i64, profile: u64) -> Option<bool> {
@@ -1588,41 +1880,127 @@ impl Ctx {
         .expect("the nsfw semaphore is never closed")
     }
 
-    pub async fn nsfw_task_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+    pub fn try_nsfw_task_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         Arc::clone(
             self.nsfw_tasks
                 .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(NSFW_TASKS))),
         )
+        .try_acquire_owned()
+        .ok()
+    }
+
+    pub async fn media_buffer_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+        media_buffer_slot(&self.media_buffers).await
+    }
+
+    pub async fn media_decode_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(
+            self.media_decode_slots.get_or_init(|| {
+                Arc::new(tokio::sync::Semaphore::new(self.runtime_config.nsfw_slots))
+            }),
+        )
         .acquire_owned()
         .await
-        .expect("the nsfw task semaphore is never closed")
+        .expect("the media decode semaphore is never closed")
     }
 
-    pub fn known_margins(&self, file: i64, animated: bool) -> Option<[f32; CONCEPT_SLOTS]> {
+    pub(crate) fn known_margins(
+        &self,
+        file: i64,
+        source: &VisionSource,
+    ) -> Option<[f32; CONCEPT_SLOTS]> {
         let margins = self.margins.read().unwrap();
         margins
-            .get(&file)
-            .filter(|(at, _, from_animation)| {
-                at.elapsed() < VERDICT_TTL && cache_source_matches(animated, *from_animation)
-            })
-            .map(|(_, all, _)| *all)
-    }
-
-    pub fn known_advert(&self, file: i64) -> Option<Option<&'static str>> {
-        let adverts = self.adverts.read().unwrap();
-        adverts
-            .get(&file)
+            .get(&(file, source.clone()))
             .filter(|(at, _)| at.elapsed() < VERDICT_TTL)
-            .map(|(_, why)| *why)
+            .map(|(_, all)| *all)
     }
 
-    pub fn remember_advert(&self, file: i64, why: Option<&'static str>) {
+    pub(crate) fn known_advert(&self, file: i64, source: &VisionSource) -> Option<AdvertVerdict> {
+        cached_advert_for(&self.adverts.read().unwrap(), file, source)
+    }
+
+    pub(crate) fn remember_advert(&self, file: i64, source: VisionSource, verdict: AdvertVerdict) {
         let mut adverts = self.adverts.write().unwrap();
-        if !adverts.contains_key(&file) && adverts.len() >= VERDICT_MAX {
-            adverts.retain(|_, (at, _)| at.elapsed() < VERDICT_TTL);
-            make_room(&mut adverts, VERDICT_MAX, |(at, _)| *at);
+        let key = (file, source);
+        if !adverts.contains_key(&key) && adverts.len() >= VERDICT_MAX {
+            adverts.retain(|_, entry| {
+                entry.at.elapsed() < VERDICT_TTL && entry.version == ocr::DETECTOR_VERSION
+            });
+            make_room(&mut adverts, VERDICT_MAX, |entry| entry.at);
         }
-        adverts.insert(file, (Instant::now(), why));
+        adverts.insert(
+            key,
+            CachedAdvert {
+                at: Instant::now(),
+                version: ocr::DETECTOR_VERSION,
+                verdict,
+            },
+        );
+    }
+
+    pub(crate) async fn claim_advert(&self, file: i64, source: &VisionSource) -> AdvertClaim {
+        let key = (file, source.clone());
+        loop {
+            if let Some(verdict) = self.known_advert(file, source) {
+                return AdvertClaim::Cached(verdict);
+            }
+            let notified = {
+                let mut inflight = self.adverts_inflight.lock().unwrap();
+                if let Some(notify) = inflight.get(&key) {
+                    Some(notify.subscribe())
+                } else if let Some(verdict) = self.known_advert(file, source) {
+                    return AdvertClaim::Cached(verdict);
+                } else {
+                    let (notify, _receiver) = tokio::sync::watch::channel(());
+                    inflight.insert(key.clone(), notify);
+                    None
+                }
+            };
+            if let Some(mut notified) = notified {
+                let _ = notified.changed().await;
+                continue;
+            }
+            return AdvertClaim::Leader;
+        }
+    }
+
+    pub(crate) fn finish_advert(&self, file: i64, source: &VisionSource, verdict: AdvertVerdict) {
+        self.remember_advert(file, source.clone(), verdict);
+        self.release_advert(file, source);
+    }
+
+    pub(crate) fn release_advert(&self, file: i64, source: &VisionSource) {
+        let notify = self
+            .adverts_inflight
+            .lock()
+            .unwrap()
+            .remove(&(file, source.clone()));
+        if let Some(notify) = notify {
+            let _ = notify.send(());
+        }
+    }
+
+    pub async fn ocr_slots(
+        &self,
+        chat: i64,
+    ) -> (
+        tokio::sync::OwnedSemaphorePermit,
+        tokio::sync::OwnedSemaphorePermit,
+    ) {
+        let chat_index = ocr_chat_stripe(chat) % self.ocr_chat_slots.len();
+        let chat_slot = Arc::clone(&self.ocr_chat_slots[chat_index])
+            .acquire_owned()
+            .await
+            .expect("the OCR chat semaphore is never closed");
+        let global_slot =
+            Arc::clone(self.ocr_slots.get_or_init(|| {
+                Arc::new(tokio::sync::Semaphore::new(self.runtime_config.nsfw_slots))
+            }))
+            .acquire_owned()
+            .await
+            .expect("the OCR semaphore is never closed");
+        (global_slot, chat_slot)
     }
 
     pub async fn image_filters(
@@ -1647,17 +2025,7 @@ impl Ctx {
                 .await?
                 .into_iter()
                 .filter(|row| row.vector.len() == imgfilter::DIM)
-                .map(|row| imgfilter::Filter {
-                    print: imgfilter::fingerprint(&row.vector, row.scale),
-                    vector: vision::unit(&imgfilter::dequantize(&row.vector, row.scale)),
-                    name: row.name,
-                    cut: if row.samples == 0 {
-                        imgfilter::FIXED_MODEL_CUT
-                    } else {
-                        imgfilter::FIXED_EXAMPLE_CUT
-                    },
-                    live: true,
-                })
+                .filter_map(filter_from_row)
                 .collect();
             let filters = Arc::new(filters);
             {
@@ -1709,23 +2077,22 @@ impl Ctx {
         .expect("the intent task semaphore is never closed")
     }
 
-    pub fn known_custom(&self, file: i64, print: u64, animated: bool) -> Option<f32> {
+    pub(crate) fn known_custom(&self, file: i64, print: u64, source: &VisionSource) -> Option<f32> {
         let custom = self.custom.read().unwrap();
         custom
-            .get(&(file, print))
-            .filter(|(at, _, from_animation)| {
-                at.elapsed() < VERDICT_TTL && cache_source_matches(animated, *from_animation)
-            })
-            .map(|(_, margin, _)| *margin)
+            .get(&(file, print, source.clone()))
+            .filter(|(at, _)| at.elapsed() < VERDICT_TTL)
+            .map(|(_, margin)| *margin)
     }
 
-    pub fn remember_custom(&self, file: i64, print: u64, margin: f32, from_animation: bool) {
+    pub(crate) fn remember_custom(&self, file: i64, print: u64, margin: f32, source: VisionSource) {
         let mut custom = self.custom.write().unwrap();
-        if !custom.contains_key(&(file, print)) && custom.len() >= VERDICT_MAX {
+        let key = (file, print, source);
+        if !custom.contains_key(&key) && custom.len() >= VERDICT_MAX {
             custom.retain(|_, (at, ..)| at.elapsed() < VERDICT_TTL);
             make_room(&mut custom, VERDICT_MAX, |(at, ..)| *at);
         }
-        custom.insert((file, print), (Instant::now(), margin, from_animation));
+        custom.insert(key, (Instant::now(), margin));
     }
 
     pub fn remember_sample(&self, embedding: &[f32]) {
@@ -1818,13 +2185,19 @@ impl Ctx {
         self.samples.read().unwrap().clone()
     }
 
-    pub fn remember_margins(&self, file: i64, all: [f32; CONCEPT_SLOTS], from_animation: bool) {
+    pub(crate) fn remember_margins(
+        &self,
+        file: i64,
+        all: [f32; CONCEPT_SLOTS],
+        source: VisionSource,
+    ) {
         let mut margins = self.margins.write().unwrap();
-        if !margins.contains_key(&file) && margins.len() >= VERDICT_MAX {
+        let key = (file, source);
+        if !margins.contains_key(&key) && margins.len() >= VERDICT_MAX {
             margins.retain(|_, (at, ..)| at.elapsed() < VERDICT_TTL);
             make_room(&mut margins, VERDICT_MAX, |(at, ..)| *at);
         }
-        margins.insert(file, (Instant::now(), all, from_animation));
+        margins.insert(key, (Instant::now(), all));
     }
 
     pub async fn nsfw_fetch(&self) -> tokio::sync::SemaphorePermit<'_> {
@@ -2195,6 +2568,35 @@ impl Ctx {
 
     pub fn forget_user_chats(&self) {
         self.user_chats.write().unwrap().clear();
+        self.user_chats_absent.lock().unwrap().clear();
+    }
+
+    pub fn user_chat_absent(&self, chat: i64) -> bool {
+        const ABSENT_FOR: Duration = Duration::from_secs(600);
+        let mut absent = self.user_chats_absent.lock().unwrap();
+        match absent.get(&chat) {
+            Some(at) if at.elapsed() < ABSENT_FOR => true,
+            Some(_) => {
+                absent.remove(&chat);
+                false
+            }
+            None => false,
+        }
+    }
+
+    pub fn remember_user_chat_absent(&self, chat: i64) {
+        const ABSENT_MAX: usize = 10_000;
+        let mut absent = self.user_chats_absent.lock().unwrap();
+        if absent.len() >= ABSENT_MAX {
+            absent.retain(|_, at| at.elapsed() < Duration::from_secs(600));
+        }
+        if absent.len() < ABSENT_MAX {
+            absent.insert(chat, Instant::now());
+        }
+    }
+
+    pub async fn user_chats_walk(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.user_chats_walk.lock().await
     }
 
     pub fn set_user_chats(&self, chats: Vec<(i64, PeerRef)>) {
@@ -2804,6 +3206,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
                 let _slot = _state.slot().await;
                 let view = locks::View::new(&message);
                 locks::on_edit(ctx, &message, &view).await;
+                nsfw::watch(ctx, &message, chat, &view).await;
                 trade::watch(ctx, &message, chat, &view).await;
             }
             return;
@@ -2814,6 +3217,14 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         }
 
         Update::Raw(raw) => {
+            if matches!(
+                &raw.raw,
+                grammers_client::tl::enums::Update::WebPage(_)
+                    | grammers_client::tl::enums::Update::ChannelWebPage(_)
+            ) {
+                nsfw::on_webpage_update(ctx, &raw).await;
+                return;
+            }
             let raw_chat = raw_chat_id(&raw);
             let admitted = if let Some(chat) = raw_chat {
                 let Some(peer) = ctx.resolve_group(chat).await else {
@@ -2886,6 +3297,9 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
     }
 
     if message.peer_id().kind() == PeerKind::User {
+        if !command_context(message) {
+            return;
+        }
         let handled = cleaner::take_password(ctx, message).await
             || config::start(ctx, message).await
             || config::help(ctx, message).await
@@ -2996,11 +3410,18 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
 
     trade::watch(ctx, message, chat, &view).await;
 
-    if panel::typed_number(ctx, message, &view).await {
+    let command_context = command_context(message);
+    if command_context && panel::typed_number(ctx, message, &view).await {
         return;
     }
 
     if join::enforce(ctx, message).await {
+        return;
+    }
+
+    if !command_context {
+        locks::moderate(ctx, message, chat, &view).await;
+        locks::service(ctx, message).await;
         return;
     }
 
@@ -3012,10 +3433,14 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         || captcha::on_join(ctx, message).await
         || welcome::on_join(ctx, message).await
         || (!bot_authored
-            && (welcome::handle(ctx, message).await
+            && ((commands::custom_shortcut_first(view.command())
+                && restrict::handle_custom(ctx, message, &view).await)
+                || welcome::handle(ctx, message).await
                 || config::handle(ctx, message).await
                 || ephemeral::handle(ctx, message).await
                 || panel::handle(ctx, message).await
+                || setting::command(ctx, message).await
+                || panel_commands::handle(ctx, message).await
                 || restrict::handle(ctx, message, &view).await
                 || restrict::handle_custom_setup(ctx, message).await
                 || lists::command(ctx, message).await
@@ -3157,6 +3582,46 @@ pub fn dispatch_key(update: &Update) -> i64 {
 #[allow(unsafe_code)]
 mod scalability_tests;
 
+fn command_context(message: &Message) -> bool {
+    let grammers_client::tl::enums::Message::Message(raw) = &message.raw else {
+        return true;
+    };
+    command_source_allows(
+        raw.fwd_from.is_some(),
+        message.text(),
+        raw.entities.as_deref().unwrap_or(&[]),
+    )
+}
+
+fn command_source_allows(
+    forwarded: bool,
+    text: &str,
+    entities: &[grammers_client::tl::enums::MessageEntity],
+) -> bool {
+    !forwarded && !quoted_command_start(text, entities)
+}
+
+fn quoted_command_start(
+    text: &str,
+    entities: &[grammers_client::tl::enums::MessageEntity],
+) -> bool {
+    use grammers_client::tl::enums::MessageEntity as E;
+    let start = text
+        .chars()
+        .take_while(|c| commands::separator(*c) || commands::ignored(*c))
+        .map(char::len_utf16)
+        .sum::<usize>() as i32;
+    entities.iter().any(|entity| {
+        let (offset, length) = match entity {
+            E::Blockquote(value) => (value.offset, value.length),
+            E::Pre(value) => (value.offset, value.length),
+            E::Code(value) => (value.offset, value.length),
+            _ => return false,
+        };
+        offset <= start && length > 0 && start < offset.saturating_add(length)
+    })
+}
+
 fn bot_authored(message: &Message) -> bool {
     matches!(message.sender(), Some(Peer::User(user)) if user.is_bot())
 }
@@ -3192,6 +3657,7 @@ fn raw_chat_id(raw: &grammers_client::update::Raw) -> Option<i64> {
         tl::enums::Update::ChannelParticipant(update) => PeerId::channel(update.channel_id),
         tl::enums::Update::ChatParticipantAdmin(update) => PeerId::chat(update.chat_id),
         tl::enums::Update::PinnedChannelMessages(update) => PeerId::channel(update.channel_id),
+        tl::enums::Update::ChannelWebPage(update) => PeerId::channel(update.channel_id),
         tl::enums::Update::PinnedMessages(update) => PeerId::try_from(&update.peer).ok(),
         _ => return None,
     }?;
@@ -3350,8 +3816,9 @@ pub struct Named<'a> {
 }
 
 pub(crate) fn arg_names_a_user(arg: &str) -> bool {
-    arg.strip_prefix('@').is_some_and(|name| !name.is_empty())
-        || digits(arg).trim().parse::<i64>().is_ok()
+    arg.strip_prefix('@').is_some_and(|name| {
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }) || digits(arg).trim().parse::<i64>().is_ok()
 }
 
 pub fn named<'a>(message: &Message, arg: Option<&'a str>) -> Option<Named<'a>> {
@@ -3364,27 +3831,39 @@ pub fn named<'a>(message: &Message, arg: Option<&'a str>) -> Option<Named<'a>> {
 
 pub async fn resolve(ctx: &Ctx, message: &Message, named: Named<'_>) -> Option<(PeerRef, String)> {
     if let Some(arg) = named.arg {
-        if let Some(username) = arg.strip_prefix('@').filter(|u| !u.is_empty()) {
-            let peer = ctx.client.resolve_username(username).await.ok()??;
-            let name = peer.name().unwrap_or(username).to_owned();
-            return Some((peer.to_ref().await.ok()??, name));
-        }
-        if let Ok(id) = digits(arg).parse::<i64>() {
-            return Some((PeerId::user(id)?.to_ambient_ref(), id.to_string()));
-        }
-        return None;
+        return resolve_arg(ctx, arg).await;
     }
     let replied = message.get_reply().await.ok()??;
+    let text = replied.text().trim();
+    if !text.is_empty() && !text.contains(char::is_whitespace) && arg_names_a_user(text) {
+        return resolve_arg(ctx, text).await;
+    }
     let name = name_of(&replied);
     Some((replied.sender_ref().await.ok()??, name))
 }
 
+async fn resolve_arg(ctx: &Ctx, arg: &str) -> Option<(PeerRef, String)> {
+    if let Some(username) = arg.strip_prefix('@').filter(|u| !u.is_empty()) {
+        let peer = ctx.client.resolve_username(username).await.ok()??;
+        let name = peer.name().unwrap_or(username).to_owned();
+        return Some((peer.to_ref().await.ok()??, name));
+    }
+    let id = digits(arg).parse::<i64>().ok()?;
+    let peer = ctx
+        .client
+        .resolve_peer(PeerId::user(id)?.to_ambient_ref())
+        .await
+        .ok()?;
+    let name = peer.name().map_or_else(|| id.to_string(), str::to_owned);
+    Some((peer.to_ref().await.ok()??, name))
+}
+
 pub fn phrase_carries_text(command: &str) -> bool {
-    command.split_whitespace().count() > 1
+    command.starts_with('/') || command.split_whitespace().count() > 1
 }
 
 pub fn numbers_in(tail: &str) -> Option<Vec<u32>> {
-    digits(tail)
+    commands::normalize(tail)
         .split_whitespace()
         .map(|word| word.parse().ok())
         .collect()
@@ -3439,6 +3918,38 @@ pub struct Joined {
     pub is_bot: bool,
 }
 
+const JOINED_FIRST_PAGE: usize = 200;
+
+async fn joined_by_lookup(ctx: &Ctx, chat_ref: PeerRef, id: i64) -> Option<Joined> {
+    use grammers_client::tl;
+
+    let target = PeerId::user(id)?.to_ambient_ref();
+    let asked = ctx
+        .client
+        .invoke(&tl::functions::channels::GetParticipant {
+            channel: chat_ref.into(),
+            participant: target.into(),
+        })
+        .await;
+    let tl::enums::channels::ChannelParticipant::Participant(found) = asked.ok()?;
+    found.users.into_iter().find_map(|user| match user {
+        tl::enums::User::User(user) if user.id == id => Some(Joined {
+            peer: PeerRef {
+                id: PeerId::user(id)?,
+                auth: grammers_client::session::types::PeerAuth::from_hash(user.access_hash?),
+            },
+            id,
+            name: [user.first_name.as_deref(), user.last_name.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" "),
+            is_bot: user.bot,
+        }),
+        _ => None,
+    })
+}
+
 pub async fn joined_users(ctx: &Ctx, message: &Message) -> Vec<Joined> {
     use grammers_client::tl::enums::MessageAction;
 
@@ -3482,17 +3993,15 @@ pub async fn joined_users(ctx: &Ctx, message: &Message) -> Vec<Joined> {
         .iter_participants(chat_ref)
         .filter(grammers_client::tl::enums::ChannelParticipantsFilter::ChannelParticipantsRecent);
     let mut found = Vec::new();
+    let channel = chat_ref.id.kind() == PeerKind::Channel;
+    let mut seen = 0;
     while let Ok(Some(participant)) = participants.next().await {
-        let Some(user) = participant.user() else {
-            continue;
-        };
-        let Some(id) = user.id().bare_id() else {
-            continue;
-        };
-        if !ids.contains(&id) {
-            continue;
-        }
-        if let Ok(Some(peer)) = user.to_ref().await {
+        seen += 1;
+        if let Some(user) = participant.user()
+            && let Some(id) = user.id().bare_id()
+            && ids.contains(&id)
+            && let Ok(Some(peer)) = user.to_ref().await
+        {
             found.push(Joined {
                 peer,
                 id,
@@ -3500,8 +4009,18 @@ pub async fn joined_users(ctx: &Ctx, message: &Message) -> Vec<Joined> {
                 is_bot: user.is_bot(),
             });
         }
-        if found.len() == ids.len() {
+        if found.len() == ids.len() || (channel && seen >= JOINED_FIRST_PAGE) {
             break;
+        }
+    }
+    if channel {
+        for &id in &ids {
+            if found.iter().any(|joined| joined.id == id) {
+                continue;
+            }
+            if let Some(joined) = joined_by_lookup(ctx, chat_ref, id).await {
+                found.push(joined);
+            }
         }
     }
     if let Some(key) = memo {
@@ -3621,6 +4140,50 @@ mod tests {
         let bytes = std::mem::size_of::<Ctx>();
         println!("Ctx inline layout: {bytes} bytes");
         assert!(bytes < 64 * 1024, "Ctx grew to {bytes} inline bytes");
+    }
+
+    #[test]
+    fn ocr_chat_admission_is_fixed_and_handles_negative_ids() {
+        assert_eq!(super::OCR_CHAT_STRIPES, 256);
+        for chat in [i64::MIN, -1, 0, 1, i64::MAX] {
+            assert!(super::ocr_chat_stripe(chat) < super::OCR_CHAT_STRIPES);
+        }
+        assert_eq!(
+            super::ocr_chat_stripe(-42),
+            super::ocr_chat_stripe(42),
+            "the same chat identity must map to one gate regardless of sign"
+        );
+    }
+
+    #[tokio::test]
+    async fn media_buffers_wait_before_allocation_and_release_capacity() {
+        let gate = std::sync::OnceLock::new();
+        let mut held = Vec::new();
+        for _ in 0..super::NSFW_FETCHES {
+            held.push(super::media_buffer_slot(&gate).await);
+        }
+        let allocated = std::sync::atomic::AtomicBool::new(false);
+        let delayed = async {
+            let permit = super::media_buffer_slot(&gate).await;
+            allocated.store(true, std::sync::atomic::Ordering::Relaxed);
+            (permit, vec![0u8; 1024])
+        };
+        tokio::pin!(delayed);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut delayed)
+                .await
+                .is_err()
+        );
+        assert!(!allocated.load(std::sync::atomic::Ordering::Relaxed));
+        drop(held.pop());
+        let admitted = tokio::time::timeout(std::time::Duration::from_secs(1), &mut delayed)
+            .await
+            .expect("released buffer capacity did not admit the waiting image");
+        assert!(allocated.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(admitted.1.len(), 1024);
+        drop(admitted);
+        drop(held);
+        assert_eq!(gate.get().unwrap().available_permits(), super::NSFW_FETCHES);
     }
 
     #[tokio::test]
@@ -3952,19 +4515,49 @@ mod tests {
     }
 
     #[test]
-    fn animated_media_rejects_a_thumbnail_cache_but_accepts_full_animation() {
+    fn ocr_cache_uses_starting_rung_and_detector_version() {
+        use std::collections::HashMap;
+
+        let verdict = super::AdvertVerdict::from_classification(&super::ocr::classify(""));
+        let low = super::VisionSource::Rung {
+            photo_type: "x".to_owned(),
+            width: 512,
+            height: 384,
+            declared_bytes: 16_038,
+            variant: 0,
+            payload_hash: 0,
+        };
+        let high = super::VisionSource::Rung {
+            photo_type: "y".to_owned(),
+            width: 800,
+            height: 600,
+            declared_bytes: 42_391,
+            variant: 0,
+            payload_hash: 0,
+        };
+        let current = super::CachedAdvert {
+            at: std::time::Instant::now(),
+            version: super::ocr::DETECTOR_VERSION,
+            verdict,
+        };
+        let mut adverts = HashMap::new();
+        adverts.insert((78_002, low.clone()), current);
+        assert!(super::cached_advert_for(&adverts, 78_002, &low).is_some());
+        assert!(super::cached_advert_for(&adverts, 78_002, &high).is_none());
         assert!(
-            !super::cache_source_matches(true, false),
-            "a GIF must not reuse a result computed from its cover frame"
+            super::cached_advert_for(&adverts, 78_002, &super::VisionSource::Animated).is_none()
         );
         assert!(
-            super::cache_source_matches(true, true),
-            "a GIF may reuse a result computed after full animation sampling"
+            super::cached_advert_for(&adverts, 78_002, &super::VisionSource::Original).is_none()
         );
-        assert!(
-            super::cache_source_matches(false, false),
-            "ordinary still media keeps the existing cache path"
+        adverts.insert(
+            (78_002, high.clone()),
+            super::CachedAdvert {
+                version: "old detector",
+                ..current
+            },
         );
+        assert!(super::cached_advert_for(&adverts, 78_002, &high).is_none());
     }
 
     #[test]
@@ -4549,6 +5142,59 @@ mod tests {
     }
 
     #[test]
+    fn command_targets_reject_prose_and_explicit_slash_forms_allow_payloads() {
+        for valid in ["@Ali_123", "123", "۱۲۳", "١٢٣"] {
+            assert!(super::arg_names_a_user(valid), "{valid}");
+        }
+        for invalid in ["@", "@ali extra", "@ali\nبن", "@ali,", "@ali/name", "علی"] {
+            assert!(!super::arg_names_a_user(invalid), "{invalid}");
+        }
+        assert!(super::phrase_carries_text("/filter"));
+        assert!(super::phrase_carries_text("فیلتر کلمه"));
+        assert!(!super::phrase_carries_text("فیلتر"));
+    }
+
+    #[test]
+    fn code_and_blockquoted_examples_do_not_start_commands() {
+        use grammers_client::tl::types::{
+            MessageEntityBlockquote, MessageEntityCode, MessageEntityPre,
+        };
+        let text = "  قفل عکس";
+        let length = "قفل عکس".encode_utf16().count() as i32;
+        let code = MessageEntityCode { offset: 2, length }.into();
+        let quote = MessageEntityBlockquote {
+            offset: 2,
+            length,
+            collapsed: false,
+        }
+        .into();
+        let pre = MessageEntityPre {
+            offset: 2,
+            length,
+            language: String::new(),
+        }
+        .into();
+        for entity in [code, quote, pre] {
+            assert!(super::quoted_command_start(text, &[entity]));
+        }
+        assert!(!super::command_source_allows(true, "قفل عکس", &[]));
+        assert!(super::command_source_allows(false, "قفل عکس", &[]));
+        assert!(!super::quoted_command_start(text, &[]));
+        assert!(super::quoted_command_start(
+            "\u{200f}قفل عکس",
+            &[MessageEntityCode { offset: 1, length }.into()],
+        ));
+        assert!(!super::quoted_command_start(
+            text,
+            &[MessageEntityCode {
+                offset: 3,
+                length: length - 1,
+            }
+            .into()],
+        ));
+    }
+
+    #[test]
     fn a_closed_tail_is_all_or_nothing() {
         use super::numbers_in;
         let word = "چیه";
@@ -4557,6 +5203,7 @@ mod tests {
         assert_eq!(numbers_in(" 50 "), Some(vec![50]));
         assert_eq!(numbers_in("10 5"), Some(vec![10, 5]));
         assert_eq!(numbers_in("۱۰ ۵"), Some(vec![10, 5]));
+        assert_eq!(numbers_in("۱۰\u{200c}۵"), Some(vec![10, 5]));
 
         assert_eq!(numbers_in(word), None);
         assert_eq!(numbers_in(&format!("{word} 50")), None);
@@ -4573,6 +5220,7 @@ mod tests {
             include_str!("callbacks.rs"),
             include_str!("captcha.rs"),
             include_str!("config.rs"),
+            include_str!("commands.rs"),
             include_str!("currency.rs"),
             include_str!("extras.rs"),
             include_str!("filters.rs"),

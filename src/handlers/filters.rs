@@ -7,11 +7,40 @@ use crate::response::ResponseKind;
 
 pub const PREFIX: &str = "filter:";
 
-pub const ADD: &[&str] = &["فیلتر کلمه", "افزودن فیلتر", "اضافه کردن فیلتر", "فیلتر"];
-pub const REMOVE: &[&str] = &["حذف فیلتر", "لغو فیلتر"];
+pub const ADD: &[&str] = &[
+    "فیلتر کلمه",
+    "افزودن فیلتر",
+    "اضافه کردن فیلتر",
+    "اضافه فیلتر",
+    "تنظیم فیلتر",
+    "/filter",
+    "/addfilter",
+    "فیلتر",
+    "/addword",
+];
+pub const REMOVE: &[&str] = &[
+    "حذف فیلتر",
+    "لغو فیلتر",
+    "پاک فیلتر",
+    "/unfilter",
+    "/delfilter",
+    "/removefilter",
+    "رفع فیلتر",
+    "پاک کردن فیلتر",
+];
 
-pub const EXACT_ON: &[&str] = &["فیلتر دقیق"];
-pub const EXACT_OFF: &[&str] = &["فیلتر عادی"];
+pub const EXACT_ON: &[&str] = &[
+    "فیلتر دقیق",
+    "حالت فیلتر دقیق",
+    "/filterexact",
+    "/exactfilter",
+];
+pub const EXACT_OFF: &[&str] = &[
+    "فیلتر عادی",
+    "حالت فیلتر عادی",
+    "/filternormal",
+    "/normalfilter",
+];
 
 pub const EXACT: &str = "filter_exact";
 
@@ -23,6 +52,28 @@ pub fn key(word: &str) -> String {
     format!("{PREFIX}{word}")
 }
 
+fn normalise(raw: &str) -> Option<String> {
+    let word = super::locks::tighten(&super::locks::folded(raw.trim())).into_owned();
+    (!word.is_empty() && word.chars().count() <= MAX_LEN && !word.contains('=')).then_some(word)
+}
+
+pub enum AddError {
+    Invalid,
+    Full,
+    Settings(crate::state::SettingsWriteError),
+}
+
+pub async fn add(ctx: &Ctx, chat: i64, raw: &str) -> Result<bool, AddError> {
+    let word = normalise(raw).ok_or(AddError::Invalid)?;
+    if words(ctx, chat).len() >= MAX_WORDS {
+        return Err(AddError::Full);
+    }
+    ctx.settings
+        .try_set(chat, &key(&word), true)
+        .await
+        .map_err(AddError::Settings)
+}
+
 pub fn words(ctx: &Ctx, chat: i64) -> Vec<String> {
     ctx.settings.flags_with_prefix(chat, PREFIX)
 }
@@ -31,14 +82,14 @@ pub fn matches(ctx: &Ctx, chat: i64, view: &super::locks::View) -> bool {
     if ctx.settings.indexed_empty(chat, PREFIX) {
         return false;
     }
-    let haystack = view.tight();
-    if haystack.is_empty() {
-        return false;
-    }
     let exact = ctx.settings.is_locked(chat, EXACT);
-    ctx.settings.indexed_any(chat, PREFIX, |word| {
-        found(haystack, &super::locks::tighten(word), exact)
-    })
+    view.tight_texts()
+        .filter(|haystack| !haystack.is_empty())
+        .any(|haystack| {
+            ctx.settings.indexed_any(chat, PREFIX, |word| {
+                found(haystack, &super::locks::tighten(word), exact)
+            })
+        })
 }
 
 fn found(text: &str, word: &str, exact: bool) -> bool {
@@ -130,8 +181,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         return true;
     };
 
-    let word = super::locks::tighten(&super::locks::folded(word.trim())).into_owned();
-    if word.is_empty() || word.chars().count() > MAX_LEN || word.contains('=') {
+    let Some(word) = normalise(&word) else {
         super::respond(
             ctx,
             message,
@@ -143,7 +193,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         )
         .await;
         return true;
-    }
+    };
     if add && words(ctx, chat).len() >= MAX_WORDS {
         super::respond(
             ctx,
@@ -201,21 +251,25 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
 }
 
 fn mode_toggle(text: &str) -> Option<bool> {
-    if EXACT_ON.contains(&text) {
+    if EXACT_ON
+        .iter()
+        .any(|command| super::commands::matches(text, command))
+    {
         return Some(true);
     }
-    EXACT_OFF.contains(&text).then_some(false)
+    EXACT_OFF
+        .iter()
+        .any(|command| super::commands::matches(text, command))
+        .then_some(false)
 }
 
 fn parse(text: &str) -> Option<(bool, &'static str, &str)> {
     for (commands, add) in [(ADD, true), (REMOVE, false)] {
         for command in commands {
-            let Some(rest) = text.strip_prefix(command) else {
+            let Some(rest) = super::commands::strip_prefix(text, command) else {
                 continue;
             };
-            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                return Some((add, command, rest.trim()));
-            }
+            return Some((add, command, rest));
         }
     }
     None
@@ -330,5 +384,28 @@ mod tests {
         assert!(super::super::phrase_carries_text("فیلتر کلمه"));
         assert_eq!(parse("فیلترها"), None);
         assert_eq!(parse("سلام"), None);
+    }
+
+    #[test]
+    fn filter_aliases_preserve_words_and_require_exact_mode_commands() {
+        assert_eq!(
+            parse("اضافه\u{200c}فيلتر Mixed كلمه ۱۲"),
+            Some((true, "اضافه فیلتر", "Mixed كلمه ۱۲"))
+        );
+        assert_eq!(
+            parse("/FILTER Mixed Case"),
+            Some((true, "/filter", "Mixed Case"))
+        );
+        assert_eq!(
+            parse("/Unfilter Mixed Case"),
+            Some((false, "/unfilter", "Mixed Case"))
+        );
+        assert_eq!(parse("/filtered Word"), None);
+        assert_eq!(mode_toggle("فيلتر\t دقيق"), Some(true));
+        assert_eq!(mode_toggle("/FilterNormal"), Some(false));
+        assert_eq!(mode_toggle("فیلتر دقیق چیه"), None);
+        assert_eq!(mode_toggle("/filterexact extra"), None);
+        assert!(!super::super::phrase_carries_text("فیلتر"));
+        assert!(super::super::phrase_carries_text("/filter"));
     }
 }

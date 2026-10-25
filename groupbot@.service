@@ -9,9 +9,11 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/shards/%i
 EnvironmentFile=/home/ubuntu/shards/%i/.env
 Environment=SHARD_NAME=%i
+PrivateTmp=true
+UMask=0077
 LimitNOFILE=65536
 TasksMax=4096
-MemoryHigh=3G
+MemoryHigh=3584M
 MemoryMax=4G
 ExecStart=/home/ubuntu/GroupManagement/groupbot/target/release/groupbot
 Restart=always

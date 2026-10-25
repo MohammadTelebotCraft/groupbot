@@ -37,12 +37,13 @@ Both are SigLIP 2, which matters three ways beyond the score:
     pip install torch transformers onnx onnxruntime pillow numpy
     python3 tools/export_vision.py --out ./out --int8 --check
 
-Four files come out, and all four go beside the executable on the server:
+Five files come out, and all five stay together through review and deployment:
 
     vision.onnx                the image tower
     vision_text.onnx           the text tower, for «فیلتر متنی»
     vision_text_vocab.txt      the BPE vocabulary the Rust tokenizer reads
     vision_text_merges.txt     its merge ranks, in order
+    vision_provenance.json     checkpoint revision, tensor contract and artifact hashes
 
 Only `vision.onnx` is needed for the shipped concepts and for example-based filters; the
 other three are what lets an admin *name* a filter in Persian.
@@ -68,6 +69,7 @@ spare the memory, but it is not the default and the number above is why.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import pathlib
 import sys
@@ -75,10 +77,20 @@ import sys
 import torch
 
 
-# The Rust side pins these. They are asserted rather than written to a metadata file: a file
-# is a fourth thing to keep in step, and every one of these is a constant of the architecture.
+# The Rust side pins these architecture values and the reviewed image-tower digest. The
+# provenance file emitted below is an auditable bundle record, not an authority that may replace
+# the Rust digest: an operator must deliberately update the pin after reference and workload
+# evaluation whenever a newly exported graph has different bytes.
 DIM = 768
 MAX_TOKENS = 64
+IMAGE_SIDE = 384
+RUST_ACCEPTED_VISION_SHA256 = "f5a9453926a4bb481b16979c1cdf29b0b65f095c5021695ff30b62ce223aff52"
+RUST_ACCEPTED_EQUIVALENT_SHA256 = "59367a01b9d2cad897c1f7b34a6ed7d8a9f62a6c759bc6c4034be43012488015"
+RUST_ACCEPTED_VISION_SHA256S = {
+    RUST_ACCEPTED_VISION_SHA256,
+    RUST_ACCEPTED_EQUIVALENT_SHA256,
+}
+PROVENANCE_FILE = "vision_provenance.json"
 
 VISION_INPUT = "pixels"
 TEXT_INPUT = "input_ids"
@@ -398,6 +410,10 @@ def check_vision(path, model, side: int) -> float:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="google/siglip2-base-patch16-384")
+    parser.add_argument(
+        "--revision",
+        help="Hugging Face revision/commit to resolve; the resolved commit is recorded in provenance",
+    )
     parser.add_argument("--out", default="./out")
     parser.add_argument(
         "--int8",
@@ -425,7 +441,8 @@ def main() -> None:
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    model = AutoModel.from_pretrained(args.model).eval()
+    model = AutoModel.from_pretrained(args.model, revision=args.revision).eval()
+    resolved_revision = getattr(model.config, "_commit_hash", None) or args.revision
     side = model.config.vision_config.image_size
     if model.config.vision_config.hidden_size != DIM:
         sys.exit(
@@ -456,14 +473,25 @@ def main() -> None:
         [VISION_INPUT],
         {VISION_INPUT: {0: "batch"}, OUTPUT_NAME: {0: "batch"}},
     )
-    if args.check:
-        check_vision(vision_path, model, side)
+    vision_cosine = check_vision(vision_path, model, side) if args.check else None
 
     if args.no_text:
-        report(vision_path)
+        provenance = write_provenance(
+            out,
+            model=args.model,
+            resolved_revision=resolved_revision,
+            side=side,
+            artifacts=[vision_path],
+            vision_cosine=vision_cosine,
+            text_cosine=None,
+        )
+        report(vision_path, provenance)
         return
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    # Resolve both towers/tokenizer from the same immutable snapshot. Calling the hub twice by a
+    # floating branch name can otherwise pair files fetched on opposite sides of an upstream
+    # update while still producing perfectly valid tensors of the same width.
+    tokenizer = AutoTokenizer.from_pretrained(args.model, revision=resolved_revision)
     bpe = read_bpe(tokenizer)
     kept, merges, remap = trim(bpe, args.vocab == "full")
     print(f"vocabulary: {len(kept)} of {len(bpe.vocab)} pieces, {len(merges)} of {len(bpe.ranks)} merges")
@@ -505,19 +533,35 @@ def main() -> None:
     write_vocab(out / "vision_text_vocab.txt", kept)
     write_merges(out / "vision_text_merges.txt", merges)
 
+    text_cosine = None
     if args.check:
         print("checking the text tower and the tokenizer against the library")
         # `model` now holds the trimmed table, so the reference has to come from a clean copy.
-        reference = AutoModel.from_pretrained(args.model).eval()
-        worst = check_text(text_path, reference, tokenizer, trimmed, remap)
-        if worst < 0.999:
-            print(f"WARNING: the export drifted from the library, worst cosine {worst:.6f}")
+        reference = AutoModel.from_pretrained(args.model, revision=resolved_revision).eval()
+        text_cosine = check_text(text_path, reference, tokenizer, trimmed, remap)
+        if text_cosine < 0.999:
+            print(f"WARNING: the export drifted from the library, worst cosine {text_cosine:.6f}")
 
     print("\nreference tokenizations, for pinning the Rust tokenizer:")
     for case in CASES:
         print(f"  {case!r:24} {trimmed.encode(case)}")
 
-    report(vision_path, text_path, out / "vision_text_vocab.txt", out / "vision_text_merges.txt")
+    artifact_paths = [
+        vision_path,
+        text_path,
+        out / "vision_text_vocab.txt",
+        out / "vision_text_merges.txt",
+    ]
+    provenance = write_provenance(
+        out,
+        model=args.model,
+        resolved_revision=resolved_revision,
+        side=side,
+        artifacts=artifact_paths,
+        vision_cosine=vision_cosine,
+        text_cosine=text_cosine,
+    )
+    report(*artifact_paths, provenance)
 
 
 def escape(piece: str) -> str:
@@ -539,11 +583,75 @@ def write_merges(path: pathlib.Path, merges: list[tuple[str, str]]) -> None:
     print(f"merges: {len(merges)} to {path}")
 
 
+def sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_provenance(
+    out: pathlib.Path,
+    *,
+    model: str,
+    resolved_revision: str | None,
+    side: int,
+    artifacts: list[pathlib.Path],
+    vision_cosine: float | None,
+    text_cosine: float | None,
+) -> pathlib.Path:
+    records = {
+        path.name: {"sha256": sha256_file(path), "bytes": path.stat().st_size}
+        for path in artifacts
+    }
+    image_digest = records["vision.onnx"]["sha256"]
+    accepted = image_digest in RUST_ACCEPTED_VISION_SHA256S
+    provenance = {
+        "schema_version": 1,
+        "checkpoint": model,
+        "resolved_revision": resolved_revision,
+        "exporter": "tools/export_vision.py",
+        "contract": {
+            "image_input": {"name": VISION_INPUT, "dtype": "float32", "shape": ["batch", 3, side, side]},
+            "text_input": {"name": TEXT_INPUT, "dtype": "int64", "shape": ["batch", MAX_TOKENS]},
+            "output": {"name": OUTPUT_NAME, "dtype": "float32", "shape": ["batch", DIM]},
+        },
+        "artifacts": records,
+        "reference_check": {
+            "performed": vision_cosine is not None,
+            "vision_cosine": vision_cosine,
+            "text_worst_cosine": text_cosine,
+        },
+        "rust_image_pin": {
+            "canonical_sha256": RUST_ACCEPTED_VISION_SHA256,
+            "accepted_sha256": sorted(RUST_ACCEPTED_VISION_SHA256S),
+            "matches": accepted,
+        },
+    }
+    path = out / PROVENANCE_FILE
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(provenance, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    print(f"provenance: {path}")
+    if side != IMAGE_SIDE:
+        print(f"WARNING: this export is {side}px; the Rust contract is {IMAGE_SIDE}px")
+    if not accepted:
+        print(
+            "WARNING: vision.onnx does not match the reviewed Rust digest; the bot will reject "
+            "it until the encoder space, dependent vectors/head and digest pin are reviewed together"
+        )
+    return path
+
+
 def report(*paths: pathlib.Path) -> None:
     print()
     for path in paths:
         print(f"{path} is {path.stat().st_size / (1024 * 1024):.0f} MB")
-    print("copy them next to the groupbot executable on the server")
+    print("keep the reviewed bundle together next to the groupbot executable on the server")
 
 
 if __name__ == "__main__":

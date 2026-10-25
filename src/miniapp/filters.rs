@@ -1,4 +1,3 @@
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,8 +31,35 @@ pub async fn create(
         )
             .into_response();
     }
-    match imgfilter::create_from_phrase(&ctx, gate.chat, body.phrase.trim()).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+    let phrase = body.phrase.trim();
+    let refused = |text: String| {
+        (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": text }))).into_response()
+    };
+    match imgfilter::create_from_phrase(&ctx, gate.chat, phrase).await {
+        Ok(imgfilter::Made::Filter { .. }) => StatusCode::NO_CONTENT.into_response(),
+        Ok(imgfilter::Made::Lock { name, .. }) => (
+            StatusCode::OK,
+            Json(json!({ "notice": format!("برای «{phrase}» قفل «{name}» فعال شد.") })),
+        )
+            .into_response(),
+        Ok(imgfilter::Made::Face) => (
+            StatusCode::OK,
+            Json(json!({ "notice": format!("قفل چهره «{phrase}» فعال شد؛ چهره او از قبل شناخته شده است.") })),
+        )
+            .into_response(),
+        Err(imgfilter::FilterError::Person) => refused(format!(
+            "«{phrase}» یک شخص است و از روی نام شناخته نمی شود؛ در گروه روی عکس چهره اش ریپلای کنید و بنویسید «قفل چهره {phrase}»."
+        )),
+        Err(imgfilter::FilterError::Indistinct(kind)) => refused(format!(
+            "«{phrase}» {} است و مدل تصویر آن را از نمونه های مشابهش تشخیص نمی دهد؛ فیلتری ساخته نشد.",
+            kind.word()
+        )),
+        Err(imgfilter::FilterError::NotUnderstood) => refused(format!(
+            "«{phrase}» برای مدل تصویر شناخته شده نیست؛ فیلتری ساخته نشد تا عکس های بی ربط حذف نشوند."
+        )),
+        Err(imgfilter::FilterError::NameTaken) => {
+            refused(format!("«{phrase}» نام یک قفل چهره است."))
+        }
         Err(imgfilter::FilterError::Invalid) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "این نام پذیرفته نمی شود: تا ۳۲ حرف، بدون : و = و <." })),
@@ -73,6 +99,11 @@ pub async fn toggle(
     match imgfilter::toggle_live(&ctx, gate.chat, &entry_key).await {
         imgfilter::Armed::Toggled => StatusCode::NO_CONTENT.into_response(),
         imgfilter::Armed::Missing => StatusCode::NOT_FOUND.into_response(),
+        imgfilter::Armed::Inert => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "مدل تصویر این موضوع را نمی شناسد و روشن کردنش چیزی را حذف نمی کند؛ حذفش کنید." })),
+        )
+            .into_response(),
         imgfilter::Armed::Database(error) => {
             ::log::warn!(
                 "miniapp: image filter toggle for {} failed: {error}",

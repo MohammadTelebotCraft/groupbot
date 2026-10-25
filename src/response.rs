@@ -1,4 +1,3 @@
-
 use std::fmt;
 use std::str::FromStr;
 
@@ -1091,7 +1090,9 @@ async fn edit_callback_message(
     message: InputMessage,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let grammers_client::tl::enums::Update::BotCallbackQuery(update) = query.raw() {
-        query.answer().send().await?;
+        if let Err(error) = query.answer().send().await {
+            log::debug!("panel callback already answered: {error}");
+        }
         client.edit_message(*peer, update.msg_id, message).await?;
     } else {
         query.answer().edit(message).await?;

@@ -8,16 +8,40 @@ use crate::response::ResponseKind;
 
 use super::Ctx;
 
-const START: &[&str] = &["ورود کلینر", "لاگین کلینر", "کلینر"];
-pub const ADD: &[&str] = &["افزودن کلینر", "اضافه کردن کلینر", "نصب کلینر"];
-pub const WIPE: &[&str] = &["حذف پیام", "حذف پیام ها", "پاکسازی پیام"];
-pub const SWEEP: &[&str] = &["پاکسازی", "پاک کردن همه"];
+const START: &[&str] = &["ورود کلینر", "لاگین کلینر", "کلینر", "/cleanerlogin"];
+pub const ADD: &[&str] = &[
+    "افزودن کلینر",
+    "اضافه کردن کلینر",
+    "نصب کلینر",
+    "اضافه کلینر",
+    "/addcleaner",
+    "راه اندازی کلینر",
+    "/setupcleaner",
+];
+pub const WIPE: &[&str] = &[
+    "حذف پیام های کاربر",
+    "پاکسازی پیام های کاربر",
+    "حذف پیام ها",
+    "پاکسازی پیام ها",
+    "حذف پیام",
+    "پاکسازی پیام",
+    "/wipe",
+    "/purgeuser",
+];
+pub const SWEEP: &[&str] = &[
+    "پاکسازی",
+    "پاک سازی",
+    "پاک کردن همه",
+    "/clean",
+    "/sweep",
+];
 
 const SWEEP_MAX: usize = 3_000;
 
 fn media_filter(name: &str) -> Option<(&'static str, grammers_client::tl::enums::MessagesFilter)> {
     use grammers_client::tl::types::*;
-    let found = match name {
+    let normalized = super::commands::normalize(name);
+    let found = match normalized.as_ref() {
         "عکس" | "تصویر" => ("عکس", InputMessagesFilterPhotos {}.into()),
         "ویدیو" | "فیلم" | "ویدئو" => ("ویدیو", InputMessagesFilterVideo {}.into()),
         "مدیا" | "رسانه" => ("مدیا", InputMessagesFilterPhotoVideo {}.into()),
@@ -38,6 +62,7 @@ fn media_filter(name: &str) -> Option<(&'static str, grammers_client::tl::enums:
 }
 
 const SEARCH_LIMIT: usize = 5_000;
+const RESTRICTED_PAGE: usize = 200;
 
 const DEADLINE: Duration = Duration::from_secs(300);
 
@@ -102,7 +127,7 @@ pub async fn install(ctx: &Ctx, chat_ref: PeerRef) -> std::result::Result<Instal
 }
 
 pub async fn add(ctx: &Ctx, message: &Message) -> bool {
-    if !ADD.contains(&message.text().trim()) {
+    if !super::commands::contains(ADD, message.text()) {
         return false;
     }
     if !super::limits::allows(ctx, message, super::limits::CLEAN).await {
@@ -255,18 +280,27 @@ pub async fn purge_history(
     chat: i64,
     max_id: i32,
 ) -> std::result::Result<usize, String> {
+    use grammers_client::session::types::PeerKind;
+
     let mut refused = None;
     if let Some(user) = ctx.user_client() {
         match chat_ref(ctx, &user, chat).await {
-            Some(chat_ref) => match delete_history_call(&user, chat_ref, max_id).await {
-                Ok(()) => return Ok(max_id as usize),
-                Err(e) => {
-                    let deleted = delete_range(&user, chat_ref, 1, max_id).await;
-                    if deleted > 0 {
-                        return Ok(deleted);
+            Some(chat_ref) if chat_ref.id.kind() == PeerKind::Channel => {
+                let (deleted, error) = purge_by_authors(&user, chat_ref, max_id).await;
+                match error {
+                    None => return Ok(deleted),
+                    Some(e) => {
+                        eprintln!("purge all: {chat}: cleaner stopped after {deleted}: {e}");
+                        if deleted > 0 {
+                            return Ok(deleted);
+                        }
+                        refused = Some(format!("کلینر · {}", refusal(&e)));
                     }
-                    refused = Some(format!("کلینر · {e}"));
                 }
+            }
+            Some(chat_ref) => match delete_range(&user, chat_ref, 1, max_id).await {
+                0 => refused = Some("کلینر نتوانست".to_owned()),
+                deleted => return Ok(deleted),
             },
             None => refused = Some("کلینر در این گروه نیست".to_owned()),
         }
@@ -287,40 +321,108 @@ pub async fn purge_history(
 async fn delete_range(client: &Client, chat_ref: PeerRef, first: i32, last: i32) -> usize {
     let first = first.max(last - RANGE_MAX + 1).max(1);
     let ids: Vec<i32> = (first..=last).collect();
-    let mut deleted = 0;
-    for chunk in ids.chunks(CHUNK) {
-        match client.delete_messages(chat_ref, chunk).await {
-            Ok(n) => deleted += n,
-            Err(e) => {
-                eprintln!("cleaner: delete range stopped at {}: {e}", chunk[0]);
-                break;
-            }
-        }
+    let (deleted, failed) = super::delete_chunks(client, chat_ref, &ids, CHUNK, false).await;
+    if let Some(e) = failed {
+        eprintln!("cleaner: delete range {first}..={last} stopped: {e}");
     }
     deleted
 }
 
-async fn delete_history_call(
+const PURGE_AUTHORS_AT_ONCE: usize = 8;
+
+const PURGE_READ_MAX: usize = 20_000;
+
+async fn purge_by_authors(
     client: &Client,
     chat_ref: PeerRef,
     max_id: i32,
-) -> std::result::Result<(), grammers_client::InvocationError> {
-    client
-        .invoke_outbound_critical(&grammers_client::tl::functions::channels::DeleteHistory {
-            for_everyone: true,
-            channel: chat_ref.into(),
-            max_id,
-        })
-        .await
-        .map(|_| ())
+) -> (usize, Option<grammers_client::InvocationError>) {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let deleted = AtomicUsize::new(0);
+    let stopped: Mutex<Option<grammers_client::InvocationError>> = Mutex::new(None);
+    let wipe = |target: PeerRef| {
+        let (deleted, stopped) = (&deleted, &stopped);
+        async move {
+            if stopped.lock().unwrap().is_some() {
+                return;
+            }
+            let history = delete_history(client, chat_ref, target).await;
+            deleted.fetch_add(history.deleted, Ordering::Relaxed);
+            match history.error {
+                Some(e) if stops_purge(&e) => {
+                    stopped.lock().unwrap().get_or_insert(e);
+                }
+                Some(e) => eprintln!("purge all: skipped {:?}: {e}", target.id),
+                None => {}
+            }
+        }
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut authors = Vec::with_capacity(PURGE_AUTHORS_AT_ONCE);
+    let mut orphans = Vec::new();
+    let mut messages = client
+        .iter_messages(chat_ref)
+        .offset_id(max_id.saturating_add(1))
+        .limit(PURGE_READ_MAX);
+    loop {
+        match messages.next().await {
+            Ok(Some(message)) => match message.sender_ref().await {
+                Ok(Some(author)) if author.id != chat_ref.id => {
+                    if seen.insert(author.id) {
+                        authors.push(author);
+                    } else {
+                        orphans.push(message.id());
+                    }
+                }
+                _ => orphans.push(message.id()),
+            },
+            Ok(None) => break,
+            Err(e) if stops_purge(&e) => {
+                stopped.lock().unwrap().get_or_insert(e);
+                break;
+            }
+            Err(e) => {
+                eprintln!("purge all: history scan cut short: {e}");
+                break;
+            }
+        }
+        if authors.len() >= PURGE_AUTHORS_AT_ONCE {
+            super::bounded(std::mem::take(&mut authors), PURGE_AUTHORS_AT_ONCE, &wipe).await;
+            if stopped.lock().unwrap().is_some() {
+                break;
+            }
+        }
+    }
+    super::bounded(authors, PURGE_AUTHORS_AT_ONCE, &wipe).await;
+    if let Some(e) = stopped.lock().unwrap().take() {
+        return (deleted.load(Ordering::Relaxed), Some(e));
+    }
+    let (by_id, failed) = super::delete_chunks(client, chat_ref, &orphans, CHUNK, false).await;
+    if let Some(e) = failed {
+        eprintln!("purge all: unauthored messages stopped: {e}");
+    }
+    (deleted.load(Ordering::Relaxed) + by_id, None)
+}
+
+fn stops_purge(e: &grammers_client::InvocationError) -> bool {
+    matches!(
+        e,
+        grammers_client::InvocationError::Rpc(rpc) if matches!(
+            rpc.name.as_str(),
+            "CHAT_ADMIN_REQUIRED" | "RIGHT_FORBIDDEN" | "CHANNEL_PRIVATE" | "CHANNEL_INVALID"
+        )
+    )
 }
 
 pub async fn sweep(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
-    let Some(rest) = SWEEP.iter().find_map(|command| {
-        let rest = text.strip_prefix(command)?;
-        rest.starts_with(char::is_whitespace).then(|| rest.trim())
-    }) else {
+    let Some(rest) = SWEEP
+        .iter()
+        .find_map(|command| super::commands::strip_prefix(text, command))
+    else {
         return false;
     };
     let Some((label, filter)) = media_filter(rest) else {
@@ -401,21 +503,16 @@ pub async fn sweep(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    let mut deleted = 0;
-    for chunk in ids.chunks(CHUNK) {
-        match user.delete_messages(chat_ref, chunk).await {
-            Ok(n) => deleted += n,
-            Err(e) => {
-                super::respond(
-                    ctx,
-                    message,
-                    ResponseKind::ModerationConfirmation,
-                    format!("{deleted} پیام پاک شد، بعد خطا داد · {e}"),
-                )
-                .await;
-                return true;
-            }
-        }
+    let (deleted, failed) = super::delete_chunks(&user, chat_ref, &ids, CHUNK, false).await;
+    if let Some(e) = failed {
+        super::respond(
+            ctx,
+            message,
+            ResponseKind::ModerationConfirmation,
+            format!("{deleted} پیام پاک شد، بعد خطا داد · {e}"),
+        )
+        .await;
+        return true;
     }
     super::respond(
         ctx,
@@ -432,12 +529,18 @@ pub async fn sweep(ctx: &Ctx, message: &Message) -> bool {
     true
 }
 
+fn wipe_argument(text: &str) -> Option<&str> {
+    WIPE.iter()
+        .filter_map(|command| {
+            super::commands::strip_prefix(text, command).map(|tail| (command, tail))
+        })
+        .max_by_key(|(command, _)| command.chars().count())
+        .map(|(_, tail)| tail)
+}
+
 pub async fn wipe(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
-    let Some(arg) = WIPE.iter().find_map(|command| {
-        let rest = text.strip_prefix(command)?;
-        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
-    }) else {
+    let Some(arg) = wipe_argument(text) else {
         return false;
     };
     let arg = (!arg.is_empty()).then_some(arg);
@@ -478,57 +581,91 @@ pub async fn wipe(ctx: &Ctx, message: &Message) -> bool {
         return true;
     }
 
-    let Some(done) = wipe_as_cleaner(ctx, chat, user_id, arg).await else {
-        super::respond(
-            ctx,
-            message,
-            ResponseKind::ModerationConfirmation,
-            "برای این کار کلینر لازم است. «افزودن کلینر» را بفرستید.",
-        )
-        .await;
-        return true;
-    };
-    match done {
-        Ok(()) => {
-            super::respond(
-                ctx,
-                message,
-                ResponseKind::ModerationConfirmation,
-                super::premium::icon_text(
-                    Some(super::premium::Icon::Delete),
-                    format!("پیام های {name} در این گروه پاک شد."),
-                ),
-            )
-            .await
-        }
-        Err(e) => {
-            eprintln!("wipe: {chat}: {e}");
-            super::respond(
-                ctx,
-                message,
-                ResponseKind::ModerationConfirmation,
-                super::premium::icon_text(
-                    Some(super::premium::Icon::ErrorRed),
-                    format!(
-                        "انجام نشد · {e}\n\
-                     برای پیام های قدیمی «افزودن کلینر» را بفرستید."
-                    ),
-                ),
-            )
-            .await
+    let reply = match wipe_as_cleaner(ctx, chat, user_id, arg).await {
+        Err(missing) => missing.reply().into(),
+        Ok(history) => {
+            if let Some(e) = &history.error {
+                eprintln!("wipe: {chat}: {e}");
+            }
+            let (icon, text) = history.reply(&name);
+            super::premium::icon_text(Some(icon), text)
         }
     };
+    super::respond(ctx, message, ResponseKind::ModerationConfirmation, reply).await;
     true
+}
+
+#[derive(Debug, PartialEq)]
+enum Missing {
+    Cleaner,
+    Chat,
+    Member,
+}
+
+impl Missing {
+    fn reply(&self) -> &'static str {
+        match self {
+            Missing::Cleaner => "برای این کار کلینر لازم است. «افزودن کلینر» را بفرستید.",
+            Missing::Chat => "کلینر عضو این گروه نیست. «افزودن کلینر» را بفرستید.",
+            Missing::Member => {
+                "کلینر این کاربر را پیدا نکرد. روی پیام او ریپلای کنید یا @username بفرستید."
+            }
+        }
+    }
+}
+
+pub(crate) struct History {
+    pub deleted: usize,
+    pub more: bool,
+    pub error: Option<grammers_client::InvocationError>,
+}
+
+impl History {
+    fn reply(&self, name: &str) -> (super::premium::Icon, String) {
+        use super::premium::Icon;
+        match (&self.error, self.deleted) {
+            (Some(e), 0) => (Icon::ErrorRed, refusal(e)),
+            (Some(e), deleted) => (
+                Icon::ErrorRed,
+                format!("{deleted} پیام از {name} پاک شد، بقیه انجام نشد · {}", refusal(e)),
+            ),
+            (None, 0) => (Icon::Delete, format!("پیامی از {name} در این گروه پیدا نشد.")),
+            (None, deleted) if self.more => (
+                Icon::Delete,
+                format!("{deleted} پیام از {name} پاک شد. برای بقیه دوباره بفرستید."),
+            ),
+            (None, deleted) => (
+                Icon::Delete,
+                format!("{deleted} پیام از {name} در این گروه پاک شد."),
+            ),
+        }
+    }
+}
+
+fn refusal(e: &grammers_client::InvocationError) -> String {
+    match e {
+        grammers_client::InvocationError::Rpc(rpc)
+            if matches!(rpc.name.as_str(), "CHAT_ADMIN_REQUIRED" | "RIGHT_FORBIDDEN") =>
+        {
+            "کلینر ادمین نیست یا حق حذف پیام ندارد.".to_owned()
+        }
+        grammers_client::InvocationError::Rpc(rpc)
+            if matches!(rpc.name.as_str(), "PARTICIPANT_ID_INVALID" | "USER_ID_INVALID") =>
+        {
+            "کلینر این کاربر را نمی شناسد.".to_owned()
+        }
+        e => format!("انجام نشد · {e}"),
+    }
 }
 
 pub async fn wipe_user(ctx: &Ctx, chat: i64, user_id: i64) -> bool {
     match wipe_as_cleaner(ctx, chat, user_id, None).await {
-        Some(Ok(())) => true,
-        Some(Err(e)) => {
+        Ok(History { error: None, .. }) => true,
+        Ok(History { error: Some(e), .. }) => {
             eprintln!("wipe_user: {chat}: {e}");
             false
         }
-        None => false,
+        Err(_) => false,
     }
 }
 
@@ -537,11 +674,13 @@ async fn wipe_as_cleaner(
     chat: i64,
     user_id: i64,
     arg: Option<&str>,
-) -> Option<std::result::Result<(), grammers_client::InvocationError>> {
-    let user = ctx.user_client()?;
-    let chat_ref = chat_ref(ctx, &user, chat).await?;
-    let target = member_ref(&user, chat_ref, user_id, arg).await?;
-    Some(delete_history(&user, chat_ref, target).await)
+) -> std::result::Result<History, Missing> {
+    let user = ctx.user_client().ok_or(Missing::Cleaner)?;
+    let chat_ref = chat_ref(ctx, &user, chat).await.ok_or(Missing::Chat)?;
+    let target = member_ref(&user, chat_ref, user_id, arg)
+        .await
+        .ok_or(Missing::Member)?;
+    Ok(delete_history(&user, chat_ref, target).await)
 }
 
 pub(crate) async fn member_ref(
@@ -550,6 +689,8 @@ pub(crate) async fn member_ref(
     user_id: i64,
     arg: Option<&str>,
 ) -> Option<PeerRef> {
+    use grammers_client::tl;
+
     if let Some(username) = arg.and_then(|arg| arg.strip_prefix('@'))
         && let Ok(Some(peer)) = user.resolve_username(username).await
         && let Ok(Some(peer_ref)) = peer.to_ref().await
@@ -561,6 +702,28 @@ pub(crate) async fn member_ref(
         && let Ok(Some(peer_ref)) = peer.to_ref().await
     {
         return Some(peer_ref);
+    }
+    for filter in [
+        tl::enums::ChannelParticipantsFilter::ChannelParticipantsKicked(
+            tl::types::ChannelParticipantsKicked { q: String::new() },
+        ),
+        tl::enums::ChannelParticipantsFilter::ChannelParticipantsBanned(
+            tl::types::ChannelParticipantsBanned { q: String::new() },
+        ),
+    ] {
+        let mut restricted = user.iter_participants(chat_ref).filter(filter);
+        let mut seen = 0;
+        while seen < RESTRICTED_PAGE
+            && let Ok(Some(participant)) = restricted.next().await
+        {
+            seen += 1;
+            if participant.id().bare_id() == Some(user_id)
+                && let Some(found) = participant.user()
+                && let Ok(Some(peer_ref)) = found.to_ref().await
+            {
+                return Some(peer_ref);
+            }
+        }
     }
     let mut participants = user.iter_participants(chat_ref);
     let mut seen = 0;
@@ -576,36 +739,48 @@ pub(crate) async fn member_ref(
     None
 }
 
-async fn delete_history(
-    client: &Client,
-    chat_ref: PeerRef,
-    target: PeerRef,
-) -> std::result::Result<(), grammers_client::InvocationError> {
-    client
-        .invoke_outbound(
-            &grammers_client::tl::functions::channels::DeleteParticipantHistory {
+const WIPE_ROUNDS: usize = 32;
+
+pub(crate) async fn delete_history(client: &Client, chat_ref: PeerRef, target: PeerRef) -> History {
+    use grammers_client::tl;
+
+    let mut history = History {
+        deleted: 0,
+        more: false,
+        error: None,
+    };
+    for _ in 0..WIPE_ROUNDS {
+        let asked = client
+            .invoke_outbound_critical(&tl::functions::channels::DeleteParticipantHistory {
                 channel: chat_ref.into(),
                 participant: target.into(),
-            },
-        )
-        .await
-        .map(|_| ())
+            })
+            .await;
+        match asked {
+            Ok(tl::enums::messages::AffectedHistory::History(done)) => {
+                history.deleted += done.pts_count.max(0) as usize;
+                history.more = done.offset != 0;
+                if !history.more {
+                    break;
+                }
+            }
+            Err(e) => {
+                history.error = Some(e);
+                break;
+            }
+        }
+    }
+    history
 }
 
 pub async fn purge(ctx: &Ctx, chat: i64, first: i32, last: i32) -> Option<usize> {
     let user = ctx.user_client()?;
     let chat_ref = chat_ref(ctx, &user, chat).await?;
     let ids: Vec<i32> = (first..=last).collect();
-    let mut deleted = 0;
-    for chunk in ids.chunks(CHUNK) {
-        match user.delete_messages(chat_ref, chunk).await {
-            Ok(n) => deleted += n,
-            Err(e) => {
-                eprintln!("cleaner: could not delete in {chat}: {e}");
-
-                return (deleted > 0).then_some(deleted);
-            }
-        }
+    let (deleted, failed) = super::delete_chunks(&user, chat_ref, &ids, CHUNK, false).await;
+    if let Some(e) = failed {
+        eprintln!("cleaner: could not delete in {chat}: {e}");
+        return (deleted > 0).then_some(deleted);
     }
     Some(deleted)
 }
@@ -635,10 +810,29 @@ pub(crate) async fn chat_ref(ctx: &Ctx, user: &Client, chat: i64) -> Option<Peer
     if let Some(peer) = ctx.user_chat(chat) {
         return Some(peer);
     }
+    if ctx.user_chat_absent(chat) {
+        return None;
+    }
+    let _walking = ctx.user_chats_walk().await;
+    if let Some(peer) = ctx.user_chat(chat) {
+        return Some(peer);
+    }
+    if ctx.user_chat_absent(chat) {
+        return None;
+    }
     let mut found = Vec::with_capacity(USER_CHATS_MAX);
     let mut requested = None;
     let mut dialogs = user.iter_dialogs();
-    while let Ok(Some(dialog)) = dialogs.next().await {
+    let mut complete = false;
+    loop {
+        let dialog = match dialogs.next().await {
+            Ok(Some(dialog)) => dialog,
+            Ok(None) => {
+                complete = true;
+                break;
+            }
+            Err(_) => break,
+        };
         let peer = dialog.peer();
         let Some(id) = peer.id().bot_api_dialog_id() else {
             continue;
@@ -670,6 +864,9 @@ pub(crate) async fn chat_ref(ctx: &Ctx, user: &Client, chat: i64) -> Option<Peer
         found.push((chat, peer));
     }
     ctx.set_user_chats(found);
+    if peer.is_none() && complete {
+        ctx.remember_user_chat_absent(chat);
+    }
     peer
 }
 
@@ -715,7 +912,7 @@ async fn promote(
 
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
-    if !START.contains(&text) {
+    if !super::commands::contains(START, text) {
         return false;
     }
     let sender = message
@@ -997,16 +1194,79 @@ fn qr_png(url: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod install_tests {
+    #[test]
+    fn wipe_uses_longest_alias_and_preserves_target() {
+        for command in [
+            "حذف پیام ها",
+            "حذف پيام\u{200c}ها",
+            "پاکسازی پیام های کاربر",
+            "/WIPE",
+        ] {
+            assert_eq!(
+                wipe_argument(&format!("{command} @Some_User")),
+                Some("@Some_User")
+            );
+        }
+        assert_eq!(wipe_argument("حذف پیام ها"), Some(""));
+        assert_eq!(wipe_argument("حذف پیامهایم"), None);
+        assert_eq!(wipe_argument("/wipe@otherbot @someone"), None);
+        assert!(media_filter("ويدئو").is_some());
+        assert!(media_filter("عکس های من").is_none());
+    }
     use super::*;
 
     #[test]
-    fn history_deletion_cannot_fall_back_to_the_ordinary_outbound_lane() {
+    fn purge_all_deletes_by_author_through_the_shared_history_loop() {
         let source = include_str!("cleaner.rs");
-        let start = source.find("async fn delete_history_call").unwrap();
-        let end = source[start..].find("\npub async fn sweep").unwrap() + start;
+        let start = source.find("async fn purge_by_authors").unwrap();
+        let end = source[start..].find("\nfn stops_purge").unwrap() + start;
         let implementation = &source[start..end];
-        assert!(implementation.contains("invoke_outbound_critical"));
+        assert!(implementation.contains("delete_history(client, chat_ref, target)"));
+        assert!(implementation.contains("iter_messages(chat_ref)"));
+        assert!(!implementation.contains("iter_participants"));
         assert!(!implementation.contains(".invoke_outbound("));
+        assert!(!source.contains(concat!("channels::Delete", "History {")));
+    }
+
+    #[test]
+    fn participant_history_is_deleted_until_telegram_has_no_offset_left() {
+        let source = include_str!("cleaner.rs");
+        let start = source.find("pub(crate) async fn delete_history(").unwrap();
+        let end = source[start..].find("\npub async fn purge").unwrap() + start;
+        let implementation = &source[start..end];
+        assert!(implementation.contains("for _ in 0..WIPE_ROUNDS"));
+        assert!(implementation.contains("done.offset != 0"));
+        assert!(implementation.contains("invoke_outbound_critical"));
+        assert_eq!(source.matches("DeleteParticipantHistory {").count(), 3);
+        assert!(!include_str!("restrict.rs").contains("DeleteParticipantHistory {"));
+    }
+
+    #[test]
+    fn a_wipe_reply_never_claims_what_did_not_happen() {
+        let rpc = |name: &str| {
+            grammers_client::InvocationError::Rpc(
+                grammers_client::tl::types::RpcError {
+                    error_code: 400,
+                    error_message: name.to_owned(),
+                }
+                .into(),
+            )
+        };
+        let history = |deleted, more, error| History {
+            deleted,
+            more,
+            error,
+        };
+        assert!(history(0, false, None).reply("x").1.contains("پیدا نشد"));
+        assert!(history(250, false, None).reply("x").1.contains("250 پیام"));
+        assert!(history(3200, true, None).reply("x").1.contains("دوباره بفرستید"));
+        let refused = history(0, false, Some(rpc("CHAT_ADMIN_REQUIRED"))).reply("x").1;
+        assert!(refused.contains("حق حذف پیام"));
+        assert!(!refused.contains("پاک شد"));
+        let partial = history(100, true, Some(rpc("FLOOD_WAIT_X"))).reply("x").1;
+        assert!(partial.contains("100 پیام") && partial.contains("بقیه انجام نشد"));
+        assert_ne!(Missing::Cleaner.reply(), Missing::Chat.reply());
+        assert_ne!(Missing::Chat.reply(), Missing::Member.reply());
     }
 
     #[test]

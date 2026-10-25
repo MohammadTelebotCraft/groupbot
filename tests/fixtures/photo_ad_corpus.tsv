@@ -1,0 +1,43 @@
+id	source	truth	old_outcome	language	category	text	expected
+prod-channel-1	production-journal	AD	FALSE_NEGATIVE	en	telegram-promotion	12:28 $f166 TeleBotCraft 12.1Ksubscribers PinnedMessage X us	BLOCK
+prod-channel-2	production-journal	AD	FALSE_NEGATIVE	en	telegram-promotion	1:070X *1l64 TorexcIusN OETT newscenter CENTER 45.6Ksubscrib	SUSPICIOUS
+prod-group-1	production-journal	AD	FALSE_NEGATIVE	en	telegram-promotion	33 2:43 : ID 6,642members,539online I C Message Unmute Leave	SUSPICIOUS
+ad-fa-phone	design-fixture	AD	FALSE_NEGATIVE	fa	shop	فروش ویژه تماس ۰۹۱۲۱۲۳۴۵۶۷	BLOCK
+ad-fa-price-user	design-fixture	AD	FALSE_NEGATIVE	fa	shop	تخفیف قیمت ۱۰۰٬۰۰۰ تومان @shop_channel	BLOCK
+ad-fa-order-user	design-fixture	AD	FALSE_NEGATIVE	fa	shop	فروش ویژه ثبت سفارش @myshop	BLOCK
+ad-fa-url	design-fixture	AD	FALSE_NEGATIVE	fa	service	فروش ویژه ثبت سفارش در example.ir	BLOCK
+ad-fa-tatweel	design-fixture	AD	FALSE_NEGATIVE	fa	shop	فــروش خــریــد تماس 09121234567	BLOCK
+ad-fa-spaced	design-fixture	AD	FALSE_NEGATIVE	fa	shop	ف ر و ش ویژه تماس 09121234567	BLOCK
+ad-fa-plus98	design-fixture	AD	FALSE_NEGATIVE	fa	service	فروش خدمات جهت سفارش تماس +98 912 123 4567	BLOCK
+ad-fa-0098	design-fixture	AD	FALSE_NEGATIVE	fa	service	فروش تماس 0098-912-123-4567	BLOCK
+ad-en-link	design-fixture	AD	TRUE_POSITIVE	en	shop	SALE 50% ORDER NOW t.me/shop	BLOCK
+ad-en-web	design-fixture	AD	TRUE_POSITIVE	en	shop	DM for price https://shop.example.com	BLOCK
+ad-en-phone	design-fixture	AD	FALSE_NEGATIVE	en	service	SALE CONTACT NOW +1 415 555 0123	BLOCK
+ad-mixed-user	design-fixture	AD	FALSE_NEGATIVE	mixed	shop	فروش iPhone DM @iphone_store	BLOCK
+ad-mixed-price	design-fixture	AD	FALSE_NEGATIVE	mixed	crypto	خرید USDT قیمت 150k تماس 09121234567	BLOCK
+ad-telegram-obfuscated	design-fixture	AD	TRUE_POSITIVE	mixed	channel	PROMO t. me/deals	BLOCK
+ad-english-obfuscated	design-fixture	AD	FALSE_NEGATIVE	en	shop	S4LE BUY NOW https://store.example	BLOCK
+legit-sale-word	design-fixture	LEGIT	TRUE_NEGATIVE	fa	news	فروش سهام شرکت در بورس بررسی شد	SUSPICIOUS
+legit-url	design-fixture	LEGIT	TRUE_NEGATIVE	en	tutorial	https://example.com	ALLOW
+legit-telegram-link	design-fixture	LEGIT	TRUE_NEGATIVE	en	chat	t.me/news	ALLOW
+ambiguous-standalone-user	design-fixture	AMBIGUOUS	TRUE_NEGATIVE	en	watermark-or-promotion	@channelname	BLOCK
+legit-phone	design-fixture	LEGIT	TRUE_NEGATIVE	fa	receipt	09121234567	ALLOW
+legit-price	design-fixture	LEGIT	TRUE_NEGATIVE	fa	receipt	100,000 تومان	ALLOW
+legit-receipt	design-fixture	LEGIT	TRUE_NEGATIVE	fa	receipt	رسید خرید شماره 1234567 مبلغ 100,000 تومان	SUSPICIOUS
+legit-price-discussion	design-fixture	LEGIT	TRUE_NEGATIVE	fa	product-discussion	برای خرید آیفون، قیمت 100,000 تومان منطقی است؟	SUSPICIOUS
+legit-chat-handle	design-fixture	LEGIT	TRUE_NEGATIVE	en	chat	chat with @friendname about the news	ALLOW
+legit-news-domain	design-fixture	LEGIT	TRUE_NEGATIVE	fa	news	خبر فروش شرکت در example.com منتشر شد	SUSPICIOUS
+legit-members	design-fixture	LEGIT	TRUE_NEGATIVE	en	chat	members online now	ALLOW
+legit-channel-stats	design-fixture	LEGIT	TRUE_NEGATIVE	en	news	گزارش آماری: 12.1K subscribers	SUSPICIOUS
+legit-pi	design-fixture	LEGIT	TRUE_NEGATIVE	en	education	3.1416 and 12.1K subscribers	SUSPICIOUS
+legit-email	design-fixture	LEGIT	TRUE_NEGATIVE	en	chat	name@example.com	ALLOW
+legit-case-number	design-fixture	LEGIT	TRUE_NEGATIVE	fa	document	سال 2024، شماره پرونده 1234567	ALLOW
+legit-order-tutorial	design-fixture	LEGIT	TRUE_NEGATIVE	fa	education	آموزش ثبت سفارش و پیام بده	SUSPICIOUS
+legit-commercial-quote	design-fixture	LEGIT	TRUE_NEGATIVE	fa	quote	او نوشت فروش ویژه ثبت سفارش	SUSPICIOUS
+legit-contact-page	design-fixture	LEGIT	TRUE_NEGATIVE	en	screenshot	Contact us at https://university.example.edu	SUSPICIOUS
+legit-news-telegram	design-fixture	LEGIT	TRUE_NEGATIVE	fa	news	اطلاعات بیشتر در کانال t.me/news	SUSPICIOUS
+legit-news-phone	design-fixture	LEGIT	TRUE_NEGATIVE	fa	news	خبر فروش سهام؛ تماس 09121234567	SUSPICIOUS
+legit-price-url	design-fixture	LEGIT	TRUE_NEGATIVE	fa	report	گزارش قیمت 100 تومان در example.com	SUSPICIOUS
+legit-workshop-url	design-fixture	LEGIT	TRUE_NEGATIVE	en	education	Contact us for a workshop at university.example.edu	SUSPICIOUS
+ambiguous-marketplace	design-fixture	AMBIGUOUS	AMBIGUOUS	fa	marketplace	قیمت دوچرخه 5 میلیون، کسی تجربه خرید دارد؟	SUSPICIOUS
+ambiguous-logo	design-fixture	AMBIGUOUS	AMBIGUOUS	none	visual-only	[logo/product photo, no text]	ALLOW
