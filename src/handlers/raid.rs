@@ -177,6 +177,10 @@ async fn surge(ctx: &Ctx, chat: i64, chat_ref: PeerRef, arrivals: Vec<Newcomer>)
         .await
         {
             Ok(_) => muted += 1,
+            Err(e) if stops_the_wave(&e) => {
+                eprintln!("raid: {chat}: stopped muting at {}: {e}", member.id);
+                break;
+            }
             Err(e) => eprintln!("raid: {chat}: could not mute {}: {e}", member.id),
         }
     }
@@ -212,4 +216,39 @@ async fn surge(ctx: &Ctx, chat: i64, chat_ref: PeerRef, arrivals: Vec<Newcomer>)
             ),
         )
         .await;
+}
+
+fn stops_the_wave(error: &restrict::Failed) -> bool {
+    match error {
+        restrict::Failed::BasicGroup => true,
+        restrict::Failed::Telegram(grammers_client::InvocationError::Rpc(rpc)) => {
+            rpc.code == 420
+                || matches!(
+                    rpc.name.as_str(),
+                    "CHAT_ADMIN_REQUIRED" | "RIGHT_FORBIDDEN" | "CHANNEL_PRIVATE" | "CHANNEL_INVALID"
+                )
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_refusal_about_the_bot_stops_the_wave_and_one_about_a_member_does_not() {
+        let rpc = |code: i32, message: &str| {
+            super::restrict::Failed::Telegram(grammers_client::InvocationError::Rpc(
+                grammers_client::tl::types::RpcError {
+                    error_code: code,
+                    error_message: message.to_owned(),
+                }
+                .into(),
+            ))
+        };
+        assert!(super::stops_the_wave(&rpc(400, "CHAT_ADMIN_REQUIRED")));
+        assert!(super::stops_the_wave(&rpc(420, "FLOOD_WAIT_300")));
+        assert!(super::stops_the_wave(&super::restrict::Failed::BasicGroup));
+        assert!(!super::stops_the_wave(&rpc(400, "USER_ADMIN_INVALID")));
+        assert!(!super::stops_the_wave(&super::restrict::Failed::Protected));
+    }
 }

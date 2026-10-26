@@ -210,10 +210,11 @@ pub async fn prime(ctx: &Ctx) -> Result<(), crate::state::SettingsWriteError> {
     let mut on = Vec::new();
     let mut off = Vec::new();
     for chat in gated {
-        if channel(ctx, chat).is_some() || required_adds(ctx, chat) > 0 {
-            on.push(chat);
-        } else {
-            off.push(chat);
+        let wanted = channel(ctx, chat).is_some() || required_adds(ctx, chat) > 0;
+        match (wanted, ctx.settings.is_locked(chat, GATE)) {
+            (true, false) => on.push(chat),
+            (false, true) => off.push(chat),
+            _ => {}
         }
     }
     ctx.settings.set_flags(&on, GATE, true).await?;
@@ -598,20 +599,27 @@ pub async fn enforce(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
     if super::is_exempt(ctx, message).await {
         return false;
     }
-    let added = match super::stats::adds(ctx, chat, user).await {
-        Ok(added) => added,
-        Err(error) => {
-            log::warn!("join gate: add-count read for {chat}/{user} failed: {error}");
-            return false;
+    let added = if needed == 0 {
+        0
+    } else {
+        match super::stats::adds(ctx, chat, user).await {
+            Ok(added) => added,
+            Err(error) => {
+                log::warn!("join gate: add-count read for {chat}/{user} failed: {error}");
+                return false;
+            }
         }
     };
     let owes_adds = added < needed;
     let missing_channel = match &channel {
         Some(_) if ctx.channel_member(chat, user) => false,
+        Some(_) if ctx.known_nonmember(chat, user) => true,
         Some(name) => {
             let member = is_member(ctx, name, message.sender_ref().await.ok().flatten()).await;
             if member {
                 ctx.remember_member(chat, user);
+            } else {
+                ctx.remember_nonmember(chat, user);
             }
             !member
         }
@@ -778,13 +786,20 @@ async fn is_member(ctx: &Ctx, name: &str, user: Option<PeerRef>) -> bool {
 }
 
 async fn channel_ref(ctx: &Ctx, name: &str) -> Option<PeerRef> {
-    if let Some(peer) = ctx.join_ref(name) {
-        return Some(peer);
+    if let Some(known) = ctx.join_ref(name) {
+        return known;
     }
-    let peer = ctx.client.resolve_username(name).await.ok()??;
-    let peer = peer.to_ref().await.ok()??;
+    let peer = match ctx.client.resolve_username(name).await {
+        Ok(Some(found)) => found.to_ref().await.ok().flatten(),
+        Ok(None) => None,
+        Err(grammers_client::InvocationError::Rpc(rpc)) if rpc.code == 400 => None,
+        Err(e) => {
+            eprintln!("join lock: cannot resolve @{name}: {e}");
+            return None;
+        }
+    };
     ctx.remember_join_ref(name, peer);
-    Some(peer)
+    peer
 }
 
 #[cfg(test)]
@@ -847,5 +862,59 @@ mod tests {
             );
         }
         assert!(ADD_RANGE.0 == 0, "zero has to stay a way to switch it off");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]
+    async fn prime_repairs_only_the_flags_that_are_wrong() {
+        const NEEDS: i64 = -100_777_000_130;
+        const STALE: i64 = -100_777_000_131;
+        let (ctx, _pool) = super::super::live_ctx().await;
+        for chat in [NEEDS, STALE] {
+            ctx.settings.try_set_value(chat, "hash", "1").await.unwrap();
+            ctx.settings.try_set(chat, CHANNEL, false).await.unwrap();
+            ctx.settings.try_set(chat, GATE, false).await.unwrap();
+        }
+        ctx.settings
+            .try_set_value(NEEDS, CHANNEL, "somechannel")
+            .await
+            .unwrap();
+        ctx.settings.try_set(STALE, GATE, true).await.unwrap();
+
+        prime(&ctx).await.unwrap();
+        assert!(ctx.settings.is_locked(NEEDS, GATE));
+        assert!(!ctx.settings.is_locked(STALE, GATE));
+        prime(&ctx).await.unwrap();
+        assert!(ctx.settings.is_locked(NEEDS, GATE));
+        assert!(!ctx.settings.is_locked(STALE, GATE));
+
+        for chat in [NEEDS, STALE] {
+            ctx.settings.try_set(chat, CHANNEL, false).await.unwrap();
+            ctx.settings.try_set(chat, GATE, false).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]
+    async fn the_gate_remembers_what_telegram_already_answered() {
+        const CHAT: i64 = -100_777_000_126;
+        let (ctx, _pool) = super::super::live_ctx().await;
+
+        assert_eq!(ctx.join_ref("gone_channel"), None);
+        ctx.remember_join_ref("gone_channel", None);
+        assert_eq!(ctx.join_ref("gone_channel"), Some(None));
+        assert_eq!(channel_ref(&ctx, "gone_channel").await, None);
+
+        let peer = PeerId::channel(1).unwrap().to_ambient_ref();
+        for n in 0..10_001 {
+            ctx.remember_join_ref(&format!("c{n}"), Some(peer));
+        }
+        assert_eq!(ctx.join_ref("c10000"), Some(Some(peer)));
+
+        assert!(!ctx.known_nonmember(CHAT, 5));
+        ctx.remember_nonmember(CHAT, 5);
+        assert!(ctx.known_nonmember(CHAT, 5));
+        ctx.forget_member(CHAT, 5);
+        assert!(!ctx.known_nonmember(CHAT, 5));
     }
 }

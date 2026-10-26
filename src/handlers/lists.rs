@@ -1,5 +1,10 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
 use grammers_client::message::{Button, Message, ReplyMarkup};
-use grammers_client::session::types::PeerRef;
+use grammers_client::session::types::{PeerKind, PeerRef};
 use grammers_client::tl;
 
 use crate::response::ResponseKind;
@@ -13,6 +18,8 @@ pub enum MutationError {
     Database(sqlx::Error),
     Image(imgfilter::DeleteError),
     Restriction(restrict::Failed),
+    Busy,
+    Interrupted,
 }
 
 impl MutationError {
@@ -20,7 +27,18 @@ impl MutationError {
         match self {
             Self::Settings(error) => error.commit_outcome_unknown(),
             Self::Image(imgfilter::DeleteError::Setting(error)) => error.commit_outcome_unknown(),
-            Self::Database(_) | Self::Image(_) | Self::Restriction(_) => false,
+            Self::Database(_)
+            | Self::Image(_)
+            | Self::Restriction(_)
+            | Self::Busy
+            | Self::Interrupted => false,
+        }
+    }
+
+    pub fn told(&self) -> &'static str {
+        match self {
+            Self::Busy => "پاکسازی لیست بن یا سکوت این گروه همین حالا در جریان است.",
+            _ => "پاکسازی کامل نشد؛ دوباره تلاش کنید.",
         }
     }
 }
@@ -32,6 +50,8 @@ impl std::fmt::Display for MutationError {
             Self::Database(error) => error.fmt(formatter),
             Self::Image(error) => error.fmt(formatter),
             Self::Restriction(error) => error.fmt(formatter),
+            Self::Busy => formatter.write_str("a member-list clear is already running"),
+            Self::Interrupted => formatter.write_str("the clear stopped before it answered"),
         }
     }
 }
@@ -42,9 +62,14 @@ impl std::error::Error for MutationError {
             Self::Settings(error) => Some(error),
             Self::Database(error) => Some(error),
             Self::Image(error) => Some(error),
-            Self::Restriction(_) => None,
+            Self::Restriction(_) | Self::Busy | Self::Interrupted => None,
         }
     }
+}
+
+pub enum Cleared {
+    Done(usize),
+    Continuing(usize),
 }
 
 impl From<crate::state::SettingsWriteError> for MutationError {
@@ -149,7 +174,7 @@ pub const CLEAR: &[(&str, Kind)] = &[
     ("/clearpacklist", Kind::Pack),
 ];
 
-pub async fn command(ctx: &Ctx, message: &Message) -> bool {
+pub async fn command(ctx: &Arc<Ctx>, message: &Message) -> bool {
     let text = message.text().trim();
     let show = SHOW
         .iter()
@@ -172,7 +197,7 @@ pub async fn command(ctx: &Ctx, message: &Message) -> bool {
 
     if clear.is_some() {
         match clear_all(ctx, chat_ref, chat, kind).await {
-            Ok(removed) => {
+            Ok(Cleared::Done(removed)) => {
                 super::respond(
                     ctx,
                     message,
@@ -184,15 +209,21 @@ pub async fn command(ctx: &Ctx, message: &Message) -> bool {
                 )
                 .await
             }
-            Err(error) => {
-                ::log::warn!("lists: clear {} for {chat} failed: {error}", kind.title());
+            Ok(Cleared::Continuing(removed)) => {
                 super::respond(
                     ctx,
                     message,
-                    ResponseKind::CommandError,
-                    "پاکسازی کامل نشد؛ دوباره تلاش کنید.",
+                    ResponseKind::AdminTool,
+                    super::premium::icon_html(
+                        Some(super::premium::Icon::Hourglass),
+                        continuing(kind, removed),
+                    ),
                 )
                 .await
+            }
+            Err(error) => {
+                ::log::warn!("lists: clear {} for {chat} failed: {error}", kind.title());
+                super::respond(ctx, message, ResponseKind::CommandError, error.told()).await
             }
         }
         return true;
@@ -229,11 +260,11 @@ pub async fn command(ctx: &Ctx, message: &Message) -> bool {
 }
 
 pub async fn clear_all(
-    ctx: &Ctx,
+    ctx: &Arc<Ctx>,
     chat_ref: PeerRef,
     chat: i64,
     kind: Kind,
-) -> Result<usize, MutationError> {
+) -> Result<Cleared, MutationError> {
     match kind {
         Kind::Ban | Kind::Mute => clear_members(ctx, chat_ref, chat, kind).await,
         Kind::Image => {
@@ -241,7 +272,7 @@ pub async fn clear_all(
             for (name, _) in &filters {
                 imgfilter::try_forget(ctx, chat, name).await?;
             }
-            Ok(filters.len())
+            Ok(Cleared::Done(filters.len()))
         }
         Kind::Vip | Kind::Filter | Kind::Answer | Kind::Exempt | Kind::Command | Kind::Pack => {
             let keys = setting_keys(ctx, chat, kind);
@@ -249,9 +280,20 @@ pub async fn clear_all(
                 .iter()
                 .map(|key| crate::state::SettingMutation::Delete { key })
                 .collect();
-            Ok(ctx.settings.try_apply_batch(chat, &mutations).await?)
+            Ok(Cleared::Done(
+                ctx.settings.try_apply_batch(chat, &mutations).await?,
+            ))
         }
     }
+}
+
+fn continuing(kind: Kind, removed: usize) -> String {
+    format!(
+        "<b>پاکسازی {}</b>\n\n\
+         حذف شده تا اینجا · <b>{removed}</b>\n\n\
+         <i>بقیه در پس زمینه ادامه دارد و پایانش در گروه اعلام می شود.</i>",
+        kind.title()
+    )
 }
 
 fn setting_keys(ctx: &Ctx, chat: i64, kind: Kind) -> Vec<String> {
@@ -291,39 +333,158 @@ fn setting_keys(ctx: &Ctx, chat: i64, kind: Kind) -> Vec<String> {
     keys
 }
 
-const CLEAR_PARALLEL: usize = super::FLEET_CAMPAIGNS;
+pub(super) const CLEAR_PARALLEL: usize = super::FLEET_CAMPAIGNS;
 
 const CLEAR_ROUND: usize = 200;
 
+const CLEAR_INLINE: Duration = Duration::from_secs(10);
+
+const CLEAR_REASON: &str = "پنل لیست ها";
+
+struct MemberClear(Arc<super::ChatState>);
+
+impl MemberClear {
+    fn claim(ctx: &Ctx, chat: i64) -> Option<Self> {
+        let state = ctx.try_state(chat)?;
+        state.claim_member_clear().then(|| Self(state))
+    }
+}
+
+impl Drop for MemberClear {
+    fn drop(&mut self) {
+        self.0.end_member_clear();
+    }
+}
+
 async fn clear_members(
+    ctx: &Arc<Ctx>,
+    chat_ref: PeerRef,
+    chat: i64,
+    kind: Kind,
+) -> Result<Cleared, MutationError> {
+    if chat_ref.id.kind() != PeerKind::Channel {
+        return Ok(Cleared::Done(0));
+    }
+    let claim = MemberClear::claim(ctx, chat).ok_or(MutationError::Busy)?;
+    let removed = Arc::new(AtomicUsize::new(0));
+    let (answer, mut answered) = tokio::sync::oneshot::channel();
+    let run = {
+        let ctx = Arc::clone(ctx);
+        let removed = Arc::clone(&removed);
+        async move {
+            let _claim = claim;
+            let outcome = unban_all(&ctx, chat_ref, chat, kind, &removed).await;
+            let total = removed.load(Ordering::Relaxed);
+            if total > 0 {
+                super::log::write(
+                    &ctx,
+                    chat,
+                    "log_mod",
+                    super::log::Entry {
+                        title: match kind {
+                            Kind::Ban => "پاکسازی لیست بن",
+                            _ => "پاکسازی لیست سکوت",
+                        },
+                        target: None,
+                        actor: None,
+                        reason: Some(CLEAR_REASON),
+                        extra: vec![("تعداد", total.to_string())],
+                    },
+                )
+                .await;
+            }
+            if let Err(outcome) = answer.send(outcome) {
+                announce(&ctx, chat_ref, chat, kind, total, outcome).await;
+            }
+        }
+    };
+    Arc::clone(ctx).spawn_owned(run);
+    match hand_off(&mut answered, CLEAR_INLINE).await {
+        Handoff::Answered(outcome) => outcome.map(Cleared::Done),
+        Handoff::Continuing => Ok(Cleared::Continuing(removed.load(Ordering::Relaxed))),
+        Handoff::Dropped => Err(MutationError::Interrupted),
+    }
+}
+
+enum Handoff<T> {
+    Answered(T),
+    Continuing,
+    Dropped,
+}
+
+async fn hand_off<T>(
+    answered: &mut tokio::sync::oneshot::Receiver<T>,
+    wait: Duration,
+) -> Handoff<T> {
+    match tokio::time::timeout(wait, &mut *answered).await {
+        Ok(Ok(answer)) => Handoff::Answered(answer),
+        Ok(Err(_)) => Handoff::Dropped,
+        Err(_) => {
+            answered.close();
+            match answered.try_recv() {
+                Ok(answer) => Handoff::Answered(answer),
+                Err(_) => Handoff::Continuing,
+            }
+        }
+    }
+}
+
+async fn announce(
     ctx: &Ctx,
     chat_ref: PeerRef,
     chat: i64,
     kind: Kind,
+    removed: usize,
+    outcome: Result<usize, MutationError>,
+) {
+    let mut text = format!(
+        "<b>پاکسازی {}</b>\n\nحذف شده · <b>{removed}</b>",
+        kind.title()
+    );
+    if let Err(error) = &outcome {
+        ::log::warn!("lists: clear {} for {chat} stopped: {error}", kind.title());
+        text.push_str("\n\n");
+        text.push_str(&match error {
+            MutationError::Restriction(failed) => failed.told(),
+            other => format!("✗ {}", other.told()),
+        });
+    }
+    if let Err(error) = ctx
+        .client
+        .send_message(
+            chat_ref,
+            super::premium::icon_html(Some(super::premium::Icon::Delete), text),
+        )
+        .await
+    {
+        eprintln!("lists: {chat}: could not announce the clear: {error}");
+    }
+}
+
+async fn unban_all(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    chat: i64,
+    kind: Kind,
+    removed: &AtomicUsize,
 ) -> Result<usize, MutationError> {
-    let removed = std::sync::atomic::AtomicUsize::new(0);
-    let failed: std::sync::Mutex<Option<restrict::Failed>> = std::sync::Mutex::new(None);
-    let mut seen = std::collections::HashSet::new();
+    let stopped: std::sync::Mutex<Option<restrict::Failed>> = std::sync::Mutex::new(None);
+    let mut seen = HashSet::new();
     loop {
-        let round: Vec<PeerRef> = entries(ctx, chat_ref, chat, kind, CLEAR_ROUND)
-            .await?
-            .into_iter()
-            .filter(|entry| seen.insert(entry.key.clone()))
-            .filter_map(|entry| {
-                if entry.peer.is_none() {
-                    eprintln!("lists: {chat}: no ref for user {}", entry.key);
-                }
-                entry.peer
-            })
-            .collect();
+        let round = next_round(ctx, chat_ref, chat, kind, &mut seen)
+            .await
+            .map_err(|error| MutationError::Restriction(restrict::Failed::Telegram(error)))?;
         if round.is_empty() {
             break;
         }
         super::bounded(round, CLEAR_PARALLEL, |peer| {
-            let removed = &removed;
-            let failed = &failed;
+            let stopped = &stopped;
             async move {
-                if failed.lock().unwrap().is_some() {
+                if stopped.lock().unwrap().is_some() {
+                    return;
+                }
+                let _turn = ctx.list_unban().await;
+                if stopped.lock().unwrap().is_some() {
                     return;
                 }
                 match restrict::apply_maintenance(
@@ -333,27 +494,81 @@ async fn clear_members(
                     Action::Unban,
                     None,
                     restrict::By {
-                        reason: "پنل لیست ها",
+                        reason: CLEAR_REASON,
+                        unlogged: true,
                         ..Default::default()
                     },
                 )
                 .await
                 {
                     Ok(_) => {
-                        removed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        removed.fetch_add(1, Ordering::Relaxed);
                     }
-                    Err(error) => {
-                        failed.lock().unwrap().get_or_insert(error);
+                    Err(error) if stops_clear(&error) => {
+                        stopped.lock().unwrap().get_or_insert(error);
                     }
+                    Err(error) => eprintln!("lists: {chat}: skipped {:?}: {error}", peer.id),
                 }
             }
         })
         .await;
-        if let Some(error) = failed.lock().unwrap().take() {
+        if let Some(error) = stopped.lock().unwrap().take() {
             return Err(MutationError::Restriction(error));
         }
     }
-    Ok(removed.into_inner())
+    Ok(removed.load(Ordering::Relaxed))
+}
+
+fn stops_clear(error: &restrict::Failed) -> bool {
+    match error {
+        restrict::Failed::Telegram(grammers_client::InvocationError::Rpc(rpc)) => {
+            rpc.code == 420
+                || matches!(
+                    rpc.name.as_str(),
+                    "CHAT_ADMIN_REQUIRED"
+                        | "RIGHT_FORBIDDEN"
+                        | "CHAT_WRITE_FORBIDDEN"
+                        | "CHANNEL_PRIVATE"
+                        | "CHANNEL_INVALID"
+                        | "CHAT_INVALID"
+                )
+        }
+        restrict::Failed::Protected => false,
+        restrict::Failed::Telegram(_)
+        | restrict::Failed::State(_)
+        | restrict::Failed::BasicGroup => true,
+    }
+}
+
+async fn next_round(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    chat: i64,
+    kind: Kind,
+    seen: &mut HashSet<i64>,
+) -> Result<Vec<PeerRef>, grammers_client::InvocationError> {
+    let mut participants = ctx.client.iter_participants(chat_ref).filter(kind.filter());
+    let mut round = Vec::with_capacity(CLEAR_ROUND);
+    while round.len() < CLEAR_ROUND {
+        let Some(participant) = participants.next().await? else {
+            break;
+        };
+        let Some(id) = participant.id().bare_id() else {
+            continue;
+        };
+        if !seen.insert(id) {
+            continue;
+        }
+        let peer = match participant.peer() {
+            Some(peer) => peer.to_ref().await.ok().flatten(),
+            None => None,
+        };
+        match peer {
+            Some(peer) => round.push(peer),
+            None => eprintln!("lists: {chat}: no ref for user {id}"),
+        }
+    }
+    Ok(round)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -808,7 +1023,7 @@ async fn listed_member(
     kind: Kind,
     user_id: i64,
 ) -> Result<Option<PeerRef>, sqlx::Error> {
-    use grammers_client::session::types::{PeerAuth, PeerId, PeerKind};
+    use grammers_client::session::types::{PeerAuth, PeerId};
 
     if chat_ref.id.kind() == PeerKind::Channel
         && let Some(target) = PeerId::user(user_id).map(PeerId::to_ambient_ref)
@@ -845,6 +1060,10 @@ async fn listed_member(
             {
                 return Ok(None);
             }
+            Err(grammers_client::InvocationError::Rpc(error)) if error.code == 420 => {
+                eprintln!("lists: {chat}: could not look up {user_id}: {error}");
+                return Ok(None);
+            }
             Err(error) => eprintln!("lists: {chat}: could not look up {user_id}: {error}"),
         }
     }
@@ -863,6 +1082,9 @@ async fn walk(
     kind: Kind,
     limit: usize,
 ) -> (Vec<Entry>, usize) {
+    if chat_ref.id.kind() != PeerKind::Channel {
+        return (Vec::new(), 0);
+    }
     let mut participants = ctx.client.iter_participants(chat_ref).filter(kind.filter());
     let mut found = Vec::with_capacity(limit.min(LIMIT * 16));
     while found.len() < limit {
@@ -931,6 +1153,92 @@ mod tests {
             2
         );
         assert!(!production.contains("restrict::apply("));
+    }
+
+    #[test]
+    fn a_clear_stops_for_the_chat_and_skips_for_a_member() {
+        let rpc = |code: i32, name: &str| {
+            restrict::Failed::Telegram(grammers_client::InvocationError::Rpc(
+                grammers_client::tl::types::RpcError {
+                    error_code: code,
+                    error_message: name.to_owned(),
+                }
+                .into(),
+            ))
+        };
+        for name in [
+            "CHAT_ADMIN_REQUIRED",
+            "RIGHT_FORBIDDEN",
+            "CHANNEL_PRIVATE",
+            "CHANNEL_INVALID",
+            "CHAT_INVALID",
+        ] {
+            assert!(stops_clear(&rpc(400, name)), "{name}");
+        }
+        assert!(stops_clear(&rpc(420, "FLOOD_WAIT_30")));
+        assert!(stops_clear(&restrict::Failed::BasicGroup));
+        for name in [
+            "USER_ID_INVALID",
+            "PARTICIPANT_ID_INVALID",
+            "INPUT_USER_DEACTIVATED",
+            "USER_NOT_PARTICIPANT",
+        ] {
+            assert!(!stops_clear(&rpc(400, name)), "{name}");
+        }
+        assert!(!stops_clear(&restrict::Failed::Protected));
+    }
+
+    #[tokio::test]
+    async fn a_clear_is_answered_or_handed_to_the_run_never_lost() {
+        let wait = Duration::from_millis(20);
+
+        let (answer, mut answered) = tokio::sync::oneshot::channel();
+        answer.send(7).unwrap();
+        assert!(matches!(
+            hand_off(&mut answered, wait).await,
+            Handoff::Answered(7)
+        ));
+
+        let (answer, mut answered) = tokio::sync::oneshot::channel::<i32>();
+        assert!(matches!(
+            hand_off(&mut answered, wait).await,
+            Handoff::Continuing
+        ));
+        assert_eq!(answer.send(7), Err(7), "the run must learn it has to announce");
+
+        let (answer, mut answered) = tokio::sync::oneshot::channel::<i32>();
+        drop(answer);
+        assert!(matches!(
+            hand_off(&mut answered, wait).await,
+            Handoff::Dropped
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]
+    async fn one_member_clear_per_chat_and_none_in_a_basic_group() {
+        use grammers_client::session::types::{PeerAuth, PeerId};
+
+        let (ctx, _pool) = super::super::live_ctx().await;
+        let ctx = Arc::new(ctx);
+        let chat = -1_009_999_000_123;
+        let first = MemberClear::claim(&ctx, chat).expect("no clear is running");
+        assert!(MemberClear::claim(&ctx, chat).is_none());
+        drop(first);
+        assert!(MemberClear::claim(&ctx, chat).is_some());
+
+        let basic = PeerRef {
+            id: PeerId::chat(123).unwrap(),
+            auth: PeerAuth::default(),
+        };
+        for kind in [Kind::Ban, Kind::Mute] {
+            assert!(matches!(
+                clear_all(&ctx, basic, -123, kind).await,
+                Ok(Cleared::Done(0))
+            ));
+            let (entries, total) = walk(&ctx, basic, -123, kind, LIMIT).await;
+            assert!(entries.is_empty() && total == 0);
+        }
     }
 
     #[test]

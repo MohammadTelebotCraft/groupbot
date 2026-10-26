@@ -234,6 +234,9 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
     };
 
     if super::commands::contains(ADMIN_LIST, text) {
+        if !ctx.may_list_admins(chat) {
+            return true;
+        }
         let (creator, admins) = match message.peer_ref().await {
             Ok(Some(chat_ref)) => super::admins(ctx, chat_ref).await,
             _ => (None, Vec::new()),
@@ -329,19 +332,20 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
     }
 
     if super::commands::contains(CONFIG, text) {
+        if !super::can_manage(ctx, message).await {
+            return true;
+        }
         if !sender_is_creator(ctx, message).await {
-            if super::can_manage(ctx, message).await {
-                super::respond(
-                    ctx,
-                    message,
-                    crate::response::ResponseKind::PermissionDenied,
-                    super::premium::icon_text(
-                        Some(super::premium::Icon::Locked),
-                        "فقط سازنده گروه می تواند «کانفیگ» را بفرستد.",
-                    ),
-                )
-                .await;
-            }
+            super::respond(
+                ctx,
+                message,
+                crate::response::ResponseKind::PermissionDenied,
+                super::premium::icon_text(
+                    Some(super::premium::Icon::Locked),
+                    "فقط سازنده گروه می تواند «کانفیگ» را بفرستد.",
+                ),
+            )
+            .await;
             return true;
         }
         let Ok(Some(chat_ref)) = message.peer_ref().await else {
@@ -402,7 +406,7 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
             )),
         )
         .await;
-        super::install::ensure_cleaner(ctx, chat_ref, chat).await;
+        super::install::ensure_cleaner(ctx, chat_ref, chat, true).await;
         return true;
     }
 

@@ -156,18 +156,23 @@ pub async fn check(ctx: &Ctx, message: &Message) -> bool {
         return false;
     };
 
-    let count = ctx.record_message(chat, user, Duration::from_secs(u64::from(window)));
+    let window = Duration::from_secs(u64::from(window));
+    let count = ctx.record_message(chat, user, window);
     if count <= limit as usize {
         return false;
     }
     if super::is_exempt(ctx, message).await {
         return false;
     }
+    if !ctx.claim_flood_punishment(chat, user, window) {
+        return true;
+    }
 
     let (Ok(Some(chat_ref)), Ok(Some(target))) =
         (message.peer_ref().await, message.sender_ref().await)
     else {
         log::warn!("flood: {chat}: no usable ref for {user}, cannot restrict");
+        ctx.release_flood_punishment(chat, user);
         return false;
     };
     let action = if bans { Action::Ban } else { Action::Mute };
@@ -192,6 +197,7 @@ pub async fn check(ctx: &Ctx, message: &Message) -> bool {
     .await
     {
         eprintln!("flood: {chat}: could not restrict {user}: {e}");
+        ctx.release_flood_punishment(chat, user);
         return false;
     }
 

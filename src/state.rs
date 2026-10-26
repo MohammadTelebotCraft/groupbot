@@ -224,6 +224,20 @@ type ImageFilterTuple = (
     Option<Vec<u8>>,
 );
 
+type ChatImageFilterTuple = (
+    i64,
+    String,
+    Vec<u8>,
+    f32,
+    f32,
+    i32,
+    bool,
+    i32,
+    bool,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+);
+
 pub struct ImageFilterRow {
     pub name: String,
     pub vector: Vec<u8>,
@@ -1273,6 +1287,14 @@ impl Settings {
         .execute(&mut *conn)
         .await?;
         sqlx::query(
+            "CREATE TABLE IF NOT EXISTS captcha_counts (
+                id           SMALLINT PRIMARY KEY CHECK (id = 0),
+                captcha_rows BIGINT NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&mut *conn)
+        .await?;
+        sqlx::query(
             "CREATE TABLE IF NOT EXISTS started_users (
                 user_id         BIGINT PRIMARY KEY,
                 access_hash     BIGINT NOT NULL DEFAULT 0,
@@ -1660,6 +1682,13 @@ impl Settings {
         .bind(counter_rows)
         .bind(tally_rows)
         .bind(note_rows)
+        .bind(captcha_rows)
+        .execute(&mut *conn)
+        .await?;
+        sqlx::query(
+            "INSERT INTO captcha_counts (id, captcha_rows) VALUES (0, $1)
+             ON CONFLICT (id) DO UPDATE SET captcha_rows = EXCLUDED.captcha_rows",
+        )
         .bind(captcha_rows)
         .execute(&mut *conn)
         .await?;
@@ -3073,6 +3102,19 @@ impl Settings {
         Ok(changed)
     }
 
+    pub async fn awaits_rejoin(&self, chat: i64, user: i64) -> Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pending_warn_actions
+                            WHERE chat_id = $1 AND user_id = $2 AND awaiting_rejoin)
+                 OR EXISTS (SELECT 1 FROM pending_strict_actions
+                            WHERE chat_id = $1 AND user_id = $2 AND awaiting_rejoin)",
+        )
+        .bind(chat)
+        .bind(user)
+        .fetch_one(&self.pool)
+        .await
+    }
+
     pub async fn resume_warning_on_rejoin(&self, chat: i64, user: i64, now: i64) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         lock_durable_member_rejoin(&mut tx, chat, user).await?;
@@ -3228,15 +3270,6 @@ impl Settings {
         Ok(())
     }
 
-    pub async fn drop_pending(&self, chat: i64, ids: &[i32]) -> Result<()> {
-        sqlx::query("DELETE FROM pending_deletes WHERE chat_id = $1 AND message_id = ANY($2)")
-            .bind(chat)
-            .bind(ids)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
     pub async fn drop_pending_rows(&self, rows: &[(i64, i32)]) -> Result<()> {
         const CHUNK: usize = 5_000;
         for batch in rows.chunks(CHUNK) {
@@ -3375,13 +3408,26 @@ impl Settings {
         }
     }
 
-    pub async fn try_phrase_image_filter_keys(&self) -> Result<Vec<(i64, String)>> {
-        sqlx::query_as(
-            "SELECT chat_id, name FROM image_filters WHERE samples = 0 AND faces IS NULL
-             ORDER BY chat_id, name",
-        )
-        .fetch_all(&self.pool)
-        .await
+    pub async fn try_phrase_image_filters(&self) -> Result<Vec<(i64, ImageFilterRow)>> {
+        let rows: Vec<ChatImageFilterTuple> =
+            sqlx::query_as(
+                "SELECT chat_id, name, vec, scale, cut, rate, live, samples, calibrated, examples, faces
+                 FROM image_filters WHERE samples = 0 AND faces IS NULL
+                 ORDER BY chat_id, name",
+            )
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(chat, name, vector, scale, cut, rate, live, samples, calibrated, examples, faces)| {
+                (
+                    chat,
+                    Self::image_filter_row((
+                        name, vector, scale, cut, rate, live, samples, calibrated, examples, faces,
+                    )),
+                )
+            })
+            .collect())
     }
 
     pub async fn try_example_image_filter_keys(&self) -> Result<Vec<(i64, String)>> {
@@ -4184,6 +4230,30 @@ impl Settings {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    pub async fn tallies_range(
+        &self,
+        chat: i64,
+        first: u64,
+        last: u64,
+    ) -> Result<HashMap<u64, HashMap<String, u64>>> {
+        let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+            "SELECT counter, count, day FROM tallies
+             WHERE chat_id = $1 AND day BETWEEN $2 AND $3 AND count > 0",
+        )
+        .bind(chat)
+        .bind(saturating_postgres_i64(first))
+        .bind(saturating_postgres_i64(last))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut days: HashMap<u64, HashMap<String, u64>> = HashMap::new();
+        for (counter, count, day) in rows {
+            let count = nonnegative_counter(&format!("tally {counter}"), count)?;
+            let day = u64::try_from(day).unwrap_or_default();
+            days.entry(day).or_default().insert(counter, count);
+        }
+        Ok(days)
     }
 
     pub async fn tallies(&self, chat: i64, day: u64) -> Result<HashMap<String, u64>> {
@@ -5702,6 +5772,16 @@ mod tests {
         );
         assert!(save(0, None).await.unwrap());
         assert_eq!(read().await.unwrap().unwrap().examples, None, "a phrase has none");
+        let phrases = settings.try_phrase_image_filters().await.unwrap();
+        let (_, listed) = phrases
+            .iter()
+            .find(|(owner, row)| *owner == chat && row.name == "nimune")
+            .expect("the phrase filter is listed");
+        let single = read().await.unwrap().unwrap();
+        assert_eq!(
+            (&listed.vector, listed.cut, listed.live, listed.samples),
+            (&single.vector, single.cut, single.live, single.samples)
+        );
         for table in ["image_filters", "settings", "durable_chats"] {
             sqlx::query(&format!("DELETE FROM {table} WHERE chat_id = $1"))
                 .bind(chat)
@@ -6238,6 +6318,11 @@ mod tests {
         assert!(!yesterday.contains_key("k_text"));
         assert_eq!(yesterday.get("h9").copied(), Some(3));
 
+        let range = settings.tallies_range(chat, day - 5, next).await.unwrap();
+        assert_eq!(range.get(&day), Some(&yesterday));
+        assert_eq!(range.get(&next), Some(&tomorrow));
+        assert_eq!(range.len(), 2);
+
         sqlx::query(wipe)
             .bind(chat)
             .execute(&settings.pool)
@@ -6685,11 +6770,17 @@ mod tests {
             .unwrap()
             .expect("absent-member lifecycle is claimable");
         assert!(
+            !settings.awaits_rejoin(chat, rejoin_user).await.unwrap(),
+            "claimed but not yet parked"
+        );
+        assert!(
             settings
                 .await_warning_rejoin(&awaiting, "USER_NOT_PARTICIPANT")
                 .await
                 .unwrap()
         );
+        assert!(settings.awaits_rejoin(chat, rejoin_user).await.unwrap());
+        assert!(!settings.awaits_rejoin(chat, rejoin_user + 1).await.unwrap());
         assert!(
             settings
                 .claim_warning_action(chat, rejoin_user, now + 311, now + 371)
@@ -6704,6 +6795,7 @@ mod tests {
                 .await
                 .unwrap()
         );
+        assert!(!settings.awaits_rejoin(chat, rejoin_user).await.unwrap());
         let resumed = settings
             .claim_warning_action(chat, rejoin_user, now + 400, now + 460)
             .await

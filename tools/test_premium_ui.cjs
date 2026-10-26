@@ -22,7 +22,7 @@ const context = vm.createContext({
   renderPageTop: () => '', loadingList: () => '',
 });
 vm.runInContext(
-  'const ICONS = {};\n' + functionSource('esc') + '\n' + functionSource('icon') + '\n' +
+  'const ICONS = {};\nconst FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹";\n' + functionSource('fa') + '\n' + functionSource('esc') + '\n' + functionSource('icon') + '\n' +
   functionSource('renderRightsPage') + '\n' + functionSource('renderPickField'), context,
 );
 for (const [name, key] of [['ban', 'MODERATION_HAMMER'], ['mute', 'MUTED'], ['clock', 'TIMER'],

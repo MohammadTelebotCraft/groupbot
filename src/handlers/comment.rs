@@ -84,8 +84,11 @@ pub async fn tripped(ctx: &Arc<Ctx>, chat: i64, message: &Message) -> bool {
         RootClaim::Known(known) => known,
         RootClaim::Waiting => false,
         RootClaim::Mine => {
+            let Some(permit) = ctx.try_comment_slot() else {
+                state.forget_root(root);
+                return false;
+            };
             let ctx = Arc::clone(ctx);
-            let permit = ctx.comment_slot().await;
             Arc::clone(&ctx).spawn_owned(async move {
                 let _permit = permit;
                 resolve(&ctx, &state, chat, chat_ref, root).await;

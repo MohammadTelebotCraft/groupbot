@@ -708,18 +708,16 @@ impl Settings {
         now: i64,
         limit: i64,
     ) -> Result<Vec<i64>, DefaultRightsError> {
-        self.default_rights_due_page(now, limit, 0).await
+        self.default_rights_due_page(now, limit, &[]).await
     }
 
     pub(crate) async fn default_rights_due_page(
         &self,
         now: i64,
         limit: i64,
-        offset: i64,
+        attempted: &[i64],
     ) -> Result<Vec<i64>, DefaultRightsError> {
         let limit = limit.clamp(1, 256);
-        let offset = offset.clamp(0, 16_384);
-        let candidate_limit = limit.saturating_add(offset);
         let rows: Vec<(i64,)> = sqlx::query_as(
             "SELECT chat_id
              FROM (
@@ -732,31 +730,33 @@ impl Settings {
                              OR applied_fingerprint IS DISTINCT FROM intent_fingerprint)
                         AND retry_at <= $1
                         AND (lease_until IS NULL OR lease_until <= $1)
-                      ORDER BY retry_at, chat_id LIMIT $3)
+                        AND chat_id <> ALL($3::bigint[])
+                      ORDER BY retry_at, chat_id LIMIT $2)
                      UNION ALL
                      (SELECT chat_id, next_transition_at AS due_at
                       FROM default_rights_state
                       WHERE seeded AND next_transition_at IS NOT NULL
                         AND next_transition_at <= $1
                         AND (lease_until IS NULL OR lease_until <= $1)
-                      ORDER BY next_transition_at, chat_id LIMIT $3)
+                        AND chat_id <> ALL($3::bigint[])
+                      ORDER BY next_transition_at, chat_id LIMIT $2)
                      UNION ALL
                      (SELECT chat_id, notice_retry_at AS due_at
                       FROM default_rights_state
                       WHERE notice_kind IS NOT NULL
                         AND notice_retry_at <= $1
                         AND (notice_lease_until IS NULL OR notice_lease_until <= $1)
-                      ORDER BY notice_retry_at, chat_id LIMIT $3)
+                        AND chat_id <> ALL($3::bigint[])
+                      ORDER BY notice_retry_at, chat_id LIMIT $2)
                  ) AS candidates
                  GROUP BY chat_id
              ) AS due
              ORDER BY due_at, chat_id
-             LIMIT $2 OFFSET $4",
+             LIMIT $2",
         )
         .bind(now)
         .bind(limit)
-        .bind(candidate_limit)
-        .bind(offset)
+        .bind(attempted)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(|(chat,)| chat).collect())
@@ -1363,6 +1363,60 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated PostgreSQL default-rights queue test"]
+    async fn later_pages_leave_out_what_was_tried_and_skip_nothing_still_due() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let settings = Settings::connect(&url).await.unwrap();
+        let chats: Vec<i64> = (-999_870_006..=-999_870_000).collect();
+        sqlx::query("DELETE FROM default_rights_state WHERE chat_id = ANY($1)")
+            .bind(&chats[..])
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+        admit_fixture_chats(&settings.pool, &chats).await;
+        for (due, &chat) in chats.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO default_rights_state
+                 (chat_id,seeded,intent_revision,intent_fingerprint,
+                  applied_revision,applied_fingerprint,delivery_state,retry_at)
+                 VALUES ($1,TRUE,2,1,1,0,'pending',$2)",
+            )
+            .bind(chat)
+            .bind(due as i64)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+        }
+        let first = settings
+            .default_rights_due_page(100, 2, &[])
+            .await
+            .unwrap();
+        assert_eq!(first, chats[..2]);
+        sqlx::query("DELETE FROM default_rights_state WHERE chat_id = ANY($1)")
+            .bind(&first[..])
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+        let second = settings
+            .default_rights_due_page(100, 2, &first)
+            .await
+            .unwrap();
+        assert_eq!(second, chats[2..4]);
+        let mut tried = first.clone();
+        tried.extend(&second);
+        let third = settings
+            .default_rights_due_page(100, 2, &tried)
+            .await
+            .unwrap();
+        assert_eq!(third, chats[4..6]);
+        sqlx::query("DELETE FROM default_rights_state WHERE chat_id = ANY($1)")
+            .bind(&chats[..])
+            .execute(&settings.pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

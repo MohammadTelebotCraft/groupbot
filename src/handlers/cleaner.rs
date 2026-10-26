@@ -227,14 +227,22 @@ async fn join(ctx: &Ctx, user: &Client, chat_ref: PeerRef) -> std::result::Resul
             Err("حساب کلینر در این گروه بن است و رفع بن نشد.".to_owned())
         }
         Err(e) if e.to_string().contains("CHANNELS_TOO_MUCH") => {
+            ctx.pause_cleaner_joins(CLEANER_FULL_PAUSE);
             Err("حساب کلینر در گروه های زیادی است و جای خالی ندارد.".to_owned())
         }
         Err(e) if e.to_string().contains("FLOOD_WAIT") => {
+            if let grammers_client::InvocationError::Rpc(rpc) = &e
+                && let Some(seconds) = rpc.value
+            {
+                ctx.pause_cleaner_joins(Duration::from_secs(u64::from(seconds)));
+            }
             Err(format!("تلگرام فعلا اجازه نمی دهد · {e}"))
         }
         Err(e) => Err(format!("پیوستن کلینر انجام نشد · {e}")),
     }
 }
+
+const CLEANER_FULL_PAUSE: Duration = Duration::from_secs(3600);
 
 fn join_retry_delay(error: &grammers_client::InvocationError) -> Option<Duration> {
     let grammers_client::InvocationError::Rpc(rpc) = error else {
@@ -249,13 +257,16 @@ pub async fn on_join(ctx: &Ctx, message: &Message) -> bool {
     let Some(cleaner) = ctx.cleaner_id() else {
         return false;
     };
-    if !matches!(
-        message.action(),
-        Some(grammers_client::tl::enums::MessageAction::ChatAddUser(_))
-            | Some(grammers_client::tl::enums::MessageAction::ChatJoinedByLink(
-                _
-            ))
-    ) {
+    let cleaner_joined = match message.action() {
+        Some(grammers_client::tl::enums::MessageAction::ChatAddUser(action)) => {
+            action.users.contains(&cleaner)
+        }
+        Some(grammers_client::tl::enums::MessageAction::ChatJoinedByLink(_)) => {
+            message.sender_id().and_then(PeerId::bare_id) == Some(cleaner)
+        }
+        _ => false,
+    };
+    if !cleaner_joined {
         return false;
     }
     let Some(joined) = super::joined_users(ctx, message)
@@ -271,7 +282,9 @@ pub async fn on_join(ctx: &Ctx, message: &Message) -> bool {
     if let Err(e) = promote(ctx, chat_ref, joined.peer).await {
         eprintln!("cleaner: could not promote in {}: {e}", chat_ref.id);
     }
-    ctx.forget_user_chats();
+    if let Some(chat) = chat_ref.id.bot_api_dialog_id() {
+        ctx.forget_user_chat(chat);
+    }
     false
 }
 
@@ -410,7 +423,7 @@ async fn purge_by_authors(
 fn stops_purge(e: &grammers_client::InvocationError) -> bool {
     matches!(
         e,
-        grammers_client::InvocationError::Rpc(rpc) if matches!(
+        grammers_client::InvocationError::Rpc(rpc) if rpc.code == 420 || matches!(
             rpc.name.as_str(),
             "CHAT_ADMIN_REQUIRED" | "RIGHT_FORBIDDEN" | "CHANNEL_PRIVATE" | "CHANNEL_INVALID"
         )
@@ -817,7 +830,7 @@ pub(crate) async fn chat_ref(ctx: &Ctx, user: &Client, chat: i64) -> Option<Peer
     if let Some(peer) = ctx.user_chat(chat) {
         return Some(peer);
     }
-    if ctx.user_chat_absent(chat) {
+    if ctx.user_chat_absent(chat) || ctx.user_chats_walk_failed_recently() {
         return None;
     }
     let mut found = Vec::with_capacity(USER_CHATS_MAX);
@@ -863,7 +876,12 @@ pub(crate) async fn chat_ref(ctx: &Ctx, user: &Client, chat: i64) -> Option<Peer
         }
         found.push((chat, peer));
     }
-    ctx.set_user_chats(found);
+    if complete {
+        ctx.set_user_chats(found);
+    } else {
+        ctx.add_user_chats(found, USER_CHATS_MAX);
+    }
+    ctx.note_user_chats_walk(complete);
     if peer.is_none() && complete {
         ctx.remember_user_chat_absent(chat);
     }
@@ -1299,5 +1317,22 @@ mod install_tests {
             assert!(join_retry_delay(&rpc(message)).is_none(), "{message}");
         }
         assert!(join_retry_delay(&grammers_client::InvocationError::Dropped).is_none());
+    }
+
+    #[test]
+    fn a_long_flood_wait_stops_a_purge_like_a_missing_right() {
+        let rpc = |code: i32, message: &str| {
+            grammers_client::InvocationError::Rpc(
+                grammers_client::tl::types::RpcError {
+                    error_code: code,
+                    error_message: message.to_owned(),
+                }
+                .into(),
+            )
+        };
+        assert!(stops_purge(&rpc(420, "FLOOD_WAIT_600")));
+        assert!(stops_purge(&rpc(400, "CHAT_ADMIN_REQUIRED")));
+        assert!(!stops_purge(&rpc(400, "PARTICIPANT_ID_INVALID")));
+        assert!(!stops_purge(&grammers_client::InvocationError::Dropped));
     }
 }

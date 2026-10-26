@@ -125,7 +125,15 @@ fn paths() -> Result<Option<[std::path::PathBuf; 3]>, ModelError> {
 }
 
 pub fn installed() -> bool {
-    matches!(paths(), Ok(Some(_)))
+    const INSTALLED_FOR: Duration = Duration::from_secs(60);
+    static FOUND: Mutex<Option<Instant>> = Mutex::new(None);
+    let mut found = FOUND.lock().unwrap_or_else(PoisonError::into_inner);
+    if found.is_some_and(|at| at.elapsed() < INSTALLED_FOR) {
+        return true;
+    }
+    let installed = matches!(paths(), Ok(Some(_)));
+    *found = installed.then(Instant::now);
+    installed
 }
 
 fn model() -> Result<Option<Arc<Model>>, ModelError> {

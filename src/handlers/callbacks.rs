@@ -2,7 +2,7 @@ use grammers_client::update::CallbackQuery;
 
 use super::{Ctx, chat_admins, is_bot_admin, limits, owner};
 
-pub async fn handle(ctx: &Ctx, query: &CallbackQuery) {
+pub async fn handle(ctx: &std::sync::Arc<Ctx>, query: &CallbackQuery) {
     let Ok(data) = std::str::from_utf8(query.data()) else {
         return;
     };

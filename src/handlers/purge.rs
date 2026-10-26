@@ -207,7 +207,7 @@ pub async fn handle_all(ctx: &Ctx, message: &Message) -> bool {
     true
 }
 
-pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
+pub async fn on_callback(ctx: &std::sync::Arc<Ctx>, query: &CallbackQuery, payload: &str) {
     let Some((opener, last)) = payload.split_once(':') else {
         return;
     };
@@ -239,23 +239,29 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
         return;
     };
     let _ = query.answer().send().await;
-
-    let text = match super::cleaner::purge_history(ctx, chat, last).await {
-        Ok(deleted) => format!(
-            "✓ {deleted} پیام پاک شد.\n\
-             <i>اگر گروه پیام قدیمی تر هم دارد، دوباره «حذف همه» را بفرستید.</i>"
-        ),
-        Err(e) => {
-            eprintln!("purge all: {chat}: {e}");
-            format!("انجام نشد · {e}")
-        }
-    };
-    if let Some(chat_ref) = ctx.chat_ref(chat) {
-        let _ = ctx
-            .client
-            .send_message(chat_ref, super::premium::html(text))
-            .await;
+    if !ctx.claim_purge(chat, last) {
+        return;
     }
+
+    let ctx = std::sync::Arc::clone(ctx);
+    std::sync::Arc::clone(&ctx).spawn_owned(async move {
+        let text = match super::cleaner::purge_history(&ctx, chat, last).await {
+            Ok(deleted) => format!(
+                "✓ {deleted} پیام پاک شد.\n\
+                 <i>اگر گروه پیام قدیمی تر هم دارد، دوباره «حذف همه» را بفرستید.</i>"
+            ),
+            Err(e) => {
+                eprintln!("purge all: {chat}: {e}");
+                format!("انجام نشد · {e}")
+            }
+        };
+        if let Some(chat_ref) = ctx.chat_ref(chat) {
+            let _ = ctx
+                .client
+                .send_message(chat_ref, super::premium::html(text))
+                .await;
+        }
+    });
 }
 
 pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>) -> bool {

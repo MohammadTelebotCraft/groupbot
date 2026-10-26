@@ -543,15 +543,20 @@ async fn markup(
     chat: i64,
     opener: i64,
     current: &str,
+    idle: Option<&crate::state::Idle>,
 ) -> Result<grammers_client::message::ReplyMarkup, sqlx::Error> {
     use grammers_client::message::Button;
 
     let mut rows: Vec<Vec<Button>> = Vec::new();
     if current == "idle" {
-        let (idle, _) = ctx
-            .settings
-            .idle(chat, today(), IDLE_DAYS, IDLE_SHOWN)
-            .await?;
+        let (idle, _) = match idle {
+            Some(found) => found.clone(),
+            None => {
+                ctx.settings
+                    .idle(chat, today(), IDLE_DAYS, IDLE_SHOWN)
+                    .await?
+            }
+        };
         for (user, name, quiet) in idle {
             rows.push(vec![super::style::data(
                 format!("✗  {name} · {quiet} روز"),
@@ -617,18 +622,23 @@ async fn section_card(
     opener: i64,
     section: &str,
 ) -> Result<InputMessage, sqlx::Error> {
+    let idle = match section {
+        "idle" => Some(ctx.settings.idle(chat, today(), IDLE_DAYS, IDLE_SHOWN).await?),
+        _ => None,
+    };
     Ok(super::premium::icon_html(
         Some(super::premium::Icon::Stats),
-        section_text(ctx, chat, section).await?,
+        clamp(section_body(ctx, chat, section, idle.as_ref()).await?),
     )
-    .reply_markup(markup(ctx, chat, opener, section).await?))
+    .reply_markup(markup(ctx, chat, opener, section, idle.as_ref()).await?))
 }
 
-async fn section_text(ctx: &Ctx, chat: i64, section: &str) -> Result<String, sqlx::Error> {
-    Ok(clamp(section_body(ctx, chat, section).await?))
-}
-
-async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> Result<String, sqlx::Error> {
+async fn section_body(
+    ctx: &Ctx,
+    chat: i64,
+    section: &str,
+    idle: Option<&crate::state::Idle>,
+) -> Result<String, sqlx::Error> {
     let day = today();
     let title = ctx
         .settings
@@ -662,7 +672,10 @@ async fn section_body(ctx: &Ctx, chat: i64, section: &str) -> Result<String, sql
             ))
         }
         "idle" => {
-            let (listed, idle) = ctx.settings.idle(chat, day, IDLE_DAYS, IDLE_SHOWN).await?;
+            let (listed, idle) = match idle {
+                Some(found) => found.clone(),
+                None => ctx.settings.idle(chat, day, IDLE_DAYS, IDLE_SHOWN).await?,
+            };
             let users = listed
                 .iter()
                 .map(|(user, name, quiet)| {
@@ -833,12 +846,47 @@ fn leaderboard(rows: &[Counter]) -> String {
         .join("\n")
 }
 
+async fn profile_photos(
+    ctx: &Ctx,
+    user: grammers_client::session::types::PeerRef,
+) -> (usize, Option<grammers_client::media::Photo>) {
+    match ctx
+        .client
+        .invoke(&grammers_client::tl::functions::photos::GetUserPhotos {
+            user_id: user.into(),
+            offset: 0,
+            max_id: 0,
+            limit: 1,
+        })
+        .await
+    {
+        Ok(photos) => photo_summary(photos),
+        Err(_) => (0, None),
+    }
+}
+
+fn photo_summary(
+    photos: grammers_client::tl::enums::photos::Photos,
+) -> (usize, Option<grammers_client::media::Photo>) {
+    use grammers_client::tl::enums::photos::Photos;
+    let (count, photos) = match photos {
+        Photos::Photos(found) => (found.photos.len(), found.photos),
+        Photos::Slice(found) => (usize::try_from(found.count).unwrap_or(0), found.photos),
+    };
+    let first = photos
+        .into_iter()
+        .next()
+        .map(grammers_client::media::Photo::from_raw);
+    (count, first)
+}
+
 async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool {
     let arg = tail_of(INFO, text);
     let Some(named) = super::named(message, arg.as_deref()) else {
         return false;
     };
-    let Some((target, name)) = super::resolve(ctx, message, named).await else {
+    let Some((target, name, username)) = super::resolve_with_username(ctx, message, named).await
+    else {
         super::respond(
             ctx,
             message,
@@ -877,12 +925,8 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool 
 
     let role = role_of(ctx, chat, user);
 
-    let username = ctx
-        .client
-        .resolve_peer(target)
-        .await
-        .ok()
-        .and_then(|peer| peer.username().map(|u| format!("@{u}")))
+    let username = username
+        .map(|u| format!("@{u}"))
         .unwrap_or_else(|| "بدون یوزرنیم".to_owned());
 
     let note = match super::extras::read_note(ctx, chat, user).await {
@@ -900,8 +944,7 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool 
         }
     };
 
-    let mut photos = ctx.client.iter_profile_photos(target);
-    let photo_count = photos.total().await.unwrap_or(0);
+    let (photo_count, first_photo) = profile_photos(ctx, target).await;
     let mut card = super::premium::icon_html(
         Some(super::premium::Icon::User),
         format!(
@@ -934,7 +977,7 @@ async fn user_card(ctx: &Ctx, message: &Message, chat: i64, text: &str) -> bool 
         ),
     );
 
-    if let Ok(Some(photo)) = photos.next().await
+    if let Some(photo) = first_photo
         && let Some(media) =
             super::welcome::encode_media(&grammers_client::media::Media::Photo(photo))
         && let Some(media) = super::welcome::decode_media(&media)
@@ -1723,6 +1766,28 @@ pub async fn count_add(ctx: &Ctx, message: &Message, added: usize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn one_photo_asked_for_still_counts_them_all() {
+        use grammers_client::tl;
+        let photo = || tl::enums::Photo::Empty(tl::types::PhotoEmpty { id: 1 });
+        let (count, first) = super::photo_summary(tl::enums::photos::Photos::Slice(
+            tl::types::photos::PhotosSlice {
+                count: 7,
+                photos: vec![photo()],
+                users: Vec::new(),
+            },
+        ));
+        assert_eq!(count, 7);
+        assert!(first.is_some());
+        let (count, first) =
+            super::photo_summary(tl::enums::photos::Photos::Photos(tl::types::photos::Photos {
+                photos: Vec::new(),
+                users: Vec::new(),
+            }));
+        assert_eq!(count, 0);
+        assert!(first.is_none());
+    }
+
     #[test]
     fn daily_report_accepts_only_bare_status_or_a_complete_clock() {
         for command in REPORT_SET {

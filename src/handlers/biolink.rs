@@ -67,8 +67,11 @@ pub async fn tripped(ctx: &std::sync::Arc<Ctx>, chat: i64, message: &Message) ->
     let Ok(Some(target)) = message.sender_ref().await else {
         return false;
     };
+    let Some(slot) = ctx.try_bio_slot() else {
+        ctx.forget_bio(user);
+        return false;
+    };
     let ctx = std::sync::Arc::clone(ctx);
-    let slot = ctx.bio_slot().await;
     std::sync::Arc::clone(&ctx).spawn_owned(async move {
         let _slot = slot;
         if let Some(about) = fetch(&ctx, target).await {

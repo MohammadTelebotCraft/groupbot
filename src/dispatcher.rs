@@ -27,6 +27,8 @@ pub struct Dispatcher<T> {
     ready: VecDeque<i64>,
     pending: usize,
     capacity: usize,
+    lane_cap: usize,
+    shed: u64,
     concurrency: usize,
     per_peer: usize,
     tasks: JoinSet<(Duration, Duration)>,
@@ -41,11 +43,23 @@ impl<T: Send + 'static> Dispatcher<T> {
             ready: VecDeque::new(),
             pending: 0,
             capacity,
+            lane_cap: capacity,
+            shed: 0,
             concurrency,
             per_peer,
             tasks: JoinSet::new(),
             active: HashMap::new(),
         }
+    }
+
+    pub fn with_lane_cap(mut self, lane_cap: usize) -> Self {
+        assert!(lane_cap > 0);
+        self.lane_cap = lane_cap;
+        self
+    }
+
+    pub fn shed(&self) -> u64 {
+        self.shed
     }
 
     pub fn has_room(&self) -> bool {
@@ -67,7 +81,13 @@ impl<T: Send + 'static> Dispatcher<T> {
             pending: VecDeque::new(),
             running: 0,
         });
-        if lane.running < self.per_peer && lane.pending.is_empty() {
+        let was_waiting = !lane.pending.is_empty();
+        if lane.pending.len() >= self.lane_cap {
+            lane.pending.pop_front();
+            self.pending -= 1;
+            self.shed += 1;
+        }
+        if lane.running < self.per_peer && !was_waiting {
             self.ready.push_back(key);
         }
         lane.pending.push_back(Pending {
@@ -202,6 +222,48 @@ mod tests {
             .collect();
         assert_eq!(got, (0..512).collect::<Vec<_>>());
         assert!(dispatcher.lanes.is_empty(), "idle peers retain no lane");
+    }
+
+    #[tokio::test]
+    async fn a_flooded_peer_sheds_its_oldest_and_never_fills_the_queue() {
+        let mut dispatcher = Dispatcher::new(1, 1, 16).with_lane_cap(4);
+        let done = Arc::new(Mutex::new(Vec::new()));
+        for sequence in 0..100 {
+            dispatcher.push(1, (1, sequence));
+            assert!(dispatcher.has_room());
+        }
+        dispatcher.push(2, (2, 0));
+        assert_eq!(dispatcher.pending(), 5);
+        assert_eq!(dispatcher.shed(), 96);
+        let run = |item| {
+            let done = done.clone();
+            async move {
+                done.lock().unwrap().push(item);
+            }
+        };
+        dispatcher.start(run);
+        while !dispatcher.is_empty() {
+            dispatcher.join_next().await.unwrap().result.unwrap();
+            dispatcher.start(run);
+        }
+        let mut got = done.lock().unwrap().clone();
+        got.sort_unstable();
+        assert_eq!(got, vec![(1, 96), (1, 97), (1, 98), (1, 99), (2, 0)]);
+        assert!(dispatcher.lanes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_lane_cap_of_one_keeps_one_ready_entry() {
+        let mut dispatcher = Dispatcher::new(1, 1, 8).with_lane_cap(1);
+        dispatcher.push(1, 0);
+        dispatcher.push(1, 1);
+        dispatcher.push(1, 2);
+        assert_eq!(dispatcher.ready.len(), 1);
+        assert_eq!(dispatcher.pending(), 1);
+        dispatcher.start(|_| async {});
+        dispatcher.join_next().await.unwrap().result.unwrap();
+        dispatcher.start(|_| async {});
+        assert!(dispatcher.is_empty());
     }
 
     #[tokio::test]

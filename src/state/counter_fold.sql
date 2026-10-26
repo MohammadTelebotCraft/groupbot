@@ -2,11 +2,6 @@ WITH batch AS (
                  SELECT chat, member, who, added
                  FROM UNNEST($1::bigint[], $2::bigint[], $3::text[], $4::bigint[])
                       AS incoming(chat, member, who, added)
-             ), existing AS (
-                 SELECT chat_id, count(*)::bigint AS members
-                 FROM counters
-                 WHERE chat_id = ANY($1::bigint[])
-                 GROUP BY chat_id
              ), existing_batch AS (
                  SELECT batch.chat, batch.member, batch.who, batch.added
                  FROM batch
@@ -26,15 +21,27 @@ WITH batch AS (
                      WHERE counters.chat_id = batch.chat
                        AND counters.user_id = batch.member
                  )
+             ), existing AS (
+                 -- Only the chats that are adding a member need their size, and in a steady
+                 -- minute that is few of them; counting every chat in the chunk read up to
+                 -- twenty thousand rows per chat for nothing.
+                 SELECT chat_id, count(*)::bigint AS members
+                 FROM counters
+                 WHERE chat_id IN (SELECT DISTINCT chat FROM new_batch)
+                 GROUP BY chat_id
              ), allowed_new AS (
                  SELECT new_batch.chat, new_batch.member, new_batch.who, new_batch.added
                  FROM new_batch
                  LEFT JOIN existing ON existing.chat_id = new_batch.chat
                  WHERE coalesce(existing.members, 0) + new_batch.new_rank <= $8
              ), reserved AS (
+                 -- Only when there is something to reserve: the update locks the shard's one
+                 -- `durable_counts` row until this transaction commits, and a flush that adds
+                 -- nobody has no reason to hold it.
                  UPDATE durable_counts
                  SET counter_rows = counter_rows + (SELECT count(*) FROM allowed_new)
                  WHERE id = 0
+                   AND EXISTS (SELECT 1 FROM allowed_new)
                    AND counter_rows + (SELECT count(*) FROM allowed_new) <= $9
                  RETURNING id
              ), write_batch AS (

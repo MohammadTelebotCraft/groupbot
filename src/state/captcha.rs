@@ -197,7 +197,7 @@ impl Settings {
         .await?;
         if let Some(generation) = inserted {
             let shard_rows: i64 = sqlx::query_scalar(
-                "SELECT captcha_rows FROM durable_counts WHERE id = 0 FOR UPDATE",
+                "SELECT captcha_rows FROM captcha_counts WHERE id = 0 FOR UPDATE",
             )
             .fetch_one(&mut *tx)
             .await?;
@@ -211,7 +211,7 @@ impl Settings {
                 tx.rollback().await?;
                 return Ok(CaptchaReservationOutcome::CapacityReached);
             }
-            sqlx::query("UPDATE durable_counts SET captcha_rows = captcha_rows + 1 WHERE id = 0")
+            sqlx::query("UPDATE captcha_counts SET captcha_rows = captcha_rows + 1 WHERE id = 0")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -362,7 +362,7 @@ impl Settings {
             == 1;
         if deleted {
             sqlx::query(
-                "UPDATE durable_counts SET captcha_rows = GREATEST(captcha_rows - 1, 0)
+                "UPDATE captcha_counts SET captcha_rows = GREATEST(captcha_rows - 1, 0)
                  WHERE id = 0",
             )
             .execute(&mut *tx)
@@ -429,7 +429,7 @@ impl Settings {
         .await?;
         if removed.is_some() {
             sqlx::query(
-                "UPDATE durable_counts SET captcha_rows = GREATEST(captcha_rows - 1, 0)
+                "UPDATE captcha_counts SET captcha_rows = GREATEST(captcha_rows - 1, 0)
                  WHERE id = 0",
             )
             .execute(&mut *tx)
@@ -643,7 +643,7 @@ impl Settings {
             == 1;
         if deleted {
             sqlx::query(
-                "UPDATE durable_counts SET captcha_rows = GREATEST(captcha_rows - 1, 0)
+                "UPDATE captcha_counts SET captcha_rows = GREATEST(captcha_rows - 1, 0)
                  WHERE id = 0",
             )
             .execute(&mut *tx)
@@ -691,7 +691,7 @@ mod tests {
             .rows_affected();
         let removed = i64::try_from(removed).unwrap();
         sqlx::query(
-            "UPDATE durable_counts
+            "UPDATE captcha_counts
              SET captcha_rows = GREATEST(captcha_rows - $1, 0) WHERE id = 0",
         )
         .bind(removed)
@@ -730,6 +730,32 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "isolated PostgreSQL captcha capacity/concurrency probe"]
+    async fn a_join_does_not_wait_on_the_stats_flush_lock() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let settings = Settings::connect(&url).await.unwrap();
+        let chat = -1_900_000_000_781_i64;
+        admit_fixture_chat(&settings, chat).await;
+        clear_fixture_captchas(&settings, chat).await;
+
+        let mut flush = settings.pool.begin().await.unwrap();
+        sqlx::query("SELECT counter_rows FROM durable_counts WHERE id = 0 FOR UPDATE")
+            .execute(&mut *flush)
+            .await
+            .unwrap();
+        let reserved = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            settings.reserve_captcha(reservation(chat, 700_101, 1)),
+        )
+        .await
+        .expect("the reservation waited on the stats flush's lock")
+        .unwrap();
+        expect_reserved(reserved, "a join during a flush");
+        flush.rollback().await.unwrap();
+        clear_fixture_captchas(&settings, chat).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated PostgreSQL captcha capacity/concurrency probe"]
     async fn concurrent_first_reservations_charge_once_and_per_chat_capacity_is_exact() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let settings = Settings::connect(&url).await.unwrap();
@@ -740,7 +766,7 @@ mod tests {
             clear_fixture_captchas(&settings, chat).await;
         }
         let before_meta: i64 =
-            sqlx::query_scalar("SELECT captcha_rows FROM durable_counts WHERE id = 0")
+            sqlx::query_scalar("SELECT captcha_rows FROM captcha_counts WHERE id = 0")
                 .fetch_one(&settings.pool)
                 .await
                 .unwrap();
@@ -768,7 +794,7 @@ mod tests {
             "the concurrent exact replay renews the one non-actionable lifecycle"
         );
         let after_meta: i64 =
-            sqlx::query_scalar("SELECT captcha_rows FROM durable_counts WHERE id = 0")
+            sqlx::query_scalar("SELECT captcha_rows FROM captcha_counts WHERE id = 0")
                 .fetch_one(&settings.pool)
                 .await
                 .unwrap();
@@ -789,7 +815,7 @@ mod tests {
             CaptchaReservationOutcome::Reserved(_)
         ));
         let after_replacement: i64 =
-            sqlx::query_scalar("SELECT captcha_rows FROM durable_counts WHERE id = 0")
+            sqlx::query_scalar("SELECT captcha_rows FROM captcha_counts WHERE id = 0")
                 .fetch_one(&settings.pool)
                 .await
                 .unwrap();

@@ -117,6 +117,7 @@ pub struct ChatState {
 
     admins: RwLock<Option<(Instant, HashSet<i64>)>>,
     admin_fetch: tokio::sync::Mutex<()>,
+    admins_failed: AtomicU64,
     configure_lock: Arc<tokio::sync::Mutex<()>>,
     setup_next_check: AtomicU64,
 
@@ -128,11 +129,14 @@ pub struct ChatState {
     counts: std::sync::Mutex<HashMap<i64, (u64, String)>>,
     tallies: std::sync::Mutex<HashMap<&'static str, u64>>,
     logs: std::sync::Mutex<Vec<String>>,
+    log_retry_at: AtomicU64,
+    log_failures: AtomicUsize,
     temp_media: std::sync::Mutex<VecDeque<(Instant, i32)>>,
     said: std::sync::Mutex<VecDeque<(i64, i32)>>,
     roots: std::sync::Mutex<HashMap<i32, (Instant, Root)>>,
     swept_bots: AtomicBool,
     tag_run: AtomicU64,
+    member_clear: AtomicBool,
     joined: std::sync::Mutex<HashMap<i32, Vec<Joined>>>,
 
     inflight: AtomicUsize,
@@ -234,6 +238,14 @@ impl ChatState {
         if was_empty {
             Dirty::mark(&self.dirty.stats, self.chat);
         }
+    }
+
+    pub fn claim_member_clear(&self) -> bool {
+        !self.member_clear.swap(true, Ordering::AcqRel)
+    }
+
+    pub fn end_member_clear(&self) {
+        self.member_clear.store(false, Ordering::Release);
     }
 
     pub fn claim_tagging(&self, command: i32) -> u64 {
@@ -654,6 +666,7 @@ pub struct Ctx {
     user_chats: RwLock<HashMap<i64, PeerRef>>,
     user_chats_absent: Mutex<HashMap<i64, Instant>>,
     user_chats_walk: tokio::sync::Mutex<()>,
+    user_chats_walk_failed: AtomicU64,
 
     pending_password: PasswordMailbox,
 
@@ -663,7 +676,7 @@ pub struct Ctx {
 
     group_rights: Box<[tokio::sync::Mutex<()>]>,
 
-    join_refs: RwLock<HashMap<String, PeerRef>>,
+    join_refs: RwLock<HashMap<String, (Instant, Option<PeerRef>)>>,
 
     pending_writes: std::sync::Mutex<Vec<(i64, i32, i64)>>,
 
@@ -687,14 +700,21 @@ pub struct Ctx {
     comment_lookups: OnceLock<Arc<tokio::sync::Semaphore>>,
 
     cleaner_joins: OnceLock<Arc<tokio::sync::Semaphore>>,
+    cleaner_paused_until: AtomicU64,
 
     tag_runs: OnceLock<Arc<tokio::sync::Semaphore>>,
+
+    list_unbans: OnceLock<tokio::sync::Semaphore>,
 
     verdicts: RwLock<HashMap<(i64, VisionRoute), CachedVerdict>>,
 
     raster_kinds: RwLock<HashMap<i64, (Instant, bool)>>,
 
     voice_verdicts: RwLock<HashMap<(i64, u64), VoiceVerdict>>,
+    voice_inflight: Inflight<(i64, u64), (i64, Message)>,
+    media_inflight: Inflight<i64, nsfw::RacingCopy>,
+    racing_copies: tokio::sync::mpsc::Sender<nsfw::RacingCopy>,
+    racing_copies_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<nsfw::RacingCopy>>>,
 
     filtered_voices: RwLock<HashMap<u64, FilteredVoice>>,
 
@@ -797,8 +817,10 @@ impl OwnedTasks {
     }
 
     fn take_epoch(&mut self) -> OwnedTaskDrain {
+        let mut tasks = std::mem::take(&mut self.retained_epochs);
+        tasks.push(std::mem::take(&mut self.tasks));
         OwnedTaskDrain {
-            tasks: vec![std::mem::take(&mut self.tasks)],
+            tasks,
             failures: std::mem::take(&mut self.failures),
         }
     }
@@ -878,6 +900,11 @@ impl OwnedTaskCheckpoint {
 
     pub async fn abort(&mut self, ctx: &Ctx) -> usize {
         self.abort_epochs(&ctx.owned_tasks).await
+    }
+
+    pub async fn join_current(&mut self) -> usize {
+        self.failures += self.epoch.join().await;
+        self.failures
     }
 
     async fn abort_epochs(&mut self, owned: &std::sync::Mutex<OwnedTasks>) -> usize {
@@ -969,6 +996,12 @@ pub const CONCEPT_SLOTS: usize = 8;
 
 pub const NOTICE_EVERY: Duration = Duration::from_secs(120);
 
+const GROUP_PACE: Duration = Duration::from_secs(3);
+
+const LOG_NAME_LOOKUP_EVERY: Duration = Duration::from_secs(6);
+
+const ADMIN_LIST_EVERY: Duration = Duration::from_secs(30);
+
 mod kind {
     pub const FILTER_NOTICE: u8 = 0;
     pub const REPORT: u8 = 1;
@@ -985,6 +1018,16 @@ mod kind {
     pub const MINIAPP_LIST_READ: u8 = 13;
     pub const MINIAPP_LIST_REMOVE: u8 = 14;
     pub const MINIAPP_LIST_CLEAR: u8 = 15;
+    pub const BETRAYAL: u8 = 16;
+    pub const REMOVAL_NOTICE: u8 = 17;
+    pub const FLOOD_PUNISH: u8 = 18;
+    pub const JOIN_NONMEMBER: u8 = 19;
+    pub const ANSWER_PACE: u8 = 20;
+    pub const LOG_NAME_LOOKUP: u8 = 21;
+    pub const MINIAPP_TELEGRAM: u8 = 22;
+    pub const ADMIN_LIST: u8 = 23;
+    pub const PURGE_RUN: u8 = 24;
+    pub const LEFT_BACK_EXPORT: u8 = 25;
 
     #[cfg(test)]
     pub const ALL: &[(&str, u8)] = &[
@@ -1003,6 +1046,16 @@ mod kind {
         ("MINIAPP_LIST_READ", MINIAPP_LIST_READ),
         ("MINIAPP_LIST_REMOVE", MINIAPP_LIST_REMOVE),
         ("MINIAPP_LIST_CLEAR", MINIAPP_LIST_CLEAR),
+        ("BETRAYAL", BETRAYAL),
+        ("REMOVAL_NOTICE", REMOVAL_NOTICE),
+        ("FLOOD_PUNISH", FLOOD_PUNISH),
+        ("JOIN_NONMEMBER", JOIN_NONMEMBER),
+        ("ANSWER_PACE", ANSWER_PACE),
+        ("LOG_NAME_LOOKUP", LOG_NAME_LOOKUP),
+        ("MINIAPP_TELEGRAM", MINIAPP_TELEGRAM),
+        ("ADMIN_LIST", ADMIN_LIST),
+        ("PURGE_RUN", PURGE_RUN),
+        ("LEFT_BACK_EXPORT", LEFT_BACK_EXPORT),
     ];
 }
 
@@ -1106,6 +1159,11 @@ type Counts = HashMap<(i64, i64), (u64, String)>;
 
 const MEMBER_TRUST: Duration = Duration::from_secs(60);
 
+const JOIN_NONMEMBER_TTL: Duration = Duration::from_secs(15);
+
+const JOIN_REF_UNRESOLVED_TTL: Duration = Duration::from_secs(600);
+const JOIN_REFS_MAX: usize = 10_000;
+
 const PENDING_PASSWORD_TTL: Duration = Duration::from_secs(300);
 
 const PENDING_NUMBER_TTL: Duration = Duration::from_secs(120);
@@ -1115,6 +1173,7 @@ const PENDING_NUMBERS_MAX: usize = 20_000;
 const ARMED_WINDOW: u64 = 130_000;
 
 const ADMIN_CACHE_TTL: Duration = Duration::from_secs(1800);
+const ADMIN_FAILURE_TTL: Duration = Duration::from_secs(60);
 const ADMIN_CACHE_MAX: usize = 20_000;
 
 pub const PER_CHAT_UPDATES: usize = 8;
@@ -1140,6 +1199,54 @@ fn group_rights_stripe(chat: i64) -> usize {
 }
 
 const FLUSH_CHAT_BATCH: usize = 512;
+
+struct Inflight<K, W> {
+    running: std::sync::Mutex<HashMap<K, Vec<W>>>,
+    keys_max: usize,
+    waiters_max: usize,
+}
+
+impl<K: Eq + Hash, W> Inflight<K, W> {
+    fn new(keys_max: usize, waiters_max: usize) -> Self {
+        Self {
+            running: std::sync::Mutex::new(HashMap::new()),
+            keys_max,
+            waiters_max,
+        }
+    }
+
+    fn claim(&self, key: K, waiter: impl FnOnce() -> W) -> bool {
+        let mut running = self.running.lock().unwrap();
+        if let Some(waiting) = running.get_mut(&key) {
+            if waiting.len() < self.waiters_max {
+                waiting.push(waiter());
+            }
+            return false;
+        }
+        if running.len() < self.keys_max {
+            running.insert(key, Vec::new());
+        }
+        true
+    }
+
+    fn settle(&self, key: &K) -> Vec<W> {
+        self.running
+            .lock()
+            .unwrap()
+            .remove(key)
+            .unwrap_or_default()
+    }
+}
+
+fn log_retry_delay(failures: usize, flood: Option<u32>) -> Duration {
+    const FIRST: Duration = Duration::from_secs(3);
+    const LONGEST: Duration = Duration::from_secs(600);
+    let doubled = FIRST.saturating_mul(1u32 << failures.saturating_sub(1).min(16));
+    let backoff = doubled.min(LONGEST);
+    flood.map_or(backoff, |seconds| {
+        backoff.max(Duration::from_secs(u64::from(seconds)))
+    })
+}
 const STATS_ROWS_PER_FLUSH: usize = 50_000;
 const LOG_ENTRIES_PER_FLUSH: usize = 50_000;
 const MEDIA_IDS_PER_FLUSH: usize = 50_000;
@@ -1168,6 +1275,26 @@ where
 const EVENTS_PER_SUBJECT_MAX: usize = raid::LIMIT_RANGE.1 as usize + 1;
 const FLOOD_EVENTS_MAX: usize = flood::LIMIT_RANGE.1 as usize + 1;
 const REMOVAL_EVENTS_MAX: usize = betrayal::LIMIT_RANGE.1 as usize + 1;
+
+#[cfg(test)]
+pub(crate) async fn live_ctx() -> (Ctx, grammers_client::SenderPool) {
+    use grammers_session::storages::MemorySession;
+
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let settings = Arc::new(Settings::connect(&url).await.unwrap());
+    let session = Arc::new(MemorySession::default());
+    let pool = grammers_client::SenderPool::new(Arc::clone(&session), 1);
+    let ctx = Ctx::new_with_allowed_chats(
+        Client::new(pool.handle.clone()),
+        settings,
+        grammers_session::storages::erase(session),
+        BotIdentity::new(NonZeroI64::MIN, None),
+        RuntimeConfig::for_test(),
+        8,
+        None,
+    );
+    (ctx, pool)
+}
 
 #[cfg(test)]
 fn record_event(times: &mut VecDeque<Instant>, window: Duration) -> usize {
@@ -1431,6 +1558,7 @@ impl Ctx {
         max_runtime_chats: usize,
         allowed_chats: Option<Arc<HashSet<i64>>>,
     ) -> Self {
+        let (racing_copies, racing_copies_rx) = tokio::sync::mpsc::channel(4_096);
         Self {
             client,
             settings,
@@ -1454,6 +1582,7 @@ impl Ctx {
             user_chats: RwLock::new(HashMap::new()),
             user_chats_absent: Mutex::new(HashMap::new()),
             user_chats_walk: tokio::sync::Mutex::new(()),
+            user_chats_walk_failed: AtomicU64::new(0),
             pending_password: PasswordMailbox::default(),
             cleaner_login: tokio::sync::Mutex::new(()),
             restriction_writes: (0..RESTRICTION_WRITE_STRIPES)
@@ -1477,10 +1606,16 @@ impl Ctx {
             bot_sweeps: OnceLock::new(),
             comment_lookups: OnceLock::new(),
             cleaner_joins: OnceLock::new(),
+            cleaner_paused_until: AtomicU64::new(0),
             tag_runs: OnceLock::new(),
+            list_unbans: OnceLock::new(),
             verdicts: RwLock::new(HashMap::new()),
             raster_kinds: RwLock::new(HashMap::new()),
             voice_verdicts: RwLock::new(HashMap::new()),
+            voice_inflight: Inflight::new(1_024, 64),
+            media_inflight: Inflight::new(4_096, 64),
+            racing_copies,
+            racing_copies_rx: std::sync::Mutex::new(Some(racing_copies_rx)),
             filtered_voices: RwLock::new(HashMap::new()),
             voice_pool: OnceLock::new(),
             voice_jobs: OnceLock::new(),
@@ -1703,11 +1838,21 @@ impl Ctx {
 
     pub fn forget_member(&self, chat: i64, user: i64) {
         if let Some(state) = self.peek(chat) {
+            state
+                .notices
+                .lock()
+                .unwrap()
+                .remove(&(kind::JOIN_NONMEMBER, user));
             state.members.lock().unwrap().remove(&user);
         }
     }
 
     pub fn claim_bio(&self, user: i64) -> Option<bool> {
+        if let Some((at, seen)) = self.bios.read().unwrap().get(&user)
+            && at.elapsed() < BIO_TTL
+        {
+            return Some(*seen);
+        }
         let mut bios = self.bios.write().unwrap();
         if let Some((at, seen)) = bios.get(&user)
             && at.elapsed() < BIO_TTL
@@ -1735,24 +1880,22 @@ impl Ctx {
         self.bios.write().unwrap().remove(&user);
     }
 
-    pub async fn bio_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+    pub fn try_bio_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         Arc::clone(
             self.bio_fetch
                 .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(BIO_FETCHES))),
         )
-        .acquire_owned()
-        .await
-        .expect("the bio semaphore is never closed")
+        .try_acquire_owned()
+        .ok()
     }
 
-    pub async fn comment_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+    pub fn try_comment_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         Arc::clone(
             self.comment_lookups
                 .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(COMMENT_LOOKUPS))),
         )
-        .acquire_owned()
-        .await
-        .expect("the comment semaphore is never closed")
+        .try_acquire_owned()
+        .ok()
     }
 
     pub fn known_raster_animation(&self, file: i64) -> Option<bool> {
@@ -1817,6 +1960,33 @@ impl Ctx {
             .get(&(file, profile))
             .filter(|(at, _, _)| at.elapsed() < VOICE_CACHE_TTL)
             .and_then(|(_, _, text)| text.as_ref().map(|text| text.to_string()))
+    }
+
+    pub fn claim_voice(&self, file: i64, profile: u64, chat: i64, message: &Message) -> bool {
+        self.voice_inflight
+            .claim((file, profile), || (chat, message.clone()))
+    }
+
+    pub(super) fn claim_media(&self, id: i64, copy: impl FnOnce() -> nsfw::RacingCopy) -> bool {
+        self.media_inflight.claim(id, copy)
+    }
+
+    pub(super) fn settle_media(&self, id: i64) -> Vec<nsfw::RacingCopy> {
+        self.media_inflight.settle(&id)
+    }
+
+    pub(super) fn retry_racing_copy(&self, copy: nsfw::RacingCopy) {
+        if self.racing_copies.try_send(copy).is_err() {
+            ::log::warn!("image moderation: a waiting copy was dropped because its queue is full");
+        }
+    }
+
+    pub fn take_racing_copies(&self) -> Option<tokio::sync::mpsc::Receiver<nsfw::RacingCopy>> {
+        self.racing_copies_rx.lock().unwrap().take()
+    }
+
+    pub fn settle_voice(&self, file: i64, profile: u64) -> Vec<(i64, Message)> {
+        self.voice_inflight.settle(&(file, profile))
     }
 
     pub fn remember_voice(&self, file: i64, profile: u64, bad: bool, text: Option<String>) {
@@ -2217,6 +2387,14 @@ impl Ctx {
         .ok()
     }
 
+    pub async fn list_unban(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.list_unbans
+            .get_or_init(|| tokio::sync::Semaphore::new(lists::CLEAR_PARALLEL))
+            .acquire()
+            .await
+            .expect("the list unban semaphore is never closed")
+    }
+
     pub async fn sweep_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
         Arc::clone(
             self.bot_sweeps
@@ -2243,6 +2421,22 @@ impl Ctx {
         }
         let id = PeerId::from_bot_api_dialog_id(chat)?;
         autoconfig::resolve_peer(Some(self.bot_session.as_ref()), id, self.chat_ref(chat)).await
+    }
+
+    pub async fn known_bot(&self, user: i64) -> Option<bool> {
+        match self.bot_session.peer(PeerId::user(user)?).await.ok().flatten()? {
+            grammers_client::session::types::PeerInfo::User { bot, .. } => bot,
+            _ => None,
+        }
+    }
+
+    pub fn try_sweep_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        Arc::clone(
+            self.bot_sweeps
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(FLEET_CAMPAIGNS))),
+        )
+        .try_acquire_owned()
+        .ok()
     }
 
     pub fn try_cleaner_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
@@ -2293,6 +2487,25 @@ impl Ctx {
         entries.push(entry);
         if was_empty {
             Dirty::mark(&self.dirty.logs, chat);
+        }
+    }
+
+    pub fn log_delivery_failed(&self, chat: i64, flood: Option<u32>) {
+        let Some(state) = self.peek(chat) else {
+            return;
+        };
+        let failures = state.log_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        let wait = log_retry_delay(failures, flood);
+        state.log_retry_at.store(
+            self.uptime_millis().saturating_add(wait.as_millis() as u64),
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn log_delivered(&self, chat: i64) {
+        if let Some(state) = self.peek(chat) {
+            state.log_failures.store(0, Ordering::Relaxed);
+            state.log_retry_at.store(0, Ordering::Relaxed);
         }
     }
 
@@ -2487,9 +2700,10 @@ impl Ctx {
         ready
     }
 
-    pub fn take_logs(&self) -> Vec<(i64, Vec<String>)> {
+    pub fn take_logs(&self, honour_backoff: bool) -> Vec<(i64, Vec<String>)> {
         let mut remaining = LOG_ENTRIES_PER_FLUSH;
         let chats = Dirty::take(&self.dirty.logs, FLUSH_CHAT_BATCH);
+        let now = self.uptime_millis();
         let mut ready = Vec::new();
         for chat in chats {
             if remaining == 0 {
@@ -2501,6 +2715,10 @@ impl Ctx {
             };
             let mut logs = state.logs.lock().unwrap();
             if logs.is_empty() {
+                continue;
+            }
+            if honour_backoff && state.log_retry_at.load(Ordering::Relaxed) > now {
+                Dirty::mark(&self.dirty.logs, chat);
                 continue;
             }
             let count = logs.len().min(remaining);
@@ -2566,9 +2784,29 @@ impl Ctx {
         self.user_chats.read().unwrap().get(&chat).copied()
     }
 
-    pub fn forget_user_chats(&self) {
-        self.user_chats.write().unwrap().clear();
-        self.user_chats_absent.lock().unwrap().clear();
+    pub fn forget_user_chat(&self, chat: i64) {
+        self.user_chats.write().unwrap().remove(&chat);
+        self.user_chats_absent.lock().unwrap().remove(&chat);
+    }
+
+    pub fn user_chats_walk_failed_recently(&self) -> bool {
+        let at = self.user_chats_walk_failed.load(Ordering::Relaxed);
+        at != 0 && self.uptime_millis().saturating_sub(at - 1) < 60_000
+    }
+
+    pub fn note_user_chats_walk(&self, complete: bool) {
+        let at = if complete { 0 } else { self.uptime_millis() + 1 };
+        self.user_chats_walk_failed.store(at, Ordering::Relaxed);
+    }
+
+    pub fn add_user_chats(&self, chats: Vec<(i64, PeerRef)>, max: usize) {
+        let mut known = self.user_chats.write().unwrap();
+        for (chat, peer) in chats {
+            if known.len() >= max && !known.contains_key(&chat) {
+                break;
+            }
+            known.insert(chat, peer);
+        }
     }
 
     pub fn user_chat_absent(&self, chat: i64) -> bool {
@@ -2672,15 +2910,36 @@ impl Ctx {
         armed != 0 && self.started.elapsed().as_millis() as u64 - armed < ARMED_WINDOW
     }
 
-    pub fn join_ref(&self, name: &str) -> Option<PeerRef> {
-        self.join_refs.read().unwrap().get(name).copied()
+    pub fn join_ref(&self, name: &str) -> Option<Option<PeerRef>> {
+        let refs = self.join_refs.read().unwrap();
+        let (at, peer) = refs.get(name)?;
+        (peer.is_some() || at.elapsed() < JOIN_REF_UNRESOLVED_TTL).then_some(*peer)
     }
 
-    pub fn remember_join_ref(&self, name: &str, peer: PeerRef) {
+    pub fn remember_join_ref(&self, name: &str, peer: Option<PeerRef>) {
         let mut refs = self.join_refs.write().unwrap();
-        if refs.len() < 10_000 {
-            refs.insert(name.to_owned(), peer);
+        if !refs.contains_key(name) && refs.len() >= JOIN_REFS_MAX {
+            refs.retain(|_, (at, peer)| {
+                peer.is_some() || at.elapsed() < JOIN_REF_UNRESOLVED_TTL
+            });
+            make_room(&mut refs, JOIN_REFS_MAX, |(at, _)| *at);
         }
+        refs.insert(name.to_owned(), (Instant::now(), peer));
+    }
+
+    pub fn known_nonmember(&self, chat: i64, user: i64) -> bool {
+        self.peek(chat).is_some_and(|state| {
+            state
+                .notices
+                .lock()
+                .unwrap()
+                .get(&(kind::JOIN_NONMEMBER, user))
+                .is_some_and(|(at, every)| at.elapsed() < *every)
+        })
+    }
+
+    pub fn remember_nonmember(&self, chat: i64, user: i64) {
+        self.throttle(kind::JOIN_NONMEMBER, chat, user, JOIN_NONMEMBER_TTL);
     }
 
     pub fn pending_admin_new(&self, pending: promote::Pending) -> u64 {
@@ -2722,7 +2981,59 @@ impl Ctx {
     }
 
     pub fn may_notify_lock(&self, chat: i64, user: i64) -> bool {
-        self.throttle(kind::LOCK_NOTICE, chat, user, Duration::from_secs(20))
+        self.throttle_all(
+            chat,
+            &[
+                (kind::REMOVAL_NOTICE, 0, GROUP_PACE),
+                (kind::LOCK_NOTICE, user, Duration::from_secs(20)),
+            ],
+        )
+    }
+
+    pub fn claim_purge(&self, chat: i64, last: i32) -> bool {
+        self.throttle(
+            kind::PURGE_RUN,
+            chat,
+            i64::from(last),
+            Duration::from_secs(3600),
+        )
+    }
+
+    pub fn may_export_left_back_invite(&self, chat: i64) -> bool {
+        self.peek(chat).is_none_or(|state| {
+            state
+                .notices
+                .lock()
+                .unwrap()
+                .get(&(kind::LEFT_BACK_EXPORT, 0))
+                .is_none_or(|(at, every)| at.elapsed() >= *every)
+        })
+    }
+
+    pub fn left_back_export_failed(&self, chat: i64) {
+        self.throttle(kind::LEFT_BACK_EXPORT, chat, 0, Duration::from_secs(600));
+    }
+
+    pub fn may_list_admins(&self, chat: i64) -> bool {
+        self.throttle(kind::ADMIN_LIST, chat, 0, ADMIN_LIST_EVERY)
+    }
+
+    pub fn may_look_up_log_name(&self, chat: i64) -> bool {
+        self.throttle(kind::LOG_NAME_LOOKUP, chat, 0, LOG_NAME_LOOKUP_EVERY)
+    }
+
+    pub fn may_answer(&self, chat: i64) -> bool {
+        self.throttle(kind::ANSWER_PACE, chat, 0, GROUP_PACE)
+    }
+
+    pub fn may_notify_filtered(&self, chat: i64, user: i64) -> bool {
+        self.throttle_all(
+            chat,
+            &[
+                (kind::REMOVAL_NOTICE, 0, GROUP_PACE),
+                (kind::FILTER_NOTICE, user, NOTICE_EVERY),
+            ],
+        )
     }
 
     pub fn may_notify_flood(&self, chat: i64, user: i64) -> bool {
@@ -2743,6 +3054,22 @@ impl Ctx {
                 (explicit || now >= next).then_some(now + 60_000)
             })
             .is_ok()
+    }
+
+    pub fn defer_setup_probe(&self, chat: i64, wait: Duration) {
+        if let Some(state) = self.peek(chat) {
+            let until = self.uptime_millis().saturating_add(wait.as_millis() as u64);
+            state.setup_next_check.fetch_max(until, Ordering::Relaxed);
+        }
+    }
+
+    pub fn pause_cleaner_joins(&self, wait: Duration) {
+        let until = self.uptime_millis().saturating_add(wait.as_millis() as u64);
+        self.cleaner_paused_until.fetch_max(until, Ordering::Relaxed);
+    }
+
+    pub fn cleaner_joins_paused(&self) -> bool {
+        self.cleaner_paused_until.load(Ordering::Relaxed) > self.uptime_millis()
     }
 
     pub fn claim_install_notice(&self, chat: i64, missing: i64) -> bool {
@@ -2775,6 +3102,24 @@ impl Ctx {
         )
     }
 
+    pub fn claim_betrayal(&self, chat: i64, admin: i64) -> bool {
+        self.throttle(kind::BETRAYAL, chat, admin, Duration::from_secs(60))
+    }
+
+    pub fn claim_flood_punishment(&self, chat: i64, user: i64, window: Duration) -> bool {
+        self.throttle(kind::FLOOD_PUNISH, chat, user, window)
+    }
+
+    pub fn release_flood_punishment(&self, chat: i64, user: i64) {
+        if let Some(state) = self.peek(chat) {
+            state
+                .notices
+                .lock()
+                .unwrap()
+                .remove(&(kind::FLOOD_PUNISH, user));
+        }
+    }
+
     pub fn first_sighting(&self, chat: i64, user: i64, window: Duration) -> bool {
         self.throttle(kind::SIGHTING, chat, user, window)
     }
@@ -2785,6 +3130,10 @@ impl Ctx {
 
     pub fn claim_miniapp_filter_create(&self, chat: i64, every: Duration) -> bool {
         self.throttle(kind::MINIAPP_FILTER_CREATE, chat, 0, every)
+    }
+
+    pub fn claim_miniapp_telegram(&self, chat: i64, endpoint: i64, every: Duration) -> bool {
+        self.throttle(kind::MINIAPP_TELEGRAM, chat, endpoint, every)
     }
 
     pub fn claim_miniapp_list_read(&self, chat: i64, list: lists::Kind, every: Duration) -> bool {
@@ -2800,20 +3149,33 @@ impl Ctx {
     }
 
     fn throttle(&self, kind: u8, chat: i64, user: i64, every: Duration) -> bool {
+        self.throttle_all(chat, &[(kind, user, every)])
+    }
+
+    fn throttle_all(&self, chat: i64, claims: &[(u8, i64, Duration)]) -> bool {
         let Some(state) = self.try_state(chat) else {
             return false;
         };
         let mut notices = state.notices.lock().unwrap();
-        if let Some((last, _)) = notices.get(&(kind, user))
-            && last.elapsed() < every
-        {
+        if claims.iter().any(|&(kind, key, every)| {
+            notices
+                .get(&(kind, key))
+                .is_some_and(|(last, _)| last.elapsed() < every)
+        }) {
             return false;
         }
-        if notices.len() >= PER_CHAT_MAX {
+        if notices.len() + claims.len() > PER_CHAT_MAX {
             notices.retain(|_, (last, window)| last.elapsed() < *window);
-            make_room(&mut notices, PER_CHAT_MAX, |(last, _)| *last);
+            make_room(
+                &mut notices,
+                (PER_CHAT_MAX + 1).saturating_sub(claims.len()),
+                |(last, _)| *last,
+            );
         }
-        notices.insert((kind, user), (Instant::now(), every));
+        let now = Instant::now();
+        for &(kind, key, every) in claims {
+            notices.insert((kind, key), (now, every));
+        }
         true
     }
 
@@ -3046,6 +3408,7 @@ impl Ctx {
     pub fn forget_admins(&self, chat: i64) {
         if let Some(state) = self.peek(chat) {
             *state.admins.write().unwrap() = None;
+            state.admins_failed.store(0, Ordering::Relaxed);
         }
     }
 
@@ -3137,9 +3500,20 @@ pub async fn chat_admins(ctx: &Ctx, chat_ref: PeerRef, chat: i64) -> Option<Hash
     }
 
     let state = ctx.try_state(chat)?;
+    let failed_recently = |state: &ChatState| {
+        let at = state.admins_failed.load(Ordering::Relaxed);
+        at != 0
+            && ctx.uptime_millis().saturating_sub(at - 1) < ADMIN_FAILURE_TTL.as_millis() as u64
+    };
+    if failed_recently(&state) {
+        return None;
+    }
     let _fetching = state.admin_fetch.lock().await;
     if let Some(admins) = ctx.cached_admins(chat) {
         return Some(admins);
+    }
+    if failed_recently(&state) {
+        return None;
     }
 
     let mut participants = ctx
@@ -3178,8 +3552,12 @@ pub async fn chat_admins(ctx: &Ctx, chat_ref: PeerRef, chat: i64) -> Option<Hash
     }
 
     if failed || truncated || admins.is_empty() {
+        state
+            .admins_failed
+            .store(ctx.uptime_millis() + 1, Ordering::Relaxed);
         return None;
     }
+    state.admins_failed.store(0, Ordering::Relaxed);
     ctx.cache_admins(chat, admins.clone());
     Some(admins)
 }
@@ -3360,12 +3738,15 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         && ctx.settings.is_locked(chat, bots::LOCK)
         && !state.swept_bots.swap(true, Ordering::Relaxed)
     {
-        let permit = ctx.sweep_slot().await;
-        let ctx = Arc::clone(ctx);
-        Arc::clone(&ctx).spawn_owned(async move {
-            let _permit = permit;
-            bots::sweep(&ctx, chat).await;
-        });
+        if let Some(permit) = ctx.try_sweep_slot() {
+            let ctx = Arc::clone(ctx);
+            Arc::clone(&ctx).spawn_owned(async move {
+                let _permit = permit;
+                bots::sweep(&ctx, chat).await;
+            });
+        } else {
+            state.swept_bots.store(false, Ordering::Relaxed);
+        }
     }
 
     let view = locks::View::new(message);
@@ -3404,7 +3785,11 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
 
     comment::on_post(ctx, &state, message, chat).await;
 
-    nsfw::watch(ctx, message, chat, &view).await;
+    if view.media().is_none()
+        || (nsfw::armed(ctx, chat) && locks::scan(ctx, chat, &view).is_none())
+    {
+        nsfw::watch(ctx, message, chat, &view).await;
+    }
 
     voicemonitor::watch(ctx, message, chat, &view).await;
 
@@ -3842,11 +4227,38 @@ pub async fn resolve(ctx: &Ctx, message: &Message, named: Named<'_>) -> Option<(
     Some((replied.sender_ref().await.ok()??, name))
 }
 
+pub async fn resolve_with_username(
+    ctx: &Ctx,
+    message: &Message,
+    named: Named<'_>,
+) -> Option<(PeerRef, String, Option<String>)> {
+    if let Some(arg) = named.arg {
+        return resolve_arg_peer(ctx, arg).await;
+    }
+    let replied = message.get_reply().await.ok()??;
+    let text = replied.text().trim();
+    if !text.is_empty() && !text.contains(char::is_whitespace) && arg_names_a_user(text) {
+        return resolve_arg_peer(ctx, text).await;
+    }
+    let username = replied
+        .sender()
+        .and_then(|peer| peer.username().map(str::to_owned));
+    let name = name_of(&replied);
+    Some((replied.sender_ref().await.ok()??, name, username))
+}
+
 async fn resolve_arg(ctx: &Ctx, arg: &str) -> Option<(PeerRef, String)> {
+    resolve_arg_peer(ctx, arg)
+        .await
+        .map(|(peer, name, _)| (peer, name))
+}
+
+async fn resolve_arg_peer(ctx: &Ctx, arg: &str) -> Option<(PeerRef, String, Option<String>)> {
     if let Some(username) = arg.strip_prefix('@').filter(|u| !u.is_empty()) {
         let peer = ctx.client.resolve_username(username).await.ok()??;
         let name = peer.name().unwrap_or(username).to_owned();
-        return Some((peer.to_ref().await.ok()??, name));
+        let found = peer.username().map(str::to_owned);
+        return Some((peer.to_ref().await.ok()??, name, found));
     }
     let id = digits(arg).parse::<i64>().ok()?;
     let peer = ctx
@@ -3855,7 +4267,8 @@ async fn resolve_arg(ctx: &Ctx, arg: &str) -> Option<(PeerRef, String)> {
         .await
         .ok()?;
     let name = peer.name().map_or_else(|| id.to_string(), str::to_owned);
-    Some((peer.to_ref().await.ok()??, name))
+    let found = peer.username().map(str::to_owned);
+    Some((peer.to_ref().await.ok()??, name, found))
 }
 
 pub fn phrase_carries_text(command: &str) -> bool {
@@ -5260,5 +5673,197 @@ mod tests {
         ] {
             assert!(!file.contains('\u{200c}'), "found U+200C in a handler");
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]
+    async fn a_failed_admin_walk_is_remembered_until_the_participants_change() {
+        const CHAT: i64 = -100_777_000_127;
+        let (ctx, pool) = super::live_ctx().await;
+        drop(pool.runner);
+        let chat_ref = super::PeerId::channel(777_000_127).unwrap().to_ambient_ref();
+        assert_eq!(super::chat_admins(&ctx, chat_ref, CHAT).await, None);
+        let state = ctx.peek(CHAT).unwrap();
+        assert_ne!(state.admins_failed.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(super::chat_admins(&ctx, chat_ref, CHAT).await, None);
+        assert!(ctx.cached_admins(CHAT).is_none());
+        ctx.forget_admins(CHAT);
+        assert_eq!(state.admins_failed.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]
+    async fn the_request_budgets_claim_once_and_give_back_what_they_did_not_use() {
+        use std::time::Duration;
+        const CHAT: i64 = -100_777_000_129;
+        let (ctx, _pool) = super::live_ctx().await;
+        let state = ctx.state(CHAT);
+
+        let window = Duration::from_secs(10);
+        assert!(ctx.claim_flood_punishment(CHAT, 1, window));
+        assert!(!ctx.claim_flood_punishment(CHAT, 1, window));
+        assert!(ctx.claim_flood_punishment(CHAT, 2, window));
+        ctx.release_flood_punishment(CHAT, 1);
+        assert!(ctx.claim_flood_punishment(CHAT, 1, window));
+
+        assert!(ctx.may_look_up_log_name(CHAT));
+        assert!(!ctx.may_look_up_log_name(CHAT));
+
+        assert!(!ctx.cleaner_joins_paused());
+        ctx.pause_cleaner_joins(Duration::from_secs(60));
+        assert!(ctx.cleaner_joins_paused());
+
+        ctx.defer_setup_probe(CHAT, Duration::from_secs(900));
+        assert!(!ctx.claim_setup_probe(&state, false));
+        assert!(ctx.claim_setup_probe(&state, true));
+
+        assert!(ctx.may_list_admins(CHAT));
+        assert!(!ctx.may_list_admins(CHAT));
+        assert!(ctx.claim_purge(CHAT, 500));
+        assert!(!ctx.claim_purge(CHAT, 500));
+        assert!(ctx.claim_purge(CHAT, 900));
+        assert!(ctx.may_export_left_back_invite(CHAT));
+        ctx.left_back_export_failed(CHAT);
+        assert!(!ctx.may_export_left_back_invite(CHAT));
+        let every = Duration::from_secs(30);
+        assert!(ctx.claim_miniapp_telegram(CHAT, 1, every));
+        assert!(!ctx.claim_miniapp_telegram(CHAT, 1, every));
+        assert!(ctx.claim_miniapp_telegram(CHAT, 2, every));
+
+        let held: Vec<_> = (0..4).map(|_| ctx.try_bio_slot().unwrap()).collect();
+        assert!(ctx.try_bio_slot().is_none());
+        drop(held);
+        assert!(ctx.try_bio_slot().is_some());
+        let held: Vec<_> = (0..4).map(|_| ctx.try_sweep_slot().unwrap()).collect();
+        assert!(ctx.try_sweep_slot().is_none());
+        drop(held);
+    }
+
+    #[test]
+    fn copies_racing_the_first_wait_for_it_and_a_full_table_runs_them() {
+        let running = super::Inflight::<u32, u32>::new(2, 3);
+        assert!(running.claim(1, || 0));
+        let queued = (10..20).filter(|waiter| !running.claim(1, || *waiter)).count();
+        assert_eq!(queued, 10);
+        assert_eq!(running.settle(&1), vec![10, 11, 12]);
+        assert!(running.claim(1, || 0));
+        assert!(running.claim(2, || 0));
+        assert!(running.claim(3, || 0));
+        assert!(running.claim(3, || 0));
+        assert!(running.settle(&3).is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]
+    async fn the_session_answers_whether_a_joiner_is_a_bot() {
+        use grammers_client::session::types::PeerInfo;
+        let (ctx, _pool) = super::live_ctx().await;
+        assert_eq!(ctx.known_bot(5_001).await, None);
+        for (id, bot) in [(5_001, false), (5_002, true)] {
+            ctx.bot_session
+                .cache_peer(&PeerInfo::User {
+                    id,
+                    auth: None,
+                    bot: Some(bot),
+                    is_self: None,
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(ctx.known_bot(5_001).await, Some(false));
+        assert_eq!(ctx.known_bot(5_002).await, Some(true));
+    }
+
+    #[test]
+    fn each_gate_sits_before_the_round_trip_it_spares() {
+        let before = |source: &str, function: &str, first: &str, then: &str| {
+            let body = source
+                .split_once(function)
+                .unwrap_or_else(|| panic!("{function} exists"))
+                .1;
+            let body = body.split_once("\n}\n").map_or(body, |(body, _)| body);
+            let first_at = body
+                .find(first)
+                .unwrap_or_else(|| panic!("{first} in {function}"));
+            let then_at = body
+                .find(then)
+                .unwrap_or_else(|| panic!("{then} in {function}"));
+            assert!(first_at < then_at, "{first} must come before {then} in {function}");
+        };
+        before(
+            include_str!("captcha.rs"),
+            "pub async fn on_join(",
+            "is_locked(chat, MODE)",
+            "joined_users(ctx, message)",
+        );
+        before(
+            include_str!("cleaner.rs"),
+            "pub async fn on_join(",
+            "action.users.contains(&cleaner)",
+            "joined_users(ctx, message)",
+        );
+        before(
+            include_str!("bots.rs"),
+            "pub async fn on_participant_update(",
+            "ctx.known_bot(user).await == Some(false)",
+            "ctx.client.resolve_peer(peer)",
+        );
+        before(
+            include_str!("install.rs"),
+            "pub async fn ensure_cleaner(",
+            "!announce && ctx.cleaner_joins_paused()",
+            "ctx.claim_cleaner_install(chat)",
+        );
+        before(
+            include_str!("flood.rs"),
+            "pub async fn check(",
+            "ctx.claim_flood_punishment(chat, user, window)",
+            "restrict::apply(",
+        );
+        before(
+            include_str!("biolink.rs"),
+            "pub async fn tripped(",
+            "ctx.try_bio_slot()",
+            "spawn_owned(",
+        );
+        before(
+            include_str!("comment.rs"),
+            "RootClaim::Mine => {",
+            "ctx.try_comment_slot()",
+            "spawn_owned(",
+        );
+        before(
+            include_str!("../miniapp/more.rs"),
+            "pub async fn report_test(",
+            "claim_miniapp_telegram(gate.chat, 1",
+            "send_message(",
+        );
+        before(
+            include_str!("config.rs"),
+            "if super::commands::contains(CONFIG, text) {",
+            "super::can_manage(ctx, message)",
+            "sender_is_creator(ctx, message)",
+        );
+    }
+
+    #[test]
+    fn media_a_plain_lock_deletes_skips_the_models() {
+        let source = include_str!("mod.rs");
+        let dispatch = source
+            .split_once("pub async fn dispatch(ctx: &Arc<Ctx>, update: Update)")
+            .expect("dispatch exists")
+            .1;
+        let gated = dispatch
+            .find(
+                "    if view.media().is_none()
+        || (nsfw::armed(ctx, chat) && locks::scan(ctx, chat, &view).is_none())
+    {
+        nsfw::watch(ctx, message, chat, &view).await;",
+            )
+            .expect("the media watcher is gated on an armed model, then the lock scan");
+        let moderated = dispatch
+            .find("locks::moderate(ctx, message, chat, &view)")
+            .expect("the lock pass");
+        assert!(gated < moderated);
     }
 }

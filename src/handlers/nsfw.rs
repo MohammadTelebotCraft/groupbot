@@ -1170,7 +1170,12 @@ fn is_avif_document(document: &Document) -> bool {
     })
 }
 
+const VIDEO_FETCH_MAX: usize = 24 * 1024 * 1024;
+
 fn is_animated_document(document: &Document) -> bool {
+    let fetchable = document
+        .size()
+        .is_none_or(|size| size <= VIDEO_FETCH_MAX);
     is_tgs_document(document)
         || document.is_animated()
         || is_avif_document(document)
@@ -1190,17 +1195,21 @@ fn is_animated_document(document: &Document) -> bool {
             )
         )
         || matches!(document.mime_type(), Some("image/apng"))
-        || document
-            .mime_type()
-            .is_some_and(|mime| mime.starts_with("video/"))
+        || (fetchable
+            && document
+                .mime_type()
+                .is_some_and(|mime| mime.starts_with("video/")))
         || document.name().is_some_and(|name| {
             name.rsplit('.').next().is_some_and(|extension| {
-                [
-                    "gif", "apng", "mp4", "webm", "tif", "tiff", "ico", "pnm", "pbm", "pgm", "ppm",
-                    "pam",
-                ]
-                .iter()
-                .any(|animated| extension.eq_ignore_ascii_case(animated))
+                let video = ["mp4", "webm"]
+                    .iter()
+                    .any(|video| extension.eq_ignore_ascii_case(video));
+                (fetchable && video)
+                    || [
+                        "gif", "apng", "tif", "tiff", "ico", "pnm", "pbm", "pgm", "ppm", "pam",
+                    ]
+                    .iter()
+                    .any(|animated| extension.eq_ignore_ascii_case(animated))
             })
         })
 }
@@ -1586,6 +1595,18 @@ async fn animated_command(
     animated_command_limited(program, args, limit, remaining).await
 }
 
+const DECODER_THREADS: &str = "2";
+
+fn decoder_args(program: &str, args: &[String]) -> Vec<String> {
+    let mut all = Vec::with_capacity(args.len() + 2);
+    if program == "ffmpeg" {
+        all.push("-threads".to_owned());
+        all.push(DECODER_THREADS.to_owned());
+    }
+    all.extend_from_slice(args);
+    all
+}
+
 async fn animated_command_limited(
     program: &str,
     args: &[String],
@@ -1594,7 +1615,7 @@ async fn animated_command_limited(
 ) -> Option<std::process::Output> {
     use tokio::io::AsyncReadExt;
     let mut child = Command::new(program)
-        .args(args)
+        .args(decoder_args(program, args))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -4000,14 +4021,7 @@ pub async fn watch(ctx: &Arc<Ctx>, message: &Message, chat: i64, view: &View<'_>
         if let Media::WebPage(page) = media
             && let tl::enums::WebPage::Pending(pending) = &page.raw.webpage
         {
-            let armed = ctx.settings.with_chat(chat, |settings| {
-                settings.is_locked(LOCK)
-                    || settings.is_locked(super::ocr::LOCK)
-                    || super::concepts::CONCEPTS
-                        .iter()
-                        .any(|concept| settings.is_locked(concept.key))
-            }) || super::imgfilter::any(ctx, chat);
-            if armed {
+            if armed(ctx, chat) {
                 let unix_now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |time| time.as_secs() as i64);
@@ -4104,6 +4118,16 @@ async fn watch_pending_media(
         }
     }
     Ok(())
+}
+
+pub fn armed(ctx: &Ctx, chat: i64) -> bool {
+    ctx.settings.with_chat(chat, |settings| {
+        settings.is_locked(LOCK)
+            || settings.is_locked(super::ocr::LOCK)
+            || super::concepts::CONCEPTS
+                .iter()
+                .any(|concept| settings.is_locked(concept.key))
+    }) || super::imgfilter::any(ctx, chat)
 }
 
 fn armed_image_policies(
@@ -4407,9 +4431,24 @@ async fn watch_one(
         log::warn!("image moderation: chat {chat} file {id} skipped because its queue is full");
         return false;
     };
+    if !ctx.claim_media(id, || RacingCopy {
+        message: message.clone(),
+        chat,
+        media: media.clone(),
+        force_original,
+    }) {
+        return true;
+    }
+    let claim = MediaClaim {
+        ctx: Arc::clone(&ctx),
+        id,
+        settled: false,
+    };
 
     Arc::clone(&ctx).spawn_owned(async move {
         let _task_slot = task_slot;
+        let mut claim = claim;
+        let owner = Arc::clone(&ctx);
         classify(Classification {
             ctx,
             chat,
@@ -4436,8 +4475,92 @@ async fn watch_one(
             name,
         })
         .await;
+        claim.settled = true;
+        for copy in owner.settle_media(id) {
+            owner.retry_racing_copy(copy);
+        }
     });
     true
+}
+
+pub async fn run_racing_copies(
+    ctx: Arc<Ctx>,
+    mut copies: tokio::sync::mpsc::Receiver<RacingCopy>,
+    mut stopping: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = stopping.changed() => break,
+            copy = copies.recv() => {
+                let Some(copy) = copy else { break };
+                let owner = Arc::clone(&ctx);
+                Arc::clone(&ctx).spawn_owned(async move {
+                    watch_one(
+                        &owner,
+                        &copy.message,
+                        copy.chat,
+                        &copy.media,
+                        copy.force_original,
+                    )
+                    .await;
+                });
+            }
+        }
+    }
+}
+
+async fn fetch_still(
+    ctx: &Arc<Ctx>,
+    (chat, id, kind): (i64, i64, &'static str),
+    web_still_bytes: &mut Option<Vec<u8>>,
+    ladder: Option<&Ladder>,
+    still_document: Option<&Document>,
+    probed_full_bytes: &mut Option<Vec<u8>>,
+) -> Option<(Vec<u8>, String)> {
+    if let Some(bytes) = web_still_bytes.take() {
+        Some((bytes, "original".to_owned()))
+    } else if let Some(ladder) = ladder {
+        let bytes = fetch(ctx, chat, id, ladder, ladder.start).await?;
+        let pixels = dims(&ladder.sizes[ladder.start]).map_or_else(
+            || "?x?".to_owned(),
+            |(width, height)| format!("{width}x{height}"),
+        );
+        Some((bytes, pixels))
+    } else if let Some(document) = still_document {
+        let bytes = if let Some(bytes) = probed_full_bytes.take() {
+            (bytes.len() <= THUMBNAIL_BYTES_MAX).then_some(bytes)
+        } else {
+            fetch_document(ctx, chat, id, document, THUMBNAIL_BYTES_MAX).await
+        };
+        Some((bytes?, "original".to_owned()))
+    } else {
+        log::info!(
+            "nsfw: {chat} file {id} skipped, kind {}, animated media had no usable decoded frame",
+            kind
+        );
+        None
+    }
+}
+
+pub struct RacingCopy {
+    message: Message,
+    chat: i64,
+    media: Media,
+    force_original: bool,
+}
+
+struct MediaClaim {
+    ctx: Arc<Ctx>,
+    id: i64,
+    settled: bool,
+}
+
+impl Drop for MediaClaim {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.ctx.settle_media(self.id);
+        }
+    }
 }
 
 fn no_filters() -> Arc<Vec<super::imgfilter::Filter>> {
@@ -5064,6 +5187,23 @@ async fn classify(classification: Classification) {
         && (gif_document.is_none() || full_animation.is_some());
 
     let thinking = std::time::Instant::now();
+    let mut prefetched_still = if full_animation.is_none() {
+        let fetched = fetch_still(
+            &ctx,
+            (chat, id, kind),
+            &mut web_still_bytes,
+            ladder.as_ref(),
+            still_document.as_ref(),
+            &mut probed_full_bytes,
+        )
+        .await;
+        if fetched.is_none() {
+            return;
+        }
+        fetched
+    } else {
+        None
+    };
     let visual_slot = if needs_nsfw || needs_general {
         Some(ctx.nsfw_slot().await)
     } else {
@@ -5229,30 +5369,21 @@ async fn classify(classification: Classification) {
         let pixels = format!("{}x{}", image.width(), image.height());
         (image, None, None, *size, pixels)
     } else {
-        let (bytes, pixels) = if let Some(bytes) = web_still_bytes.take() {
-            (bytes, "original".to_owned())
-        } else if let Some(ladder) = ladder.as_ref() {
-            let Some(bytes) = fetch(&ctx, chat, id, ladder, ladder.start).await else {
-                return;
-            };
-            let pixels = dims(&ladder.sizes[ladder.start]).map_or_else(
-                || "?x?".to_owned(),
-                |(width, height)| format!("{width}x{height}"),
-            );
-            (bytes, pixels)
-        } else if let Some(document) = still_document.as_ref() {
-            let bytes = if let Some(bytes) = probed_full_bytes.take() {
-                (bytes.len() <= THUMBNAIL_BYTES_MAX).then_some(bytes)
-            } else {
-                fetch_document(&ctx, chat, id, document, THUMBNAIL_BYTES_MAX).await
-            };
-            let Some(bytes) = bytes else { return };
-            (bytes, "original".to_owned())
-        } else {
-            log::info!(
-                "nsfw: {chat} file {id} skipped, kind {}, animated media had no usable decoded frame",
-                kind
-            );
+        let fetched = match prefetched_still.take() {
+            Some(fetched) => Some(fetched),
+            None => {
+                fetch_still(
+                    &ctx,
+                    (chat, id, kind),
+                    &mut web_still_bytes,
+                    ladder.as_ref(),
+                    still_document.as_ref(),
+                    &mut probed_full_bytes,
+                )
+                .await
+            }
+        };
+        let Some((bytes, pixels)) = fetched else {
             return;
         };
         let size = bytes.len();
@@ -5611,6 +5742,28 @@ async fn classify(classification: Classification) {
         }
     }
 
+    let prints = if !filters.is_empty()
+        && !general_failed
+        && custom_margins.is_none()
+        && filters.iter().any(|filter| filter.is_face())
+    {
+        let frame = Arc::clone(&image);
+        match tokio::task::spawn_blocking(move || super::facelock::prints(&frame)).await {
+            Ok(Ok(prints)) => prints,
+            Ok(Err(error)) => {
+                log::error!("face lock: {chat} file {id} faces failed: {error}");
+                None
+            }
+            Err(error) => {
+                log::error!("face lock: {chat} file {id} face worker failed: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    drop(visual_slot);
+
     if let Some(armed) = concepts.filter(|_| !general_failed) {
         let all = match margins {
             Some(all) => Some(all),
@@ -5663,22 +5816,6 @@ async fn classify(classification: Classification) {
     }
 
     if !filters.is_empty() && !general_failed {
-        let prints = if custom_margins.is_none() && filters.iter().any(|filter| filter.is_face()) {
-            let frame = Arc::clone(&image);
-            match tokio::task::spawn_blocking(move || super::facelock::prints(&frame)).await {
-                Ok(Ok(prints)) => prints,
-                Ok(Err(error)) => {
-                    log::error!("face lock: {chat} file {id} faces failed: {error}");
-                    None
-                }
-                Err(error) => {
-                    log::error!("face lock: {chat} file {id} face worker failed: {error}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
         let scored = match (custom_margins, embedding.as_ref()) {
             (Some(margins), _) => Some(margins),
             (None, Some(embedding)) => {
@@ -5720,7 +5857,6 @@ async fn classify(classification: Classification) {
     }
 
     drop(image);
-    drop(visual_slot);
 
     if let Some(armed) = advert {
         let verdict = match reading {
@@ -6542,6 +6678,50 @@ mod tests {
             video_timestamp: None,
             ttl_seconds: None,
         })
+    }
+
+    #[test]
+    fn a_decode_is_held_to_its_thread_budget() {
+        let args = vec!["-v".to_owned(), "error".to_owned(), "-i".to_owned(), "x".to_owned()];
+        assert_eq!(
+            super::decoder_args("ffmpeg", &args),
+            ["-threads", super::DECODER_THREADS, "-v", "error", "-i", "x"]
+        );
+        assert_eq!(super::decoder_args("ffprobe", &args), args);
+    }
+
+    #[test]
+    fn only_a_video_that_can_arrive_in_time_is_downloaded_whole() {
+        let sized = |mime: &str, size: i64, animated: bool| {
+            let tl::enums::Document::Document(mut raw) =
+                document_with_mime(mime).raw.document.unwrap()
+            else {
+                unreachable!()
+            };
+            raw.size = size;
+            if animated {
+                raw.attributes
+                    .push(tl::types::DocumentAttributeAnimated {}.into());
+            }
+            Document::from_raw_media(tl::types::MessageMediaDocument {
+                nopremium: false,
+                spoiler: false,
+                video: false,
+                round: false,
+                voice: false,
+                document: Some(raw.into()),
+                alt_documents: None,
+                video_cover: None,
+                video_timestamp: None,
+                ttl_seconds: None,
+            })
+        };
+        let max = super::VIDEO_FETCH_MAX as i64;
+        assert!(super::is_animated_document(&sized("video/mp4", max, false)));
+        assert!(!super::is_animated_document(&sized("video/mp4", max + 1, false)));
+        assert!(!super::is_animated_document(&sized("video/webm", 60 << 20, false)));
+        assert!(super::is_animated_document(&sized("video/mp4", 60 << 20, true)));
+        assert!(super::is_animated_document(&sized("image/gif", 60 << 20, false)));
     }
 
     fn routing_photo(id: i64, dc_id: i32) -> tl::enums::Photo {
@@ -9901,6 +10081,55 @@ mod tests {
             assemble_judgement(&needs_grader, None, None),
             Err(ModelError::Runtime(_))
         ));
+    }
+
+    #[test]
+    fn the_second_look_waits_without_holding_a_picture_slot() {
+        let source = include_str!("nsfw.rs");
+        let classify = source
+            .split_once("async fn classify(classification: Classification)")
+            .expect("classify exists")
+            .1
+            .split_once("\n}\n")
+            .expect("classify ends")
+            .0;
+        let released = classify.find("drop(visual_slot);").expect("the slot is released");
+        let prints = classify
+            .find("super::facelock::prints(&frame)")
+            .expect("face prints are found");
+        let concept_look = classify
+            .find("super::concepts::second_look(")
+            .expect("the concept second look");
+        let filter_look = classify
+            .find("super::imgfilter::second_look(&image")
+            .expect("the filter second look");
+        assert!(prints < released, "face prints must run under the slot");
+        assert!(released < concept_look && released < filter_look);
+        assert_eq!(classify.matches("drop(visual_slot);").count(), 1);
+        let prefetched = classify
+            .find("let mut prefetched_still")
+            .expect("the still picture is prefetched");
+        let taken = classify.find("ctx.nsfw_slot().await").expect("the slot");
+        assert!(prefetched < taken);
+    }
+
+    #[test]
+    fn racing_copies_wait_for_the_first_classification() {
+        let source = include_str!("nsfw.rs");
+        let watch_one = source
+            .split_once("async fn watch_one(")
+            .expect("watch_one exists")
+            .1
+            .split_once("\n}\n")
+            .expect("watch_one ends")
+            .0;
+        let claimed = watch_one.find("ctx.claim_media(id").expect("a claim");
+        let spawned = watch_one.find("spawn_owned(").expect("a spawn");
+        let classified = watch_one.find("classify(Classification {").expect("classify");
+        let handed_back = watch_one
+            .find("owner.retry_racing_copy(copy)")
+            .expect("waiting copies are handed back");
+        assert!(claimed < spawned && classified < handed_back);
     }
 
     #[test]

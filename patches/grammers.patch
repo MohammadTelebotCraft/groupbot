@@ -1872,10 +1872,18 @@ index dbc6df6..aaad2c2 100644
                  revoke: false,
                  peer: peer.into(),
 diff --git a/grammers-client/src/client/files.rs b/grammers-client/src/client/files.rs
-index 3ba3c02..57496da 100644
+index 3ba3c02..2149832 100644
 --- a/grammers-client/src/client/files.rs
 +++ b/grammers-client/src/client/files.rs
-@@ -20,7 +20,7 @@ use tokio::sync::Mutex as AsyncMutex;
+@@ -8,6 +8,7 @@
+ 
+ use std::mem;
+ use std::sync::Arc;
++use std::time::Duration;
+ #[cfg(feature = "fs")]
+ use std::{io::SeekFrom, path::Path};
+ 
+@@ -20,7 +21,7 @@ use tokio::sync::Mutex as AsyncMutex;
  use tokio::{
      fs,
      io::{AsyncSeekExt, AsyncWriteExt},
@@ -1884,10 +1892,42 @@ index 3ba3c02..57496da 100644
  };
  
  use super::Client;
-@@ -33,6 +33,51 @@ const FILE_MIGRATE_ERROR: i32 = 303;
+@@ -33,6 +34,83 @@ const FILE_MIGRATE_ERROR: i32 = 303;
  const BIG_FILE_SIZE: usize = 10 * 1024 * 1024;
  const WORKER_COUNT: usize = 4;
  
++fn web_file_size(declared: i32, byte_cap: usize) -> Result<usize, io::Error> {
++    let size = usize::try_from(declared)
++        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "negative web document size"))?;
++    if size == 0 || size > byte_cap {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidInput,
++            "web document size is zero or exceeds byte cap",
++        ));
++    }
++    Ok(size)
++}
++
++fn checked_web_chunk(
++    size: usize,
++    offset: usize,
++    limit: usize,
++    reported_size: i32,
++    received: usize,
++) -> Result<usize, io::Error> {
++    if offset >= size
++        || usize::try_from(reported_size).ok() != Some(size)
++        || offset.checked_add(received).is_none_or(|end| end > size)
++        || received != size.saturating_sub(offset).min(limit)
++    {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            "invalid web document chunk",
++        ));
++    }
++    Ok(offset + received)
++}
++
 +fn checked_chunk_offset(offset: i64, limit: i32, chunks: i32) -> Result<i64, io::Error> {
 +    let chunks = u32::try_from(chunks).map_err(|_| {
 +        io::Error::new(
@@ -1936,7 +1976,7 @@ index 3ba3c02..57496da 100644
  /// Iterator returned by [`Client::iter_download`].
  pub struct DownloadIter {
      client: Client,
-@@ -59,9 +104,8 @@ impl DownloadIter {
+@@ -59,9 +137,8 @@ impl DownloadIter {
      /// the range `MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE`.
      pub fn chunk_size(mut self, size: i32) -> Self {
          assert!((MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&size) && size % MIN_CHUNK_SIZE == 0);
@@ -1948,7 +1988,7 @@ index 3ba3c02..57496da 100644
          }
          self
      }
-@@ -70,11 +114,21 @@ impl DownloadIter {
+@@ -70,11 +147,21 @@ impl DownloadIter {
      /// skip less data, modify the `chunk_size` before calling this method, and then reset it to
      /// any value you want.
      pub fn skip_chunks(mut self, n: i32) -> Self {
@@ -1973,7 +2013,7 @@ index 3ba3c02..57496da 100644
          }
          self
      }
-@@ -91,7 +145,7 @@ impl DownloadIter {
+@@ -91,7 +178,7 @@ impl DownloadIter {
              DownloadIterVariant::Request(r) => r,
              DownloadIterVariant::PreDownloaded(data) => {
                  self.done = true;
@@ -1982,7 +2022,7 @@ index 3ba3c02..57496da 100644
              }
              DownloadIterVariant::PreFailed(error) => {
                  return Err(InvocationError::Io(error));
-@@ -109,9 +163,22 @@ impl DownloadIter {
+@@ -109,9 +196,22 @@ impl DownloadIter {
          loop {
              break match self.client.invoke_in_dc(dc, &request).await {
                  Ok(File::File(f)) => {
@@ -2008,7 +2048,7 @@ index 3ba3c02..57496da 100644
  
                      if reached_known_size || f.bytes.len() < request.limit as usize {
                          self.done = true;
-@@ -120,14 +187,16 @@ impl DownloadIter {
+@@ -120,14 +220,16 @@ impl DownloadIter {
                          }
                      }
  
@@ -2029,7 +2069,7 @@ index 3ba3c02..57496da 100644
                  Err(InvocationError::Rpc(err)) if &err.name == "AUTH_KEY_UNREGISTERED" => {
                      match self.client.copy_auth_to_dc(dc).await {
                          Ok(_) => continue,
-@@ -135,7 +204,10 @@ impl DownloadIter {
+@@ -135,7 +237,10 @@ impl DownloadIter {
                      }
                  }
                  Err(InvocationError::Rpc(err)) if err.code == FILE_MIGRATE_ERROR => {
@@ -2041,7 +2081,89 @@ index 3ba3c02..57496da 100644
                      continue;
                  }
                  Err(e) => Err(e),
-@@ -191,10 +263,7 @@ impl Client {
+@@ -146,6 +251,81 @@ impl DownloadIter {
+ 
+ /// Method implementations related to uploading or downloading files.
+ impl Client {
++    /// Downloads a proxied Telegram web document into memory, subject to an absolute byte cap
++    /// and deadline. This method requires a signed-in user account; Telegram does not allow bots
++    /// to call `upload.getWebFile`.
++    pub async fn download_web_document(
++        &self,
++        document: &tl::enums::WebDocument,
++        byte_cap: usize,
++        deadline: Duration,
++    ) -> Result<Vec<u8>, InvocationError> {
++        let tl::enums::WebDocument::Document(document) = document else {
++            return Err(InvocationError::Io(io::Error::new(
++                io::ErrorKind::InvalidInput,
++                "web document is not Telegram-proxied",
++            )));
++        };
++        let size = web_file_size(document.size, byte_cap).map_err(InvocationError::Io)?;
++        let download = async {
++            if self.get_me().await?.is_bot() {
++                return Err(InvocationError::Io(io::Error::new(
++                    io::ErrorKind::PermissionDenied,
++                    "web document download requires a user account",
++                )));
++            }
++            let tl::enums::Config::Config(config) =
++                self.invoke(&tl::functions::help::GetConfig {}).await?;
++            if config.webfile_dc_id <= 0 {
++                return Err(InvocationError::Io(io::Error::new(
++                    io::ErrorKind::InvalidData,
++                    "invalid web-file data center",
++                )));
++            }
++            let request_location =
++                tl::enums::InputWebFileLocation::Location(tl::types::InputWebFileLocation {
++                    url: document.url.clone(),
++                    access_hash: document.access_hash,
++                });
++            let mut bytes = Vec::with_capacity(size);
++            let mut offset = 0;
++            let mut copied_auth = false;
++            while offset < size {
++                let limit = MAX_CHUNK_SIZE as usize;
++                let request = tl::functions::upload::GetWebFile {
++                    location: request_location.clone(),
++                    offset: i32::try_from(offset).expect("web document size is i32"),
++                    limit: i32::try_from(limit).expect("chunk size is i32"),
++                };
++                let response = match self.invoke_in_dc(config.webfile_dc_id, &request).await {
++                    Ok(response) => response,
++                    Err(InvocationError::Rpc(error))
++                        if error.name == "AUTH_KEY_UNREGISTERED" && !copied_auth =>
++                    {
++                        self.copy_auth_to_dc(config.webfile_dc_id).await?;
++                        copied_auth = true;
++                        self.invoke_in_dc(config.webfile_dc_id, &request).await?
++                    }
++                    Err(error) => return Err(error),
++                };
++                let tl::enums::upload::WebFile::File(response) = response;
++                offset =
++                    checked_web_chunk(size, offset, limit, response.size, response.bytes.len())
++                        .map_err(InvocationError::Io)?;
++                bytes.extend_from_slice(&response.bytes);
++            }
++            Ok(bytes)
++        };
++        tokio::time::timeout(deadline, download)
++            .await
++            .map_err(|_| {
++                InvocationError::Io(io::Error::new(
++                    io::ErrorKind::TimedOut,
++                    "web document download timed out",
++                ))
++            })?
++    }
++
+     /// Returns a new iterator over the contents of a media document that will be downloaded.
+     ///
+     /// # Examples
+@@ -191,10 +371,7 @@ impl Client {
                  client: self.clone(),
                  done: false,
                  size: None,
@@ -2053,7 +2175,7 @@ index 3ba3c02..57496da 100644
                  dc_id: downloadable.dc_id(),
              }
          }
-@@ -260,18 +329,29 @@ impl Client {
+@@ -260,18 +437,29 @@ impl Client {
          workers: usize,
          dc_id: i32,
      ) -> Result<(), InvocationError> {
@@ -2088,7 +2210,7 @@ index 3ba3c02..57496da 100644
          let mut tasks = vec![];
          for _ in 0..workers {
              let location = location.clone();
-@@ -283,18 +363,18 @@ impl Client {
+@@ -283,18 +471,18 @@ impl Client {
                  let mut task_dc = dc_id;
                  loop {
                      // Calculate file offset
@@ -2112,7 +2234,7 @@ index 3ba3c02..57496da 100644
                      // Fetch from telegram
                      let request = &tl::functions::upload::GetFile {
                          precise: true,
-@@ -305,12 +385,34 @@ impl Client {
+@@ -305,12 +493,34 @@ impl Client {
                      };
                      match client.invoke_in_dc(task_dc, request).await {
                          Ok(tl::enums::upload::File::File(file)) => {
@@ -2151,7 +2273,7 @@ index 3ba3c02..57496da 100644
                          }
                          Err(InvocationError::Rpc(err)) if &err.name == "AUTH_KEY_UNREGISTERED" => {
                              match client.copy_auth_to_dc(task_dc).await {
-@@ -323,7 +425,12 @@ impl Client {
+@@ -323,7 +533,12 @@ impl Client {
                          }
                          Err(InvocationError::Rpc(err)) => {
                              if err.code == FILE_MIGRATE_ERROR {
@@ -2165,7 +2287,7 @@ index 3ba3c02..57496da 100644
                                  retry_offset = Some(offset);
                                  continue;
                              }
-@@ -345,7 +452,13 @@ impl Client {
+@@ -345,7 +560,13 @@ impl Client {
                  file.seek(SeekFrom::Start(offset)).await?;
              }
              file.write_all(&data).await?;
@@ -2180,7 +2302,7 @@ index 3ba3c02..57496da 100644
          }
  
          // Check if all tasks finished succesfully
-@@ -408,7 +521,7 @@ impl Client {
+@@ -408,7 +629,7 @@ impl Client {
          };
  
          let big_file = size > BIG_FILE_SIZE;
@@ -2189,7 +2311,7 @@ index 3ba3c02..57496da 100644
          let total_parts = parts.total_parts();
  
          if big_file {
-@@ -420,7 +533,7 @@ impl Client {
+@@ -420,7 +641,7 @@ impl Client {
                  let task = async move {
                      while let Some((part, bytes)) = parts.next_part().await? {
                          let ok = handle
@@ -2198,7 +2320,7 @@ index 3ba3c02..57496da 100644
                                  file_id,
                                  file_part: part,
                                  file_total_parts: total_parts,
-@@ -430,10 +543,7 @@ impl Client {
+@@ -430,10 +651,7 @@ impl Client {
                              .map_err(io::Error::other)?;
  
                          if !ok {
@@ -2210,7 +2332,7 @@ index 3ba3c02..57496da 100644
                          }
                      }
                      Ok(())
-@@ -458,7 +568,7 @@ impl Client {
+@@ -458,7 +676,7 @@ impl Client {
              while let Some((part, bytes)) = parts.next_part().await? {
                  md5.consume(&bytes);
                  let ok = self
@@ -2219,7 +2341,7 @@ index 3ba3c02..57496da 100644
                          file_id,
                          file_part: part,
                          bytes,
-@@ -467,10 +577,7 @@ impl Client {
+@@ -467,10 +685,7 @@ impl Client {
                      .map_err(io::Error::other)?;
  
                  if !ok {
@@ -2231,7 +2353,7 @@ index 3ba3c02..57496da 100644
                  }
              }
              Ok(Uploaded::from_raw(
-@@ -514,12 +621,19 @@ impl Client {
+@@ -514,12 +729,19 @@ impl Client {
          let path = path.as_ref();
  
          let mut file = fs::File::open(path).await?;
@@ -2255,7 +2377,7 @@ index 3ba3c02..57496da 100644
  
          self.upload_stream(&mut file, size, name).await
      }
-@@ -536,15 +650,20 @@ struct PartStream<'a, S: AsyncRead + Unpin> {
+@@ -536,15 +758,20 @@ struct PartStream<'a, S: AsyncRead + Unpin> {
  }
  
  impl<'a, S: AsyncRead + Unpin> PartStream<'a, S> {
@@ -2280,7 +2402,7 @@ index 3ba3c02..57496da 100644
      }
  
      fn total_parts(&self) -> i32 {
-@@ -585,3 +704,46 @@ impl<'a, S: AsyncRead + Unpin> PartStream<'a, S> {
+@@ -585,3 +812,82 @@ impl<'a, S: AsyncRead + Unpin> PartStream<'a, S> {
          res
      }
  }
@@ -2288,6 +2410,42 @@ index 3ba3c02..57496da 100644
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
++
++    #[test]
++    fn web_document_bounds_reject_oversize_and_invalid_chunks() {
++        assert_eq!(web_file_size(16, 16).unwrap(), 16);
++        assert_eq!(
++            web_file_size(0, 16).unwrap_err().kind(),
++            io::ErrorKind::InvalidInput
++        );
++        assert_eq!(
++            web_file_size(-1, 16).unwrap_err().kind(),
++            io::ErrorKind::InvalidInput
++        );
++        assert_eq!(
++            web_file_size(17, 16).unwrap_err().kind(),
++            io::ErrorKind::InvalidInput
++        );
++        assert_eq!(checked_web_chunk(16, 0, 8, 16, 8).unwrap(), 8);
++        assert_eq!(checked_web_chunk(16, 8, 8, 16, 8).unwrap(), 16);
++        assert_eq!(checked_web_chunk(10, 8, 8, 10, 2).unwrap(), 10);
++        for (offset, limit, reported_size, received) in [
++            (0, 8, 15, 8),
++            (0, 8, 16, 0),
++            (0, 8, 16, 9),
++            (8, 8, 16, 9),
++            (0, 8, 16, 4),
++            (16, 8, 16, 0),
++            (usize::MAX, 8, 16, 8),
++        ] {
++            assert_eq!(
++                checked_web_chunk(16, offset, limit, reported_size, received)
++                    .unwrap_err()
++                    .kind(),
++                io::ErrorKind::InvalidData
++            );
++        }
++    }
 +
 +    #[test]
 +    fn checked_chunk_offset_rejects_negative_and_overflowing_skips() {
@@ -2328,7 +2486,7 @@ index 3ba3c02..57496da 100644
 +    }
 +}
 diff --git a/grammers-client/src/client/messages.rs b/grammers-client/src/client/messages.rs
-index 08af5cd..6bb0a04 100644
+index 08af5cd..753feb6 100644
 --- a/grammers-client/src/client/messages.rs
 +++ b/grammers-client/src/client/messages.rs
 @@ -35,7 +35,7 @@ async fn map_random_ids_to_messages(
@@ -2851,7 +3009,20 @@ index 08af5cd..6bb0a04 100644
              id: message_id,
              message: Some(new_message.text),
              media: new_message.media,
-@@ -872,20 +1015,51 @@ impl Client {
+@@ -849,10 +992,8 @@ impl Client {
+     ///
+     /// The messages are deleted for both ends.
+     ///
+-    /// The amount of deleted messages is returned (it might be less than the amount of input
+-    /// message IDs if some of them were already missing). It is not possible to find out which
+-    /// messages were actually deleted, but if the request succeeds, none of the specified message
+-    /// IDs will appear in the message history from that point on.
++    /// Returns Telegram's generated PTS event count, not a per-message deletion receipt. It is
++    /// not possible to find out which requested messages were actually deleted from this result.
+     ///
+     /// See also: [`Message::delete`].
+     ///
+@@ -872,20 +1013,51 @@ impl Client {
          peer: C,
          message_ids: &[i32],
      ) -> Result<usize, InvocationError> {
@@ -2910,7 +3081,7 @@ index 08af5cd..6bb0a04 100644
              }?;
  
          Ok(affected.pts_count as usize)
-@@ -946,8 +1120,8 @@ impl Client {
+@@ -946,8 +1118,8 @@ impl Client {
              allow_paid_stars: None,
              suggested_post: None,
          };
@@ -2921,7 +3092,7 @@ index 08af5cd..6bb0a04 100644
      }
  
      /// Gets the [`Message`] to which the input message is replying to.
-@@ -1017,12 +1191,12 @@ impl Client {
+@@ -1017,12 +1189,12 @@ impl Client {
              }
          };
  
@@ -2937,7 +3108,7 @@ index 08af5cd..6bb0a04 100644
              .next()
              .filter(|m| !filter_req || m.peer_id() == message.peer_id()))
      }
-@@ -1131,12 +1305,12 @@ impl Client {
+@@ -1131,12 +1303,12 @@ impl Client {
                  .await
          }?;
  
@@ -2953,7 +3124,7 @@ index 08af5cd..6bb0a04 100644
              .filter(|m| m.peer_id() == peer.id)
              .map(|m| (m.id(), m))
              .collect::<HashMap<_, _>>();
-@@ -1177,12 +1351,12 @@ impl Client {
+@@ -1177,12 +1349,12 @@ impl Client {
                  .await
          }?;
  
@@ -2969,7 +3140,7 @@ index 08af5cd..6bb0a04 100644
              .find(|m| m.peer_id() == peer.id))
      }
  
-@@ -1231,7 +1405,7 @@ impl Client {
+@@ -1231,7 +1403,7 @@ impl Client {
          id: i32,
          pin: bool,
      ) -> Result<(), InvocationError> {
@@ -2978,7 +3149,7 @@ index 08af5cd..6bb0a04 100644
              silent: true,
              unpin: !pin,
              pm_oneside: false,
-@@ -1256,8 +1430,9 @@ impl Client {
+@@ -1256,8 +1428,9 @@ impl Client {
          &self,
          peer: C,
      ) -> Result<(), InvocationError> {
@@ -2990,7 +3161,7 @@ index 08af5cd..6bb0a04 100644
              top_msg_id: None,
              saved_peer_id: None,
          })
-@@ -1313,11 +1488,12 @@ impl Client {
+@@ -1313,11 +1486,12 @@ impl Client {
          reactions: R,
      ) -> Result<(), InvocationError> {
          let reactions = reactions.into();
@@ -3124,6 +3295,540 @@ index f80d4ae..649f4f3 100644
      /// Like [`Self::invoke`], but in the specified DC.
      ///
      /// <div class="warning">
+diff --git a/grammers-client/src/client/outbound.rs b/grammers-client/src/client/outbound.rs
+new file mode 100644
+index 0000000..638dc9f
+--- /dev/null
++++ b/grammers-client/src/client/outbound.rs
+@@ -0,0 +1,528 @@
++use std::collections::HashMap;
++use std::sync::Arc;
++use std::sync::atomic::{AtomicUsize, Ordering};
++use std::time::{Duration, Instant};
++
++use grammers_session::types::PeerRef;
++use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
++
++const DEFAULT_RATE: u32 = 25;
++const DEFAULT_CONCURRENCY: usize = 32;
++const DEFAULT_CRITICAL_RESERVED_CONCURRENCY: usize = 8;
++const DEFAULT_GROUP_MESSAGES_PER_MINUTE: u32 = 20;
++const DEFAULT_CHAT_CACHE_MAX: usize = 50_000;
++
++struct Bucket {
++    tokens: f64,
++    updated: Instant,
++}
++
++/// Shared backpressure for account-level Telegram writes.
++///
++/// A `Client` is cloneable, and every `Message` created by it keeps a clone too. Keeping this
++/// budget in `ClientInner` therefore makes replies, scheduled jobs, and detached moderation work
++/// share one account-wide queue instead of each path creating its own burst. Reads still use the
++/// normal `invoke` path; only callers that explicitly use `invoke_outbound` consume this budget.
++pub(crate) struct OutboundBudget {
++    bucket: Mutex<Bucket>,
++    rate: f64,
++    burst: f64,
++    in_flight: Arc<Semaphore>,
++    /// Ordinary sends/edits may use only this subset. Enforcement skips it and can therefore
++    /// always reach the account limiter even when a notification burst occupies every ordinary
++    /// slot. The shared `in_flight` semaphore still caps the aggregate number of Telegram RPCs.
++    ordinary_in_flight: Arc<Semaphore>,
++    critical_reserved: usize,
++    active: Arc<AtomicUsize>,
++    waiting: AtomicUsize,
++    critical_waiting: AtomicUsize,
++    chat_waiting: AtomicUsize,
++    /// Telegram's group message ceiling is per peer, not just per account. The map is capped so
++    /// a fleet of quiet groups cannot turn pacing metadata into another process-wide leak.
++    chat_next: Mutex<HashMap<i64, Instant>>,
++    chat_interval: Duration,
++    chat_cache_max: usize,
++}
++
++pub(crate) struct OutboundPermit {
++    _in_flight: OwnedSemaphorePermit,
++    _ordinary: Option<OwnedSemaphorePermit>,
++    active: Arc<AtomicUsize>,
++}
++
++impl Drop for OutboundPermit {
++    fn drop(&mut self) {
++        self.active.fetch_sub(1, Ordering::Relaxed);
++    }
++}
++
++impl OutboundBudget {
++    pub(crate) fn from_env() -> Self {
++        let rate = env_u32("TELEGRAM_ACTIONS_PER_SECOND", DEFAULT_RATE, 1, 1_000);
++        let burst = env_u32("TELEGRAM_ACTION_BURST", rate, 1, 10_000);
++        let concurrency = env_usize(
++            "TELEGRAM_OUTBOUND_CONCURRENCY",
++            DEFAULT_CONCURRENCY,
++            1,
++            1_024,
++        );
++        let critical_reserved = env_usize(
++            "TELEGRAM_CRITICAL_RESERVED_CONCURRENCY",
++            DEFAULT_CRITICAL_RESERVED_CONCURRENCY,
++            1,
++            1_024,
++        )
++        .min(concurrency.saturating_sub(1));
++        let group_messages = env_u32(
++            "TELEGRAM_GROUP_MESSAGES_PER_MINUTE",
++            DEFAULT_GROUP_MESSAGES_PER_MINUTE,
++            1,
++            1_200,
++        );
++        let chat_cache_max = env_usize(
++            "TELEGRAM_CHAT_RATE_CACHE_MAX",
++            DEFAULT_CHAT_CACHE_MAX,
++            1_000,
++            500_000,
++        );
++        Self {
++            bucket: Mutex::new(Bucket {
++                tokens: burst as f64,
++                updated: Instant::now(),
++            }),
++            rate: rate as f64,
++            burst: burst as f64,
++            in_flight: Arc::new(Semaphore::new(concurrency)),
++            ordinary_in_flight: Arc::new(Semaphore::new(concurrency - critical_reserved)),
++            critical_reserved,
++            active: Arc::new(AtomicUsize::new(0)),
++            waiting: AtomicUsize::new(0),
++            critical_waiting: AtomicUsize::new(0),
++            chat_waiting: AtomicUsize::new(0),
++            chat_next: Mutex::new(HashMap::new()),
++            chat_interval: Duration::from_secs_f64(60.0 / group_messages as f64),
++            chat_cache_max,
++        }
++    }
++
++    /// Reserve a per-group message slot before taking the account-wide permit. Waiting here,
++    /// rather than while holding one of the 32 account slots, keeps a noisy group from starving
++    /// unrelated groups on the same bot account.
++    pub(crate) async fn acquire_for_peer(&self, peer: PeerRef) -> OutboundPermit {
++        if let Some(chat) = peer.id.bot_api_dialog_id().filter(|chat| *chat < 0) {
++            let delay = {
++                let now = Instant::now();
++                let mut next = self.chat_next.lock().await;
++                reserve_chat(
++                    &mut next,
++                    chat,
++                    now,
++                    self.chat_interval,
++                    self.chat_cache_max,
++                )
++            };
++            if !delay.is_zero() {
++                self.chat_waiting.fetch_add(1, Ordering::Relaxed);
++                let _waiting = ChatWaitingGuard(&self.chat_waiting);
++                tokio::time::sleep(delay).await;
++            }
++        }
++        self.acquire().await
++    }
++
++    pub(crate) async fn acquire(&self) -> OutboundPermit {
++        self.waiting.fetch_add(1, Ordering::Relaxed);
++        let _waiting = ChatWaitingGuard(&self.waiting);
++        let ordinary = Arc::clone(&self.ordinary_in_flight)
++            .acquire_owned()
++            .await
++            .expect("the ordinary outbound semaphore is never closed");
++        let in_flight = Arc::clone(&self.in_flight)
++            .acquire_owned()
++            .await
++            .expect("the outbound semaphore is never closed");
++
++        loop {
++            let delay = {
++                let mut bucket = self.bucket.lock().await;
++                let elapsed = bucket.updated.elapsed().as_secs_f64();
++                bucket.updated = Instant::now();
++                bucket.tokens = (bucket.tokens + elapsed * self.rate).min(self.burst);
++                if bucket.tokens >= 1.0 && self.critical_waiting.load(Ordering::Acquire) == 0 {
++                    bucket.tokens -= 1.0;
++                    None
++                } else if bucket.tokens >= 1.0 {
++                    // A critical caller has already joined one of its reserved concurrency
++                    // slots. Leave the available token for it; the short sleep is bounded by
++                    // the configured token interval and avoids a busy loop.
++                    Some(Duration::from_secs_f64(1.0 / self.rate))
++                } else {
++                    Some(Duration::from_secs_f64((1.0 - bucket.tokens) / self.rate))
++                }
++            };
++            let Some(delay) = delay else { break };
++            tokio::time::sleep(delay).await;
++        }
++
++        self.active.fetch_add(1, Ordering::Relaxed);
++        OutboundPermit {
++            _in_flight: in_flight,
++            _ordinary: Some(ordinary),
++            active: Arc::clone(&self.active),
++        }
++    }
++
++    /// Admit correctness-critical moderation without waiting behind the ordinary concurrency
++    /// partition. This does not bypass the account token bucket: critical and ordinary calls
++    /// still share the same configured request rate and burst, so prioritisation cannot create a
++    /// Telegram flood. At concurrency one no reservation is possible and behaviour is unchanged.
++    pub(crate) async fn acquire_critical(&self) -> OutboundPermit {
++        // With a real reservation this early count makes ordinary token waiters yield before the
++        // critical task is polled again. At total concurrency one there is no reserved slot, so
++        // count only after taking the shared permit; otherwise the sole ordinary holder could
++        // yield its token to a critical task that cannot enter, deadlocking both classes.
++        let counted_early = self.critical_reserved != 0;
++        let mut waiting_guard = if counted_early {
++            self.critical_waiting.fetch_add(1, Ordering::Relaxed);
++            Some(ChatWaitingGuard(&self.critical_waiting))
++        } else {
++            None
++        };
++        let in_flight = Arc::clone(&self.in_flight)
++            .acquire_owned()
++            .await
++            .expect("the outbound semaphore is never closed");
++        if !counted_early {
++            self.critical_waiting.fetch_add(1, Ordering::Relaxed);
++            waiting_guard = Some(ChatWaitingGuard(&self.critical_waiting));
++        }
++        let _waiting = waiting_guard;
++
++        loop {
++            let delay = {
++                let mut bucket = self.bucket.lock().await;
++                let elapsed = bucket.updated.elapsed().as_secs_f64();
++                bucket.updated = Instant::now();
++                bucket.tokens = (bucket.tokens + elapsed * self.rate).min(self.burst);
++                if bucket.tokens >= 1.0 {
++                    bucket.tokens -= 1.0;
++                    None
++                } else {
++                    Some(Duration::from_secs_f64((1.0 - bucket.tokens) / self.rate))
++                }
++            };
++            let Some(delay) = delay else { break };
++            tokio::time::sleep(delay).await;
++        }
++
++        self.active.fetch_add(1, Ordering::Relaxed);
++        OutboundPermit {
++            _in_flight: in_flight,
++            _ordinary: None,
++            active: Arc::clone(&self.active),
++        }
++    }
++
++    pub(crate) fn snapshot(&self) -> (usize, usize) {
++        let active = self.active.load(Ordering::Relaxed);
++        let total = self.waiting.load(Ordering::Relaxed)
++            + self.critical_waiting.load(Ordering::Relaxed)
++            + self.chat_waiting.load(Ordering::Relaxed);
++        (active, total)
++    }
++
++    pub(crate) fn critical_waiting(&self) -> usize {
++        self.critical_waiting.load(Ordering::Relaxed)
++    }
++}
++
++struct ChatWaitingGuard<'a>(&'a AtomicUsize);
++
++impl Drop for ChatWaitingGuard<'_> {
++    fn drop(&mut self) {
++        self.0.fetch_sub(1, Ordering::Relaxed);
++    }
++}
++
++fn reserve_chat(
++    next: &mut HashMap<i64, Instant>,
++    chat: i64,
++    now: Instant,
++    interval: Duration,
++    capacity: usize,
++) -> Duration {
++    if !next.contains_key(&chat) && next.len() >= capacity {
++        next.retain(|_, due| *due <= now);
++        while next.len() >= capacity {
++            let Some(oldest) = next
++                .iter()
++                .min_by_key(|(_, due)| **due)
++                .map(|(chat, _)| *chat)
++            else {
++                break;
++            };
++            next.remove(&oldest);
++        }
++    }
++    let due = next.entry(chat).or_insert(now);
++    let start = (*due).max(now);
++    *due = start + interval;
++    start.saturating_duration_since(now)
++}
++
++fn env_u32(name: &str, default: u32, min: u32, max: u32) -> u32 {
++    std::env::var(name)
++        .ok()
++        .and_then(|value| value.parse::<u32>().ok())
++        .unwrap_or(default)
++        .clamp(min, max)
++}
++
++fn env_usize(name: &str, default: usize, min: usize, max: usize) -> usize {
++    std::env::var(name)
++        .ok()
++        .and_then(|value| value.parse::<usize>().ok())
++        .unwrap_or(default)
++        .clamp(min, max)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::reserve_chat;
++    use std::collections::HashMap;
++    use std::time::{Duration, Instant};
++
++    fn test_budget(rate: u32, burst: u32, concurrency: usize) -> super::OutboundBudget {
++        let critical_reserved = usize::from(concurrency > 1);
++        super::OutboundBudget {
++            bucket: tokio::sync::Mutex::new(super::Bucket {
++                tokens: burst as f64,
++                updated: Instant::now(),
++            }),
++            rate: rate as f64,
++            burst: burst as f64,
++            in_flight: std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency)),
++            ordinary_in_flight: std::sync::Arc::new(tokio::sync::Semaphore::new(
++                concurrency - critical_reserved,
++            )),
++            critical_reserved,
++            active: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
++            waiting: std::sync::atomic::AtomicUsize::new(0),
++            critical_waiting: std::sync::atomic::AtomicUsize::new(0),
++            chat_waiting: std::sync::atomic::AtomicUsize::new(0),
++            chat_next: tokio::sync::Mutex::new(HashMap::new()),
++            chat_interval: Duration::from_millis(1),
++            chat_cache_max: 32,
++        }
++    }
++
++    #[tokio::test]
++    async fn cancelled_admission_does_not_leak_waiting_telemetry() {
++        let budget = super::OutboundBudget::from_env();
++        let blocked = budget
++            .in_flight
++            .clone()
++            .acquire_many_owned(budget.in_flight.available_permits() as u32)
++            .await
++            .unwrap();
++        for _ in 0..10 {
++            assert!(
++                tokio::time::timeout(Duration::from_millis(1), budget.acquire())
++                    .await
++                    .is_err()
++            );
++        }
++        assert_eq!(budget.snapshot(), (0, 0));
++        drop(blocked);
++        let permit = budget.acquire().await;
++        assert_eq!(budget.snapshot(), (1, 0));
++        drop(permit);
++        assert_eq!(budget.snapshot(), (0, 0));
++    }
++
++    #[test]
++    fn per_chat_reservations_are_paced_and_capped() {
++        let mut next = HashMap::new();
++        let now = Instant::now();
++        let interval = Duration::from_secs(3);
++        assert!(reserve_chat(&mut next, -1, now, interval, 2).is_zero());
++        assert!(reserve_chat(&mut next, -1, now, interval, 2) >= interval);
++        assert!(reserve_chat(&mut next, -2, now, interval, 2).is_zero());
++        assert!(reserve_chat(&mut next, -3, now, interval, 2).is_zero());
++        assert!(next.len() <= 2);
++    }
++
++    #[tokio::test]
++    async fn saturation_backlog_and_late_waiter_have_bounded_telemetry() {
++        let budget = std::sync::Arc::new(test_budget(100_000, 100_000, 2));
++        let held = budget
++            .in_flight
++            .clone()
++            .acquire_many_owned(2)
++            .await
++            .unwrap();
++        let mut jobs = Vec::new();
++        for _ in 0..32 {
++            let budget = std::sync::Arc::clone(&budget);
++            jobs.push(tokio::spawn(async move { budget.acquire().await }));
++        }
++        tokio::time::sleep(Duration::from_millis(5)).await;
++        assert_eq!(budget.snapshot(), (0, 32));
++        // A late ordinary caller joins the same bounded ordinary backlog.
++        let late = {
++            let budget = std::sync::Arc::clone(&budget);
++            tokio::spawn(async move { budget.acquire().await })
++        };
++        tokio::time::sleep(Duration::from_millis(2)).await;
++        assert_eq!(budget.snapshot(), (0, 33));
++        drop(held);
++        for job in jobs {
++            drop(job.await.unwrap());
++        }
++        drop(late.await.unwrap());
++        assert_eq!(budget.snapshot(), (0, 0));
++    }
++
++    #[tokio::test]
++    async fn cancellation_of_mixed_backlog_cleans_both_wait_counters() {
++        let budget = std::sync::Arc::new(test_budget(100_000, 100_000, 1));
++        let held = budget.in_flight.clone().acquire_owned().await.unwrap();
++        let mut jobs = Vec::new();
++        for _ in 0..8 {
++            let budget = std::sync::Arc::clone(&budget);
++            jobs.push(tokio::spawn(async move { budget.acquire().await }));
++        }
++        tokio::time::sleep(Duration::from_millis(2)).await;
++        assert_eq!(budget.snapshot(), (0, 8));
++        for job in jobs {
++            job.abort();
++            let _ = job.await;
++        }
++        assert_eq!(budget.snapshot(), (0, 0));
++        drop(held);
++    }
++
++    #[tokio::test]
++    async fn cancelled_critical_waiter_releases_priority_telemetry() {
++        let budget = std::sync::Arc::new(test_budget(100_000, 100_000, 2));
++        let held = budget
++            .in_flight
++            .clone()
++            .acquire_many_owned(2)
++            .await
++            .unwrap();
++        let critical = {
++            let budget = std::sync::Arc::clone(&budget);
++            tokio::spawn(async move { budget.acquire_critical().await })
++        };
++        tokio::time::sleep(Duration::from_millis(2)).await;
++        assert_eq!(budget.snapshot(), (0, 1));
++        assert_eq!(budget.critical_waiting(), 1);
++        critical.abort();
++        let _ = critical.await;
++        assert_eq!(budget.snapshot(), (0, 0));
++        assert_eq!(budget.critical_waiting(), 0);
++        drop(held);
++    }
++
++    #[tokio::test]
++    async fn critical_waiter_takes_the_next_token_ahead_of_ordinary_backlog() {
++        let budget = std::sync::Arc::new(test_budget(20, 1, 4));
++        // Empty the initial burst. The next token is due in roughly 50 ms.
++        drop(budget.acquire().await);
++
++        let (order, mut completed) = tokio::sync::mpsc::unbounded_channel();
++        let mut ordinary = Vec::new();
++        for _ in 0..2 {
++            let budget = std::sync::Arc::clone(&budget);
++            let order = order.clone();
++            ordinary.push(tokio::spawn(async move {
++                let permit = budget.acquire().await;
++                let _ = order.send("ordinary");
++                permit
++            }));
++        }
++        tokio::time::sleep(Duration::from_millis(5)).await;
++        let critical = {
++            let budget = std::sync::Arc::clone(&budget);
++            let order = order.clone();
++            tokio::spawn(async move {
++                let permit = budget.acquire_critical().await;
++                let _ = order.send("critical");
++                permit
++            })
++        };
++
++        assert_eq!(
++            tokio::time::timeout(Duration::from_millis(500), completed.recv())
++                .await
++                .unwrap(),
++            Some("critical")
++        );
++        drop(critical.await.unwrap());
++        for task in ordinary {
++            task.abort();
++            let _ = task.await;
++        }
++        assert_eq!(budget.snapshot(), (0, 0));
++        assert_eq!(budget.critical_waiting(), 0);
++    }
++
++    #[tokio::test]
++    async fn stalled_ordinary_calls_cannot_consume_the_reserved_critical_slot() {
++        let budget = std::sync::Arc::new(test_budget(100_000, 100_000, 4));
++        let mut ordinary = Vec::new();
++        for _ in 0..3 {
++            ordinary.push(budget.acquire().await);
++        }
++        assert_eq!(budget.snapshot(), (3, 0));
++
++        let blocked_ordinary = {
++            let budget = std::sync::Arc::clone(&budget);
++            tokio::spawn(async move { budget.acquire().await })
++        };
++        tokio::time::sleep(Duration::from_millis(2)).await;
++        assert_eq!(budget.snapshot(), (3, 1));
++
++        let critical = tokio::time::timeout(Duration::from_millis(100), budget.acquire_critical())
++            .await
++            .expect("the reserved slot must stay reachable");
++        assert_eq!(budget.snapshot(), (4, 1));
++        drop(critical);
++        blocked_ordinary.abort();
++        let _ = blocked_ordinary.await;
++        drop(ordinary);
++        assert_eq!(budget.snapshot(), (0, 0));
++    }
++
++    #[test]
++    fn peer_pacing_is_independent_for_hot_group_and_quiet_peers() {
++        let mut next = HashMap::new();
++        let now = Instant::now();
++        let interval = Duration::from_millis(20);
++        assert!(reserve_chat(&mut next, -100, now, interval, 32).is_zero());
++        assert!(reserve_chat(&mut next, -200, now, interval, 32).is_zero());
++        assert!(reserve_chat(&mut next, -300, now, interval, 32).is_zero());
++        assert!(reserve_chat(&mut next, -100, now, interval, 32) >= interval);
++        assert!(reserve_chat(&mut next, -200, now, interval, 32) >= interval);
++        assert!(reserve_chat(&mut next, -300, now, interval, 32) >= interval);
++    }
++
++    #[test]
++    #[ignore = "PERF probe; run explicitly with --ignored --nocapture"]
++    fn perf_bounded_chat_cache_churn_json() {
++        let mut next = HashMap::new();
++        let now = Instant::now();
++        let started = Instant::now();
++        for chat in 0..100_000_i64 {
++            let _ = reserve_chat(&mut next, -chat - 1, now, Duration::from_millis(1), 1_000);
++        }
++        let elapsed_us = started.elapsed().as_micros();
++        println!(
++            "{{\"kind\":\"outbound_chat_cache_churn\",\"insertions\":100000,\"capacity\":1000,\"elapsed_us\":{},\"final_len\":{}}}",
++            elapsed_us,
++            next.len()
++        );
++        assert!(next.len() <= 1_000);
++    }
++}
 diff --git a/grammers-client/src/client/updates.rs b/grammers-client/src/client/updates.rs
 index 656aca5..df63a9b 100644
 --- a/grammers-client/src/client/updates.rs
@@ -3837,7 +4542,7 @@ index 5ef23d4..598ccb7 100644
 +    }
 +}
 diff --git a/grammers-client/src/message/message.rs b/grammers-client/src/message/message.rs
-index e7e6845..1fc3213 100644
+index e7e6845..a19264c 100644
 --- a/grammers-client/src/message/message.rs
 +++ b/grammers-client/src/message/message.rs
 @@ -241,10 +241,14 @@ impl Message {
@@ -3907,7 +4612,7 @@ index e7e6845..1fc3213 100644
      }
  
      /// Edit this message to change its text or media.
-@@ -712,6 +733,20 @@ impl Message {
+@@ -712,6 +733,25 @@ impl Message {
              .map(drop)
      }
  
@@ -3916,19 +4621,24 @@ index e7e6845..1fc3213 100644
 +    /// Generic cleanup should use [`Self::delete`]. This variant exists so a caller that has
 +    /// already made a live moderation decision can keep that deletion ahead of bulk/UI work.
 +    pub async fn delete_critical(&self) -> Result<(), InvocationError> {
++        self.delete_critical_counted().await.map(drop)
++    }
++
++    /// Like [`Self::delete_critical`], but return Telegram's generated PTS event count.
++    /// This is not a per-message proof that the requested message was deleted.
++    pub async fn delete_critical_counted(&self) -> Result<usize, InvocationError> {
 +        self.client
 +            .delete_messages_critical(
 +                self.peer_ref().await?.ok_or(InvocationError::Dropped)?,
 +                &[self.id()],
 +            )
 +            .await
-+            .map(drop)
 +    }
 +
      /// Mark this message and all messages above it as read.
      ///
      /// Unlike `Client::mark_as_read`, this method only will mark the conversation as read up to
-@@ -763,22 +798,31 @@ impl Message {
+@@ -763,22 +803,31 @@ impl Message {
  
      /// Refetch this message, mutating all of its properties in-place.
      ///
@@ -3968,7 +4678,7 @@ index e7e6845..1fc3213 100644
      }
  
      /// Download the message media in this message if applicable.
-@@ -840,3 +884,48 @@ impl fmt::Debug for Message {
+@@ -840,3 +889,48 @@ impl fmt::Debug for Message {
              .finish()
      }
  }
@@ -8867,10 +9577,14 @@ index 619eda2..b31e613 100644
 +    Sender::connect(transport, mtp, addr).await
  }
 diff --git a/grammers-mtsender/src/sender_pool.rs b/grammers-mtsender/src/sender_pool.rs
-index 2d90b8d..92a43ad 100644
+index 2d90b8d..ce1a704 100644
 --- a/grammers-mtsender/src/sender_pool.rs
 +++ b/grammers-mtsender/src/sender_pool.rs
-@@ -9,15 +9,16 @@
+@@ -6,18 +6,20 @@
+ // option. This file may not be copied, modified, or distributed
+ // except according to those terms.
+ 
++use std::collections::HashMap;
  use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
  use std::num::NonZeroU32;
  use std::ops::{ControlFlow, Deref};
@@ -8890,7 +9604,7 @@ index 2d90b8d..92a43ad 100644
  use grammers_tl_types::{self as tl, Deserializable, enums};
  use log::{debug, info, warn};
  use tokio::task::AbortHandle;
-@@ -34,6 +35,43 @@ use crate::{Sender, ServerAddr, connect, connect_with_auth};
+@@ -34,6 +36,43 @@ use crate::{Sender, ServerAddr, connect, connect_with_auth};
  /// How long to wait after warning the user that the updates was dropped.
  const UPDATES_DROPPED_LOG_COOLDOWN: Duration = Duration::from_secs(300);
  
@@ -8934,7 +9648,7 @@ index 2d90b8d..92a43ad 100644
  pub(crate) type Transport = transport::Full;
  
  type InvokeResponse = Vec<u8>;
-@@ -43,6 +81,7 @@ enum Request {
+@@ -43,6 +82,7 @@ enum Request {
          dc_id: i32,
          body: Vec<u8>,
          tx: oneshot::Sender<Result<InvokeResponse, InvocationError>>,
@@ -8942,7 +9656,7 @@ index 2d90b8d..92a43ad 100644
      },
      CheckRetry {
          error: InvocationError,
-@@ -59,6 +98,22 @@ enum Request {
+@@ -59,6 +99,53 @@ enum Request {
  struct Rpc {
      body: Vec<u8>,
      tx: oneshot::Sender<Result<InvokeResponse, InvocationError>>,
@@ -8961,11 +9675,42 @@ index 2d90b8d..92a43ad 100644
 +    slots: Arc<tokio::sync::Semaphore>,
 +    bytes: Arc<tokio::sync::Semaphore>,
 +    gate: Option<Arc<AtomicBool>>,
-+    cooldown: tokio::sync::Mutex<tokio::time::Instant>,
++    /// When each method may be sent again after a flood wait, keyed by the constructor id
++    /// Telegram refused. Telegram meters flood waits per method, so the wait is too: one shared
++    /// deadline let a long `contacts.resolveUsername` or `upload.getFile` wait stall every
++    /// delete, ban and `updates.getDifference` on the account for its whole length. Bounded by
++    /// the number of methods in the schema, and pruned of expired entries on every insert.
++    cooldown: Mutex<HashMap<u32, tokio::time::Instant>>,
++}
++
++/// The constructor id a serialized request starts with.
++fn method_of(body: &[u8]) -> Option<u32> {
++    Some(u32::from_le_bytes(body.get(..4)?.try_into().ok()?))
++}
++
++/// The wait a 420 answer puts on the method itself. `SLOWMODE_WAIT` is also a 420 but meters one
++/// chat, not the method: recording it would stop every send to every group because one group
++/// has slow mode on.
++fn method_flood(error: &InvocationError) -> Option<u32> {
++    match error {
++        InvocationError::Rpc(crate::RpcError {
++            code: 420,
++            name,
++            value: Some(seconds),
++            ..
++        }) if name.starts_with("FLOOD_") => Some(*seconds),
++        _ => None,
++    }
++}
++
++/// A remaining wait as Telegram would state it: whole seconds, rounded up, never zero.
++fn whole_seconds(wait: Duration) -> u32 {
++    let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
++    u32::try_from(seconds.max(1)).unwrap_or(u32::MAX)
  }
  
  struct ConnectionInfo {
-@@ -87,7 +142,7 @@ pub struct SenderPoolFatHandle {
+@@ -87,7 +174,7 @@ pub struct SenderPoolFatHandle {
  
  /// Cheaply cloneable handle to interact with its [`SenderPoolRunner`].
  #[derive(Clone)]
@@ -8974,7 +9719,7 @@ index 2d90b8d..92a43ad 100644
  
  /// Builder to configure the runner to drive I/O and linked handles.
  pub struct SenderPool {
-@@ -116,7 +171,7 @@ pub struct SenderPoolRunner {
+@@ -116,7 +203,7 @@ pub struct SenderPoolRunner {
      api_id: i32,
      connection_params: ConnectionParams,
      request_rx: mpsc::UnboundedReceiver<Request>,
@@ -8983,7 +9728,7 @@ index 2d90b8d..92a43ad 100644
      connections: Vec<ConnectionInfo>,
      connection_pool: JoinSet<Result<(), ReadError>>,
  }
-@@ -149,9 +204,59 @@ impl SenderPoolHandle {
+@@ -149,9 +236,59 @@ impl SenderPoolHandle {
          dc_id: i32,
          body: Vec<u8>,
      ) -> Result<InvokeResponse, InvocationError> {
@@ -9044,7 +9789,7 @@ index 2d90b8d..92a43ad 100644
              .map_err(|_| InvocationError::Dropped)?;
          rx.await.map_err(|_| InvocationError::Dropped)?
      }
-@@ -164,13 +269,13 @@ impl SenderPoolHandle {
+@@ -164,13 +301,13 @@ impl SenderPoolHandle {
      /// This is useful after datacenter migrations during sign in,
      /// when the old connection is known to not be needed anymore.
      pub fn disconnect_from_dc(&self, dc_id: i32) -> bool {
@@ -9060,35 +9805,77 @@ index 2d90b8d..92a43ad 100644
      }
  
      /// do [`Self::raw_invoke_in_dc`] with [`Self::check_retry`]
-@@ -183,9 +288,27 @@ impl SenderPoolHandle {
+@@ -181,11 +318,37 @@ impl SenderPoolHandle {
+     ) -> Result<Vec<u8>, InvocationError> {
+         let mut fail_count = NonZeroU32::new(1).unwrap();
          let mut slept_so_far = Duration::default();
++        let method = method_of(&request_body);
  
          loop {
-+            loop {
-+                let due = *self.0.cooldown.lock().await;
-+                if due <= tokio::time::Instant::now() {
-+                    break;
++            // A method Telegram is still metering is not sent again: the caller either waits it
++            // out, if the retry policy would have slept that long anyway, or is answered with the
++            // remaining wait at once rather than parked holding its permits for an hour.
++            if let Some(method) = method
++                && let Some(due) = self.cooling(method)
++            {
++                let remaining = due.saturating_duration_since(tokio::time::Instant::now());
++                let pending = InvocationError::Rpc(crate::RpcError {
++                    code: 420,
++                    name: "FLOOD_WAIT".to_owned(),
++                    value: Some(whole_seconds(remaining)),
++                    caused_by: Some(method),
++                });
++                match self.check_retry(pending, fail_count, slept_so_far).await {
++                    ControlFlow::Continue(_) => {
++                        tokio::time::sleep_until(due).await;
++                        slept_so_far += remaining;
++                        continue;
++                    }
++                    ControlFlow::Break(pending) => break Err(pending),
 +                }
-+                tokio::time::sleep_until(due).await;
 +            }
              match self.raw_invoke_in_dc(dc_id, request_body.clone()).await {
                  Ok(response) => break Ok(response),
                  Err(e) => {
-+                    if let InvocationError::Rpc(crate::RpcError {
-+                        code: 420,
-+                        value: Some(seconds),
-+                        ..
-+                    }) = &e
-+                    {
-+                        let until =
-+                            tokio::time::Instant::now() + Duration::from_secs(u64::from(*seconds));
-+                        let mut cooldown = self.0.cooldown.lock().await;
-+                        *cooldown = (*cooldown).max(until);
++                    if let (Some(method), Some(seconds)) = (method, method_flood(&e)) {
++                        self.cool(method, Duration::from_secs(u64::from(seconds)));
 +                    }
                      let error_info = format!("{}", e);
                      match self.check_retry(e, fail_count, slept_so_far).await {
                          ControlFlow::Continue(delay) => {
-@@ -213,6 +336,7 @@ impl SenderPoolHandle {
+@@ -202,6 +365,31 @@ impl SenderPoolHandle {
+         }
+     }
+ 
++    /// When `method` may be sent again, if Telegram is still metering it.
++    fn cooling(&self, method: u32) -> Option<tokio::time::Instant> {
++        let cooldown = self
++            .0
++            .cooldown
++            .lock()
++            .unwrap_or_else(|error| error.into_inner());
++        cooldown
++            .get(&method)
++            .copied()
++            .filter(|due| *due > tokio::time::Instant::now())
++    }
++
++    fn cool(&self, method: u32, wait: Duration) {
++        let now = tokio::time::Instant::now();
++        let mut cooldown = self
++            .0
++            .cooldown
++            .lock()
++            .unwrap_or_else(|error| error.into_inner());
++        cooldown.retain(|_, due| *due > now);
++        let due = cooldown.entry(method).or_insert(now);
++        *due = (*due).max(now + wait);
++    }
++
+     /// Communicate with the running [`SenderPoolRunner`] instance
+     /// to check whether the request needs to retry.
+     async fn check_retry(
+@@ -213,6 +401,7 @@ impl SenderPoolHandle {
          let (tx, rx) = oneshot::channel();
          if self
              .0
@@ -9096,7 +9883,7 @@ index 2d90b8d..92a43ad 100644
              .send(Request::CheckRetry {
                  error,
                  fail_count,
-@@ -260,8 +384,27 @@ impl SenderPool {
+@@ -260,8 +449,27 @@ impl SenderPool {
      {
          let session = erase(session);
          let (request_tx, request_rx) = mpsc::unbounded_channel();
@@ -9121,12 +9908,12 @@ index 2d90b8d..92a43ad 100644
 +            slots: Arc::new(tokio::sync::Semaphore::new(1024)),
 +            bytes: Arc::new(tokio::sync::Semaphore::new(64 * 1024 * 1024)),
 +            gate: connection_params.request_gate.clone(),
-+            cooldown: tokio::sync::Mutex::new(tokio::time::Instant::now()),
++            cooldown: Mutex::new(HashMap::new()),
 +        }));
  
          Self {
              runner: SenderPoolRunner {
-@@ -269,12 +412,12 @@ impl SenderPool {
+@@ -269,12 +477,12 @@ impl SenderPool {
                  api_id,
                  connection_params,
                  request_rx,
@@ -9141,7 +9928,7 @@ index 2d90b8d..92a43ad 100644
                  session: Arc::clone(&session),
                  api_id,
              },
-@@ -292,10 +435,10 @@ impl SenderPoolRunner {
+@@ -292,10 +500,10 @@ impl SenderPoolRunner {
              tokio::select! {
                  biased;
                  completion = self.connection_pool.join_next(), if !self.connection_pool.is_empty() => {
@@ -9156,7 +9943,7 @@ index 2d90b8d..92a43ad 100644
                      }
                      self.connections
                          .retain(|connection| !connection.abort_handle.is_finished());
-@@ -320,7 +463,21 @@ impl SenderPoolRunner {
+@@ -320,7 +528,21 @@ impl SenderPoolRunner {
  
      async fn process_request(&mut self, request: Request) -> ControlFlow<()> {
          match request {
@@ -9179,7 +9966,7 @@ index 2d90b8d..92a43ad 100644
                  let connection = match self
                      .connections
                      .iter()
-@@ -335,7 +492,11 @@ impl SenderPoolRunner {
+@@ -335,7 +557,11 @@ impl SenderPoolRunner {
                          }
                      },
                  };
@@ -9192,7 +9979,7 @@ index 2d90b8d..92a43ad 100644
                  ControlFlow::Continue(())
              }
              Request::CheckRetry {
-@@ -390,7 +551,7 @@ impl SenderPoolRunner {
+@@ -390,7 +616,7 @@ impl SenderPoolRunner {
          let abort_handle = self.connection_pool.spawn(run_sender(
              sender,
              rpc_rx,
@@ -9201,7 +9988,7 @@ index 2d90b8d..92a43ad 100644
              dc_option.id == self.session.home_dc_id()?,
          ));
          self.connections.push(ConnectionInfo {
-@@ -482,23 +643,9 @@ impl SenderPoolRunner {
+@@ -482,23 +708,9 @@ impl SenderPoolRunner {
                      auth_key: None,
                  });
              if option.ipv6 {
@@ -9227,7 +10014,7 @@ index 2d90b8d..92a43ad 100644
                  if dc_option.ipv6.ip().to_bits() == 0 {
                      dc_option.ipv6 = SocketAddrV6::new(
                          dc_option.ipv4.ip().to_ipv6_mapped(),
-@@ -517,11 +664,11 @@ impl SenderPoolRunner {
+@@ -517,11 +729,11 @@ impl SenderPoolRunner {
  async fn run_sender(
      mut sender: Sender<Transport, grammers_mtproto::mtp::Encrypted>,
      mut rpc_rx: mpsc::UnboundedReceiver<Rpc>,
@@ -9241,7 +10028,7 @@ index 2d90b8d..92a43ad 100644
      let mut updates_closed = false;
  
      loop {
-@@ -532,47 +679,130 @@ async fn run_sender(
+@@ -532,47 +744,130 @@ async fn run_sender(
                          continue;
                      }
                      for new_updates in all_new_updates {
@@ -9382,7 +10169,7 @@ index 2d90b8d..92a43ad 100644
                  .debug_struct("Invoke")
                  .field("dc_id", dc_id)
                  .field(
-@@ -603,3 +833,213 @@ impl fmt::Debug for Request {
+@@ -603,3 +898,287 @@ impl fmt::Debug for Request {
          }
      }
  }
@@ -9409,18 +10196,17 @@ index 2d90b8d..92a43ad 100644
 +        assert!(dc_ipv4_address("149.154.167.50", i32::from(u16::MAX) + 1).is_err());
 +    }
 +
-+    #[tokio::test]
-+    async fn flood_wait_is_shared_by_other_requests() {
-+        let mut pool = SenderPool::new(Arc::new(MemorySession::default()), 1);
++    /// Sends `body`, answers it with `error`, and lets the retry policy give up on it.
++    async fn refused(pool: &mut SenderPool, body: Vec<u8>, error: &str) {
 +        let handle = pool.handle.thin.clone();
-+        let first = tokio::spawn(async move { handle.do_invoke_in_dc(1, vec![0; 4]).await });
++        let first = tokio::spawn(async move { handle.do_invoke_in_dc(1, body).await });
 +        let Request::Invoke { tx, .. } = pool.runner.request_rx.recv().await.unwrap() else {
 +            panic!()
 +        };
 +        tx.send(Err(InvocationError::Rpc(
 +            tl::types::RpcError {
 +                error_code: 420,
-+                error_message: "FLOOD_WAIT_1".into(),
++                error_message: error.into(),
 +            }
 +            .into(),
 +        )))
@@ -9431,20 +10217,95 @@ index 2d90b8d..92a43ad 100644
 +        };
 +        tx.send(ControlFlow::Break(error)).unwrap();
 +        assert!(first.await.unwrap().is_err());
++    }
++
++    async fn nothing_queued(pool: &mut SenderPool) -> bool {
++        tokio::time::timeout(Duration::from_millis(50), pool.runner.request_rx.recv())
++            .await
++            .is_err()
++    }
++
++    #[tokio::test]
++    async fn flood_wait_is_shared_by_requests_for_the_same_method() {
++        let mut pool = SenderPool::new(Arc::new(MemorySession::default()), 1);
++        refused(&mut pool, vec![0; 4], "FLOOD_WAIT_1").await;
 +        let started = tokio::time::Instant::now();
 +        let handle = pool.handle.thin.clone();
-+        let second = tokio::spawn(async move { handle.do_invoke_in_dc(1, vec![1; 4]).await });
-+        assert!(
-+            tokio::time::timeout(Duration::from_millis(50), pool.runner.request_rx.recv())
-+                .await
-+                .is_err()
-+        );
++        let second = tokio::spawn(async move { handle.do_invoke_in_dc(1, vec![0; 8]).await });
++        // The remaining wait is put to the retry policy before anything is sent.
++        let Request::CheckRetry { tx, error, .. } = pool.runner.request_rx.recv().await.unwrap()
++        else {
++            panic!()
++        };
++        let InvocationError::Rpc(ref rpc) = error else {
++            panic!()
++        };
++        assert_eq!((rpc.code, rpc.name.as_str(), rpc.value), (420, "FLOOD_WAIT", Some(1)));
++        assert_eq!(rpc.caused_by, Some(0));
++        tx.send(ControlFlow::Continue(Duration::from_secs(1))).unwrap();
 +        let Request::Invoke { tx, .. } = pool.runner.request_rx.recv().await.unwrap() else {
 +            panic!()
 +        };
 +        assert!(started.elapsed() >= Duration::from_millis(900));
 +        tx.send(Ok(vec![42])).unwrap();
 +        assert_eq!(second.await.unwrap().unwrap(), vec![42]);
++    }
++
++    #[tokio::test]
++    async fn flood_wait_on_one_method_does_not_stall_another() {
++        let mut pool = SenderPool::new(Arc::new(MemorySession::default()), 1);
++        refused(&mut pool, vec![0; 4], "FLOOD_WAIT_3600").await;
++        let started = tokio::time::Instant::now();
++        let handle = pool.handle.thin.clone();
++        let other = tokio::spawn(async move { handle.do_invoke_in_dc(1, vec![1; 4]).await });
++        let Request::Invoke { tx, .. } = pool.runner.request_rx.recv().await.unwrap() else {
++            panic!()
++        };
++        assert!(started.elapsed() < Duration::from_secs(1));
++        tx.send(Ok(vec![42])).unwrap();
++        assert_eq!(other.await.unwrap().unwrap(), vec![42]);
++    }
++
++    #[tokio::test]
++    async fn a_wait_the_policy_will_not_sleep_is_answered_without_sending() {
++        let mut pool = SenderPool::new(Arc::new(MemorySession::default()), 1);
++        refused(&mut pool, vec![0; 4], "FLOOD_WAIT_3600").await;
++        let handle = pool.handle.thin.clone();
++        let second = tokio::spawn(async move { handle.do_invoke_in_dc(1, vec![0; 4]).await });
++        let Request::CheckRetry { tx, error, .. } = pool.runner.request_rx.recv().await.unwrap()
++        else {
++            panic!()
++        };
++        tx.send(ControlFlow::Break(error)).unwrap();
++        let Err(InvocationError::Rpc(rpc)) = second.await.unwrap() else {
++            panic!()
++        };
++        assert_eq!((rpc.code, rpc.name.as_str()), (420, "FLOOD_WAIT"));
++        assert!((3590..=3600).contains(&rpc.value.unwrap()));
++        assert!(nothing_queued(&mut pool).await);
++    }
++
++    #[tokio::test]
++    async fn slow_mode_meters_a_chat_not_the_method() {
++        let mut pool = SenderPool::new(Arc::new(MemorySession::default()), 1);
++        refused(&mut pool, vec![0; 4], "SLOWMODE_WAIT_3600").await;
++        let handle = pool.handle.thin.clone();
++        let second = tokio::spawn(async move { handle.do_invoke_in_dc(1, vec![0; 4]).await });
++        let Request::Invoke { tx, .. } = pool.runner.request_rx.recv().await.unwrap() else {
++            panic!()
++        };
++        tx.send(Ok(vec![42])).unwrap();
++        assert_eq!(second.await.unwrap().unwrap(), vec![42]);
++    }
++
++    #[test]
++    fn a_remaining_wait_is_stated_in_whole_seconds_rounded_up() {
++        assert_eq!(whole_seconds(Duration::ZERO), 1);
++        assert_eq!(whole_seconds(Duration::from_millis(1)), 1);
++        assert_eq!(whole_seconds(Duration::from_secs(30)), 30);
++        assert_eq!(whole_seconds(Duration::from_millis(30_001)), 31);
++        assert_eq!(method_of(&[1, 0, 0, 0, 9]), Some(1));
++        assert_eq!(method_of(&[1, 0, 0]), None);
 +    }
 +
 +    #[tokio::test]
@@ -13862,559 +14723,8 @@ index cb59473..26838b8 100644
          }
      }
  }
-diff --git a/grammers-tl-types/tl/api.tl b/grammers-tl-types/tl/api.tl
-index c56e420..58953d4 100644
---- a/grammers-tl-types/tl/api.tl
-+++ b/grammers-tl-types/tl/api.tl
-@@ -482,6 +482,7 @@ updateWebBrowserException#140502d1 flags:# delete:flags.1?true open_external_bro
- updateNewEphemeralMessage#20bcbba1 message:EphemeralMessage = Update;
- updateDeleteEphemeralMessages#56dbfcf8 peer:Peer ids:Vector<int> = Update;
- updateEditEphemeralMessage#4bbb8f01 message:EphemeralMessage = Update;
-+updateEphemeralBotCallbackQuery#9b380762 query_id:long user_id:long peer:Peer msg_id:int data:bytes message:EphemeralMessage = Update;
- updateBotStarsSubscription#6c0d8e23 flags:# canceled:flags.0?true payment_failed:flags.1?true restored:flags.2?true user_id:long payload:bytes qts:int = Update;
- 
- updates.state#a56c2a3e pts:int qts:int date:int seq:int unread_count:int = updates.State;
-@@ -3085,3 +3086,4 @@ ephemeral.sendMessage#68cbd09f flags:# peer:InputPeer receiver_id:InputUser quer
- ephemeral.deleteMessage#a3c0d511 peer:InputPeer receiver_id:InputUser id:int = Bool;
- ephemeral.reportMessage#8704f2bf peer:InputPeer id:int option:bytes message:string = ReportResult;
- ephemeral.getCallbackAnswer#3fa464c8 flags:# peer:InputPeer id:int data:flags.1?bytes = messages.BotCallbackAnswer;
-+ephemeral.editMessage#cf9c725b flags:# invert_media:flags.5?true welcome:flags.6?true peer:flags.7?InputPeer receiver_id:InputUser id:int message:flags.0?string media:flags.3?InputMedia entities:flags.1?Vector<MessageEntity> reply_markup:flags.2?ReplyMarkup rich_message:flags.4?InputRichMessage = Updates;
-diff --git a/grammers-client/src/client/outbound.rs b/grammers-client/src/client/outbound.rs
-new file mode 100755
-index 0000000..638dc9f
---- /dev/null
-+++ b/grammers-client/src/client/outbound.rs
-@@ -0,0 +1,528 @@
-+use std::collections::HashMap;
-+use std::sync::Arc;
-+use std::sync::atomic::{AtomicUsize, Ordering};
-+use std::time::{Duration, Instant};
-+
-+use grammers_session::types::PeerRef;
-+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
-+
-+const DEFAULT_RATE: u32 = 25;
-+const DEFAULT_CONCURRENCY: usize = 32;
-+const DEFAULT_CRITICAL_RESERVED_CONCURRENCY: usize = 8;
-+const DEFAULT_GROUP_MESSAGES_PER_MINUTE: u32 = 20;
-+const DEFAULT_CHAT_CACHE_MAX: usize = 50_000;
-+
-+struct Bucket {
-+    tokens: f64,
-+    updated: Instant,
-+}
-+
-+/// Shared backpressure for account-level Telegram writes.
-+///
-+/// A `Client` is cloneable, and every `Message` created by it keeps a clone too. Keeping this
-+/// budget in `ClientInner` therefore makes replies, scheduled jobs, and detached moderation work
-+/// share one account-wide queue instead of each path creating its own burst. Reads still use the
-+/// normal `invoke` path; only callers that explicitly use `invoke_outbound` consume this budget.
-+pub(crate) struct OutboundBudget {
-+    bucket: Mutex<Bucket>,
-+    rate: f64,
-+    burst: f64,
-+    in_flight: Arc<Semaphore>,
-+    /// Ordinary sends/edits may use only this subset. Enforcement skips it and can therefore
-+    /// always reach the account limiter even when a notification burst occupies every ordinary
-+    /// slot. The shared `in_flight` semaphore still caps the aggregate number of Telegram RPCs.
-+    ordinary_in_flight: Arc<Semaphore>,
-+    critical_reserved: usize,
-+    active: Arc<AtomicUsize>,
-+    waiting: AtomicUsize,
-+    critical_waiting: AtomicUsize,
-+    chat_waiting: AtomicUsize,
-+    /// Telegram's group message ceiling is per peer, not just per account. The map is capped so
-+    /// a fleet of quiet groups cannot turn pacing metadata into another process-wide leak.
-+    chat_next: Mutex<HashMap<i64, Instant>>,
-+    chat_interval: Duration,
-+    chat_cache_max: usize,
-+}
-+
-+pub(crate) struct OutboundPermit {
-+    _in_flight: OwnedSemaphorePermit,
-+    _ordinary: Option<OwnedSemaphorePermit>,
-+    active: Arc<AtomicUsize>,
-+}
-+
-+impl Drop for OutboundPermit {
-+    fn drop(&mut self) {
-+        self.active.fetch_sub(1, Ordering::Relaxed);
-+    }
-+}
-+
-+impl OutboundBudget {
-+    pub(crate) fn from_env() -> Self {
-+        let rate = env_u32("TELEGRAM_ACTIONS_PER_SECOND", DEFAULT_RATE, 1, 1_000);
-+        let burst = env_u32("TELEGRAM_ACTION_BURST", rate, 1, 10_000);
-+        let concurrency = env_usize(
-+            "TELEGRAM_OUTBOUND_CONCURRENCY",
-+            DEFAULT_CONCURRENCY,
-+            1,
-+            1_024,
-+        );
-+        let critical_reserved = env_usize(
-+            "TELEGRAM_CRITICAL_RESERVED_CONCURRENCY",
-+            DEFAULT_CRITICAL_RESERVED_CONCURRENCY,
-+            1,
-+            1_024,
-+        )
-+        .min(concurrency.saturating_sub(1));
-+        let group_messages = env_u32(
-+            "TELEGRAM_GROUP_MESSAGES_PER_MINUTE",
-+            DEFAULT_GROUP_MESSAGES_PER_MINUTE,
-+            1,
-+            1_200,
-+        );
-+        let chat_cache_max = env_usize(
-+            "TELEGRAM_CHAT_RATE_CACHE_MAX",
-+            DEFAULT_CHAT_CACHE_MAX,
-+            1_000,
-+            500_000,
-+        );
-+        Self {
-+            bucket: Mutex::new(Bucket {
-+                tokens: burst as f64,
-+                updated: Instant::now(),
-+            }),
-+            rate: rate as f64,
-+            burst: burst as f64,
-+            in_flight: Arc::new(Semaphore::new(concurrency)),
-+            ordinary_in_flight: Arc::new(Semaphore::new(concurrency - critical_reserved)),
-+            critical_reserved,
-+            active: Arc::new(AtomicUsize::new(0)),
-+            waiting: AtomicUsize::new(0),
-+            critical_waiting: AtomicUsize::new(0),
-+            chat_waiting: AtomicUsize::new(0),
-+            chat_next: Mutex::new(HashMap::new()),
-+            chat_interval: Duration::from_secs_f64(60.0 / group_messages as f64),
-+            chat_cache_max,
-+        }
-+    }
-+
-+    /// Reserve a per-group message slot before taking the account-wide permit. Waiting here,
-+    /// rather than while holding one of the 32 account slots, keeps a noisy group from starving
-+    /// unrelated groups on the same bot account.
-+    pub(crate) async fn acquire_for_peer(&self, peer: PeerRef) -> OutboundPermit {
-+        if let Some(chat) = peer.id.bot_api_dialog_id().filter(|chat| *chat < 0) {
-+            let delay = {
-+                let now = Instant::now();
-+                let mut next = self.chat_next.lock().await;
-+                reserve_chat(
-+                    &mut next,
-+                    chat,
-+                    now,
-+                    self.chat_interval,
-+                    self.chat_cache_max,
-+                )
-+            };
-+            if !delay.is_zero() {
-+                self.chat_waiting.fetch_add(1, Ordering::Relaxed);
-+                let _waiting = ChatWaitingGuard(&self.chat_waiting);
-+                tokio::time::sleep(delay).await;
-+            }
-+        }
-+        self.acquire().await
-+    }
-+
-+    pub(crate) async fn acquire(&self) -> OutboundPermit {
-+        self.waiting.fetch_add(1, Ordering::Relaxed);
-+        let _waiting = ChatWaitingGuard(&self.waiting);
-+        let ordinary = Arc::clone(&self.ordinary_in_flight)
-+            .acquire_owned()
-+            .await
-+            .expect("the ordinary outbound semaphore is never closed");
-+        let in_flight = Arc::clone(&self.in_flight)
-+            .acquire_owned()
-+            .await
-+            .expect("the outbound semaphore is never closed");
-+
-+        loop {
-+            let delay = {
-+                let mut bucket = self.bucket.lock().await;
-+                let elapsed = bucket.updated.elapsed().as_secs_f64();
-+                bucket.updated = Instant::now();
-+                bucket.tokens = (bucket.tokens + elapsed * self.rate).min(self.burst);
-+                if bucket.tokens >= 1.0 && self.critical_waiting.load(Ordering::Acquire) == 0 {
-+                    bucket.tokens -= 1.0;
-+                    None
-+                } else if bucket.tokens >= 1.0 {
-+                    // A critical caller has already joined one of its reserved concurrency
-+                    // slots. Leave the available token for it; the short sleep is bounded by
-+                    // the configured token interval and avoids a busy loop.
-+                    Some(Duration::from_secs_f64(1.0 / self.rate))
-+                } else {
-+                    Some(Duration::from_secs_f64((1.0 - bucket.tokens) / self.rate))
-+                }
-+            };
-+            let Some(delay) = delay else { break };
-+            tokio::time::sleep(delay).await;
-+        }
-+
-+        self.active.fetch_add(1, Ordering::Relaxed);
-+        OutboundPermit {
-+            _in_flight: in_flight,
-+            _ordinary: Some(ordinary),
-+            active: Arc::clone(&self.active),
-+        }
-+    }
-+
-+    /// Admit correctness-critical moderation without waiting behind the ordinary concurrency
-+    /// partition. This does not bypass the account token bucket: critical and ordinary calls
-+    /// still share the same configured request rate and burst, so prioritisation cannot create a
-+    /// Telegram flood. At concurrency one no reservation is possible and behaviour is unchanged.
-+    pub(crate) async fn acquire_critical(&self) -> OutboundPermit {
-+        // With a real reservation this early count makes ordinary token waiters yield before the
-+        // critical task is polled again. At total concurrency one there is no reserved slot, so
-+        // count only after taking the shared permit; otherwise the sole ordinary holder could
-+        // yield its token to a critical task that cannot enter, deadlocking both classes.
-+        let counted_early = self.critical_reserved != 0;
-+        let mut waiting_guard = if counted_early {
-+            self.critical_waiting.fetch_add(1, Ordering::Relaxed);
-+            Some(ChatWaitingGuard(&self.critical_waiting))
-+        } else {
-+            None
-+        };
-+        let in_flight = Arc::clone(&self.in_flight)
-+            .acquire_owned()
-+            .await
-+            .expect("the outbound semaphore is never closed");
-+        if !counted_early {
-+            self.critical_waiting.fetch_add(1, Ordering::Relaxed);
-+            waiting_guard = Some(ChatWaitingGuard(&self.critical_waiting));
-+        }
-+        let _waiting = waiting_guard;
-+
-+        loop {
-+            let delay = {
-+                let mut bucket = self.bucket.lock().await;
-+                let elapsed = bucket.updated.elapsed().as_secs_f64();
-+                bucket.updated = Instant::now();
-+                bucket.tokens = (bucket.tokens + elapsed * self.rate).min(self.burst);
-+                if bucket.tokens >= 1.0 {
-+                    bucket.tokens -= 1.0;
-+                    None
-+                } else {
-+                    Some(Duration::from_secs_f64((1.0 - bucket.tokens) / self.rate))
-+                }
-+            };
-+            let Some(delay) = delay else { break };
-+            tokio::time::sleep(delay).await;
-+        }
-+
-+        self.active.fetch_add(1, Ordering::Relaxed);
-+        OutboundPermit {
-+            _in_flight: in_flight,
-+            _ordinary: None,
-+            active: Arc::clone(&self.active),
-+        }
-+    }
-+
-+    pub(crate) fn snapshot(&self) -> (usize, usize) {
-+        let active = self.active.load(Ordering::Relaxed);
-+        let total = self.waiting.load(Ordering::Relaxed)
-+            + self.critical_waiting.load(Ordering::Relaxed)
-+            + self.chat_waiting.load(Ordering::Relaxed);
-+        (active, total)
-+    }
-+
-+    pub(crate) fn critical_waiting(&self) -> usize {
-+        self.critical_waiting.load(Ordering::Relaxed)
-+    }
-+}
-+
-+struct ChatWaitingGuard<'a>(&'a AtomicUsize);
-+
-+impl Drop for ChatWaitingGuard<'_> {
-+    fn drop(&mut self) {
-+        self.0.fetch_sub(1, Ordering::Relaxed);
-+    }
-+}
-+
-+fn reserve_chat(
-+    next: &mut HashMap<i64, Instant>,
-+    chat: i64,
-+    now: Instant,
-+    interval: Duration,
-+    capacity: usize,
-+) -> Duration {
-+    if !next.contains_key(&chat) && next.len() >= capacity {
-+        next.retain(|_, due| *due <= now);
-+        while next.len() >= capacity {
-+            let Some(oldest) = next
-+                .iter()
-+                .min_by_key(|(_, due)| **due)
-+                .map(|(chat, _)| *chat)
-+            else {
-+                break;
-+            };
-+            next.remove(&oldest);
-+        }
-+    }
-+    let due = next.entry(chat).or_insert(now);
-+    let start = (*due).max(now);
-+    *due = start + interval;
-+    start.saturating_duration_since(now)
-+}
-+
-+fn env_u32(name: &str, default: u32, min: u32, max: u32) -> u32 {
-+    std::env::var(name)
-+        .ok()
-+        .and_then(|value| value.parse::<u32>().ok())
-+        .unwrap_or(default)
-+        .clamp(min, max)
-+}
-+
-+fn env_usize(name: &str, default: usize, min: usize, max: usize) -> usize {
-+    std::env::var(name)
-+        .ok()
-+        .and_then(|value| value.parse::<usize>().ok())
-+        .unwrap_or(default)
-+        .clamp(min, max)
-+}
-+
-+#[cfg(test)]
-+mod tests {
-+    use super::reserve_chat;
-+    use std::collections::HashMap;
-+    use std::time::{Duration, Instant};
-+
-+    fn test_budget(rate: u32, burst: u32, concurrency: usize) -> super::OutboundBudget {
-+        let critical_reserved = usize::from(concurrency > 1);
-+        super::OutboundBudget {
-+            bucket: tokio::sync::Mutex::new(super::Bucket {
-+                tokens: burst as f64,
-+                updated: Instant::now(),
-+            }),
-+            rate: rate as f64,
-+            burst: burst as f64,
-+            in_flight: std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency)),
-+            ordinary_in_flight: std::sync::Arc::new(tokio::sync::Semaphore::new(
-+                concurrency - critical_reserved,
-+            )),
-+            critical_reserved,
-+            active: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-+            waiting: std::sync::atomic::AtomicUsize::new(0),
-+            critical_waiting: std::sync::atomic::AtomicUsize::new(0),
-+            chat_waiting: std::sync::atomic::AtomicUsize::new(0),
-+            chat_next: tokio::sync::Mutex::new(HashMap::new()),
-+            chat_interval: Duration::from_millis(1),
-+            chat_cache_max: 32,
-+        }
-+    }
-+
-+    #[tokio::test]
-+    async fn cancelled_admission_does_not_leak_waiting_telemetry() {
-+        let budget = super::OutboundBudget::from_env();
-+        let blocked = budget
-+            .in_flight
-+            .clone()
-+            .acquire_many_owned(budget.in_flight.available_permits() as u32)
-+            .await
-+            .unwrap();
-+        for _ in 0..10 {
-+            assert!(
-+                tokio::time::timeout(Duration::from_millis(1), budget.acquire())
-+                    .await
-+                    .is_err()
-+            );
-+        }
-+        assert_eq!(budget.snapshot(), (0, 0));
-+        drop(blocked);
-+        let permit = budget.acquire().await;
-+        assert_eq!(budget.snapshot(), (1, 0));
-+        drop(permit);
-+        assert_eq!(budget.snapshot(), (0, 0));
-+    }
-+
-+    #[test]
-+    fn per_chat_reservations_are_paced_and_capped() {
-+        let mut next = HashMap::new();
-+        let now = Instant::now();
-+        let interval = Duration::from_secs(3);
-+        assert!(reserve_chat(&mut next, -1, now, interval, 2).is_zero());
-+        assert!(reserve_chat(&mut next, -1, now, interval, 2) >= interval);
-+        assert!(reserve_chat(&mut next, -2, now, interval, 2).is_zero());
-+        assert!(reserve_chat(&mut next, -3, now, interval, 2).is_zero());
-+        assert!(next.len() <= 2);
-+    }
-+
-+    #[tokio::test]
-+    async fn saturation_backlog_and_late_waiter_have_bounded_telemetry() {
-+        let budget = std::sync::Arc::new(test_budget(100_000, 100_000, 2));
-+        let held = budget
-+            .in_flight
-+            .clone()
-+            .acquire_many_owned(2)
-+            .await
-+            .unwrap();
-+        let mut jobs = Vec::new();
-+        for _ in 0..32 {
-+            let budget = std::sync::Arc::clone(&budget);
-+            jobs.push(tokio::spawn(async move { budget.acquire().await }));
-+        }
-+        tokio::time::sleep(Duration::from_millis(5)).await;
-+        assert_eq!(budget.snapshot(), (0, 32));
-+        // A late ordinary caller joins the same bounded ordinary backlog.
-+        let late = {
-+            let budget = std::sync::Arc::clone(&budget);
-+            tokio::spawn(async move { budget.acquire().await })
-+        };
-+        tokio::time::sleep(Duration::from_millis(2)).await;
-+        assert_eq!(budget.snapshot(), (0, 33));
-+        drop(held);
-+        for job in jobs {
-+            drop(job.await.unwrap());
-+        }
-+        drop(late.await.unwrap());
-+        assert_eq!(budget.snapshot(), (0, 0));
-+    }
-+
-+    #[tokio::test]
-+    async fn cancellation_of_mixed_backlog_cleans_both_wait_counters() {
-+        let budget = std::sync::Arc::new(test_budget(100_000, 100_000, 1));
-+        let held = budget.in_flight.clone().acquire_owned().await.unwrap();
-+        let mut jobs = Vec::new();
-+        for _ in 0..8 {
-+            let budget = std::sync::Arc::clone(&budget);
-+            jobs.push(tokio::spawn(async move { budget.acquire().await }));
-+        }
-+        tokio::time::sleep(Duration::from_millis(2)).await;
-+        assert_eq!(budget.snapshot(), (0, 8));
-+        for job in jobs {
-+            job.abort();
-+            let _ = job.await;
-+        }
-+        assert_eq!(budget.snapshot(), (0, 0));
-+        drop(held);
-+    }
-+
-+    #[tokio::test]
-+    async fn cancelled_critical_waiter_releases_priority_telemetry() {
-+        let budget = std::sync::Arc::new(test_budget(100_000, 100_000, 2));
-+        let held = budget
-+            .in_flight
-+            .clone()
-+            .acquire_many_owned(2)
-+            .await
-+            .unwrap();
-+        let critical = {
-+            let budget = std::sync::Arc::clone(&budget);
-+            tokio::spawn(async move { budget.acquire_critical().await })
-+        };
-+        tokio::time::sleep(Duration::from_millis(2)).await;
-+        assert_eq!(budget.snapshot(), (0, 1));
-+        assert_eq!(budget.critical_waiting(), 1);
-+        critical.abort();
-+        let _ = critical.await;
-+        assert_eq!(budget.snapshot(), (0, 0));
-+        assert_eq!(budget.critical_waiting(), 0);
-+        drop(held);
-+    }
-+
-+    #[tokio::test]
-+    async fn critical_waiter_takes_the_next_token_ahead_of_ordinary_backlog() {
-+        let budget = std::sync::Arc::new(test_budget(20, 1, 4));
-+        // Empty the initial burst. The next token is due in roughly 50 ms.
-+        drop(budget.acquire().await);
-+
-+        let (order, mut completed) = tokio::sync::mpsc::unbounded_channel();
-+        let mut ordinary = Vec::new();
-+        for _ in 0..2 {
-+            let budget = std::sync::Arc::clone(&budget);
-+            let order = order.clone();
-+            ordinary.push(tokio::spawn(async move {
-+                let permit = budget.acquire().await;
-+                let _ = order.send("ordinary");
-+                permit
-+            }));
-+        }
-+        tokio::time::sleep(Duration::from_millis(5)).await;
-+        let critical = {
-+            let budget = std::sync::Arc::clone(&budget);
-+            let order = order.clone();
-+            tokio::spawn(async move {
-+                let permit = budget.acquire_critical().await;
-+                let _ = order.send("critical");
-+                permit
-+            })
-+        };
-+
-+        assert_eq!(
-+            tokio::time::timeout(Duration::from_millis(500), completed.recv())
-+                .await
-+                .unwrap(),
-+            Some("critical")
-+        );
-+        drop(critical.await.unwrap());
-+        for task in ordinary {
-+            task.abort();
-+            let _ = task.await;
-+        }
-+        assert_eq!(budget.snapshot(), (0, 0));
-+        assert_eq!(budget.critical_waiting(), 0);
-+    }
-+
-+    #[tokio::test]
-+    async fn stalled_ordinary_calls_cannot_consume_the_reserved_critical_slot() {
-+        let budget = std::sync::Arc::new(test_budget(100_000, 100_000, 4));
-+        let mut ordinary = Vec::new();
-+        for _ in 0..3 {
-+            ordinary.push(budget.acquire().await);
-+        }
-+        assert_eq!(budget.snapshot(), (3, 0));
-+
-+        let blocked_ordinary = {
-+            let budget = std::sync::Arc::clone(&budget);
-+            tokio::spawn(async move { budget.acquire().await })
-+        };
-+        tokio::time::sleep(Duration::from_millis(2)).await;
-+        assert_eq!(budget.snapshot(), (3, 1));
-+
-+        let critical = tokio::time::timeout(Duration::from_millis(100), budget.acquire_critical())
-+            .await
-+            .expect("the reserved slot must stay reachable");
-+        assert_eq!(budget.snapshot(), (4, 1));
-+        drop(critical);
-+        blocked_ordinary.abort();
-+        let _ = blocked_ordinary.await;
-+        drop(ordinary);
-+        assert_eq!(budget.snapshot(), (0, 0));
-+    }
-+
-+    #[test]
-+    fn peer_pacing_is_independent_for_hot_group_and_quiet_peers() {
-+        let mut next = HashMap::new();
-+        let now = Instant::now();
-+        let interval = Duration::from_millis(20);
-+        assert!(reserve_chat(&mut next, -100, now, interval, 32).is_zero());
-+        assert!(reserve_chat(&mut next, -200, now, interval, 32).is_zero());
-+        assert!(reserve_chat(&mut next, -300, now, interval, 32).is_zero());
-+        assert!(reserve_chat(&mut next, -100, now, interval, 32) >= interval);
-+        assert!(reserve_chat(&mut next, -200, now, interval, 32) >= interval);
-+        assert!(reserve_chat(&mut next, -300, now, interval, 32) >= interval);
-+    }
-+
-+    #[test]
-+    #[ignore = "PERF probe; run explicitly with --ignored --nocapture"]
-+    fn perf_bounded_chat_cache_churn_json() {
-+        let mut next = HashMap::new();
-+        let now = Instant::now();
-+        let started = Instant::now();
-+        for chat in 0..100_000_i64 {
-+            let _ = reserve_chat(&mut next, -chat - 1, now, Duration::from_millis(1), 1_000);
-+        }
-+        let elapsed_us = started.elapsed().as_micros();
-+        println!(
-+            "{{\"kind\":\"outbound_chat_cache_churn\",\"insertions\":100000,\"capacity\":1000,\"elapsed_us\":{},\"final_len\":{}}}",
-+            elapsed_us,
-+            next.len()
-+        );
-+        assert!(next.len() <= 1_000);
-+    }
-+}
 diff --git a/grammers-tl-types/tests/ephemeral_callback.rs b/grammers-tl-types/tests/ephemeral_callback.rs
-new file mode 100755
+new file mode 100644
 index 0000000..5a4ca01
 --- /dev/null
 +++ b/grammers-tl-types/tests/ephemeral_callback.rs
@@ -14462,7 +14772,7 @@ index 0000000..5a4ca01
 +    assert_eq!(decoded.data, b"settings:privacy".to_vec());
 +}
 diff --git a/grammers-tl-types/tests/ephemeral_edit.rs b/grammers-tl-types/tests/ephemeral_edit.rs
-new file mode 100755
+new file mode 100644
 index 0000000..ba2de47
 --- /dev/null
 +++ b/grammers-tl-types/tests/ephemeral_edit.rs
@@ -14495,3 +14805,20 @@ index 0000000..ba2de47
 +    request.serialize(&mut bytes);
 +    assert!(!bytes.is_empty());
 +}
+diff --git a/grammers-tl-types/tl/api.tl b/grammers-tl-types/tl/api.tl
+index c56e420..58953d4 100644
+--- a/grammers-tl-types/tl/api.tl
++++ b/grammers-tl-types/tl/api.tl
+@@ -482,6 +482,7 @@ updateWebBrowserException#140502d1 flags:# delete:flags.1?true open_external_bro
+ updateNewEphemeralMessage#20bcbba1 message:EphemeralMessage = Update;
+ updateDeleteEphemeralMessages#56dbfcf8 peer:Peer ids:Vector<int> = Update;
+ updateEditEphemeralMessage#4bbb8f01 message:EphemeralMessage = Update;
++updateEphemeralBotCallbackQuery#9b380762 query_id:long user_id:long peer:Peer msg_id:int data:bytes message:EphemeralMessage = Update;
+ updateBotStarsSubscription#6c0d8e23 flags:# canceled:flags.0?true payment_failed:flags.1?true restored:flags.2?true user_id:long payload:bytes qts:int = Update;
+ 
+ updates.state#a56c2a3e pts:int qts:int date:int seq:int unread_count:int = updates.State;
+@@ -3085,3 +3086,4 @@ ephemeral.sendMessage#68cbd09f flags:# peer:InputPeer receiver_id:InputUser quer
+ ephemeral.deleteMessage#a3c0d511 peer:InputPeer receiver_id:InputUser id:int = Bool;
+ ephemeral.reportMessage#8704f2bf peer:InputPeer id:int option:bytes message:string = ReportResult;
+ ephemeral.getCallbackAnswer#3fa464c8 flags:# peer:InputPeer id:int data:flags.1?bytes = messages.BotCallbackAnswer;
++ephemeral.editMessage#cf9c725b flags:# invert_media:flags.5?true welcome:flags.6?true peer:flags.7?InputPeer receiver_id:InputUser id:int message:flags.0?string media:flags.3?InputMedia entities:flags.1?Vector<MessageEntity> reply_markup:flags.2?ReplyMarkup rich_message:flags.4?InputRichMessage = Updates;

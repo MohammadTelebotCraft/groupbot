@@ -30,6 +30,7 @@ const MAX_BODY_BYTES: u64 = 512 * 1024;
 const MAX_MESSAGE_UNITS: usize = 3_500;
 const MAX_NAME_CHARS: usize = 96;
 const MAX_PRICE_CHARS: usize = 48;
+const FRESH_MESSAGE: &str = "نرخ ها همین چند لحظه پیش به روز شد.";
 const ERROR_MESSAGE: &str = "فعلاً دریافت نرخ ارز ممکن نیست؛ لطفاً چند دقیقه بعد دوباره تلاش کنید.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +59,9 @@ struct ServedSnapshot {
 static CACHE: LazyLock<Mutex<Option<CachedSnapshot>>> = LazyLock::new(|| Mutex::new(None));
 static REFRESH: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
 static LAST_MANUAL_REFRESH: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
+static LAST_FAILURE: LazyLock<Mutex<Option<(Instant, String)>>> =
+    LazyLock::new(|| Mutex::new(None));
+const FAILURE_BACKOFF: Duration = Duration::from_secs(60);
 static HTTP: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
     reqwest::Client::builder()
         .user_agent(format!("groupbot/{}", env!("CARGO_PKG_VERSION")))
@@ -171,7 +175,27 @@ async fn snapshot(force_refresh: bool) -> Result<ServedSnapshot, String> {
         *LAST_MANUAL_REFRESH.lock().unwrap() = Some(Instant::now());
     }
 
-    match fetch_snapshot().await {
+    let recent_failure = LAST_FAILURE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(at, _)| at.elapsed() < FAILURE_BACKOFF)
+        .map(|(_, error)| error.clone());
+    let fetched = match recent_failure {
+        Some(error) => Err(error),
+        None => fetch_snapshot().await,
+    };
+    if let Err(error) = &fetched {
+        let mut failure = LAST_FAILURE.lock().unwrap();
+        if failure
+            .as_ref()
+            .is_none_or(|(at, _)| at.elapsed() >= FAILURE_BACKOFF)
+        {
+            *failure = Some((Instant::now(), error.clone()));
+        }
+    }
+
+    match fetched {
         Ok(snapshot) => {
             let snapshot = Arc::new(snapshot);
             *CACHE.lock().unwrap() = Some(CachedSnapshot {
@@ -326,6 +350,10 @@ pub async fn on_callback(_ctx: &Ctx, query: &CallbackQuery, payload: &str) {
         return;
     };
 
+    if action == "r" && !manual_refresh_allowed() && cached_snapshot().is_some() {
+        let _ = query.answer().text(FRESH_MESSAGE).send().await;
+        return;
+    }
     let served = match action {
         "p" => snapshot(false).await,
         "r" => snapshot(true).await,
@@ -622,5 +650,16 @@ mod tests {
         let rendered = render_page(&snapshot, false, 0);
         assert!(message_width(&rendered) <= MAX_MESSAGE_UNITS);
         assert!(rendered.contains("&lt;&lt;"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_source_is_not_asked_again_inside_the_backoff() {
+        *CACHE.lock().unwrap() = None;
+        *LAST_FAILURE.lock().unwrap() = Some((Instant::now(), "source down".to_owned()));
+        let started = Instant::now();
+        let answer = snapshot(false).await;
+        assert_eq!(answer.err().as_deref(), Some("source down"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        *LAST_FAILURE.lock().unwrap() = None;
     }
 }

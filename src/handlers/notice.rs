@@ -91,3 +91,22 @@ pub async fn send_with_markup(
         Instant::now() + Duration::from_secs(u64::from(seconds)),
     );
 }
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]
+    async fn a_spam_wave_is_one_removal_notice_per_pace_not_one_per_account() {
+        const CHAT: i64 = -100_777_000_124;
+        let (ctx, _pool) = super::super::live_ctx().await;
+        let told = (1..=40)
+            .filter(|user| ctx.may_notify_lock(CHAT, *user) || ctx.may_notify_filtered(CHAT, *user))
+            .count();
+        assert_eq!(told, 1);
+        tokio::time::sleep(super::super::GROUP_PACE).await;
+        assert!(ctx.may_notify_lock(CHAT, 2));
+        tokio::time::sleep(super::super::GROUP_PACE).await;
+        assert!(!ctx.may_notify_lock(CHAT, 2));
+        assert!(ctx.may_notify_lock(CHAT, 3));
+    }
+}

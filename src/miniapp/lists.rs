@@ -133,7 +133,22 @@ pub async fn clear(
         Err(status) => return status.into_response(),
     };
     match lists::clear_all(&ctx, chat_ref, gate.chat, kind).await {
-        Ok(removed) => Json(json!({ "removed": removed })).into_response(),
+        Ok(lists::Cleared::Done(removed)) => Json(json!({ "removed": removed })).into_response(),
+        Ok(lists::Cleared::Continuing(removed)) => (
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "removed": removed,
+                "error": format!(
+                    "تا اینجا {removed} مورد حذف شد. بقیه در پس زمینه ادامه دارد و پایانش در گروه اعلام می شود."
+                ),
+            })),
+        )
+            .into_response(),
+        Err(lists::MutationError::Busy) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": lists::MutationError::Busy.told() })),
+        )
+            .into_response(),
         Err(error) => {
             ::log::warn!(
                 "miniapp: clear {} for {} failed: {error}",

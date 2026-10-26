@@ -145,6 +145,10 @@ pub async fn write(ctx: &Ctx, chat: i64, kind: &str, entry: Entry<'_>) {
 }
 
 pub async fn flush(ctx: &std::sync::Arc<Ctx>) -> bool {
+    deliver(ctx, true).await
+}
+
+async fn deliver(ctx: &std::sync::Arc<Ctx>, honour_backoff: bool) -> bool {
     let _flush = ctx.log_flush.lock().await;
     const ROOM: usize = 3_500;
 
@@ -152,7 +156,7 @@ pub async fn flush(ctx: &std::sync::Arc<Ctx>) -> bool {
     let owner = std::sync::Arc::clone(ctx);
     let failures = std::sync::Arc::clone(&failed);
     let batches = ctx
-        .take_logs()
+        .take_logs(honour_backoff)
         .into_iter()
         .map(|(chat, entries)| PendingLogBatch {
             ctx: std::sync::Arc::clone(ctx),
@@ -180,11 +184,11 @@ pub async fn flush(ctx: &std::sync::Arc<Ctx>) -> bool {
             let header = format!("<b>لاگ · {}</b> · <code>{chat}</code>", esc(&title));
 
             let mut batch = String::new();
-            let mut delivered = true;
+            let mut delivered = Ok(());
             for entry in entries {
                 if !batch.is_empty() && batch.chars().count() + entry.chars().count() > ROOM {
-                    if !send(&ctx, target, &header, &batch).await {
-                        delivered = false;
+                    delivered = send(&ctx, target, &header, &batch).await;
+                    if delivered.is_err() {
                         break;
                     }
                     batch.clear();
@@ -194,13 +198,18 @@ pub async fn flush(ctx: &std::sync::Arc<Ctx>) -> bool {
                 }
                 batch.push_str(entry);
             }
-            if delivered && !batch.is_empty() {
+            if delivered.is_ok() && !batch.is_empty() {
                 delivered = send(&ctx, target, &header, &batch).await;
             }
-            if !delivered {
-                failed.store(true, std::sync::atomic::Ordering::Relaxed);
-            } else {
-                pending.complete();
+            match delivered {
+                Ok(()) => {
+                    ctx.log_delivered(chat);
+                    pending.complete();
+                }
+                Err(flood) => {
+                    ctx.log_delivery_failed(chat, flood);
+                    failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         }
     })
@@ -210,14 +219,14 @@ pub async fn flush(ctx: &std::sync::Arc<Ctx>) -> bool {
 
 pub async fn flush_all(ctx: &std::sync::Arc<Ctx>) -> bool {
     while ctx.has_pending_logs() {
-        if !flush(ctx).await {
+        if !deliver(ctx, false).await {
             return false;
         }
     }
     true
 }
 
-async fn send(ctx: &Ctx, target: PeerRef, header: &str, body: &str) -> bool {
+async fn send(ctx: &Ctx, target: PeerRef, header: &str, body: &str) -> Result<(), Option<u32>> {
     if let Err(e) = ctx
         .client
         .send_message(
@@ -231,9 +240,12 @@ async fn send(ctx: &Ctx, target: PeerRef, header: &str, body: &str) -> bool {
         .await
     {
         eprintln!("log: could not write to the log channel: {e}");
-        false
+        Err(match e {
+            grammers_client::InvocationError::Rpc(rpc) if rpc.code == 420 => rpc.value,
+            _ => None,
+        })
     } else {
-        true
+        Ok(())
     }
 }
 
@@ -322,6 +334,9 @@ async fn name_of(ctx: &Ctx, chat: i64, user: i64) -> String {
     ) else {
         return String::new();
     };
+    if !ctx.may_look_up_log_name(chat) {
+        return String::new();
+    }
     let asked = ctx
         .client
         .invoke(&grammers_client::tl::functions::channels::GetParticipant {
@@ -660,5 +675,38 @@ mod tests {
         assert_eq!(parse_set("تنظیم لاگ @channel please"), None);
         assert_eq!(parse_set("/log @channel\tplease"), None);
         assert_eq!(parse_set("/logger @channel"), None);
+    }
+
+    #[test]
+    fn a_failing_log_channel_backs_off_instead_of_retrying_every_flush() {
+        use std::time::Duration;
+        let delay = super::super::log_retry_delay;
+        assert_eq!(delay(1, None), Duration::from_secs(3));
+        assert_eq!(delay(2, None), Duration::from_secs(6));
+        assert_eq!(delay(5, None), Duration::from_secs(48));
+        assert_eq!(delay(9, None), Duration::from_secs(600));
+        assert_eq!(delay(usize::MAX, None), Duration::from_secs(600));
+        assert_eq!(delay(1, Some(120)), Duration::from_secs(120));
+        assert_eq!(delay(1, Some(3600)), Duration::from_secs(3600));
+        assert_eq!(delay(9, Some(2)), Duration::from_secs(600));
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]
+    async fn a_chat_backing_off_is_held_back_but_not_from_the_shutdown_drain() {
+        const CHAT: i64 = -100_777_000_125;
+        let (ctx, _pool) = super::super::live_ctx().await;
+        ctx.queue_log(CHAT, "one".to_owned());
+        ctx.log_delivery_failed(CHAT, None);
+        assert!(ctx.take_logs(true).iter().all(|(chat, _)| *chat != CHAT));
+        assert!(ctx.has_pending_logs());
+        let drained = ctx.take_logs(false);
+        assert_eq!(
+            drained.iter().find(|(chat, _)| *chat == CHAT).map(|(_, e)| e.clone()),
+            Some(vec!["one".to_owned()])
+        );
+        ctx.queue_log(CHAT, "two".to_owned());
+        ctx.log_delivered(CHAT);
+        assert!(ctx.take_logs(true).iter().any(|(chat, _)| *chat == CHAT));
     }
 }

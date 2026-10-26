@@ -1190,7 +1190,16 @@ pub async fn watch(ctx: &Arc<Ctx>, message: &Message, chat: i64, view: &View<'_>
         }
         return;
     }
+    if !ctx.claim_voice(file, profile, chat, message) {
+        return;
+    }
 
+    let claim = VoiceClaim {
+        ctx: Arc::clone(ctx),
+        file,
+        profile,
+        settled: false,
+    };
     let ctx = Arc::clone(ctx);
     let message = message.clone();
     let document = document.clone();
@@ -1201,10 +1210,9 @@ pub async fn watch(ctx: &Arc<Ctx>, message: &Message, chat: i64, view: &View<'_>
             ctx,
             message,
             chat,
-            file,
             document,
             duration,
-            (active_words, profile),
+            (active_words, claim),
         )
         .await;
     });
@@ -1214,17 +1222,55 @@ async fn analyze(
     ctx: Arc<Ctx>,
     message: Message,
     chat: i64,
-    file: i64,
     document: grammers_client::media::Document,
     duration: f64,
-    word_config: (Vec<String>, u64),
+    word_config: (Vec<String>, VoiceClaim),
 ) {
-    let (active_words, profile) = word_config;
+    let (active_words, mut claim) = word_config;
+    let (file, profile) = (claim.file, claim.profile);
+    let verdict = recognise(&ctx, chat, file, &document, duration, &active_words).await;
+    if let Some((bad, transcript)) = &verdict {
+        ctx.remember_voice(file, profile, *bad, transcript.clone());
+    }
+    claim.settled = true;
+    let waiting = ctx.settle_voice(file, profile);
+    let Some((true, transcript)) = verdict else {
+        return;
+    };
+    moderate(&ctx, &message, chat, transcript.as_deref()).await;
+    for (chat, message) in waiting {
+        moderate(&ctx, &message, chat, transcript.as_deref()).await;
+    }
+}
+
+struct VoiceClaim {
+    ctx: Arc<Ctx>,
+    file: i64,
+    profile: u64,
+    settled: bool,
+}
+
+impl Drop for VoiceClaim {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.ctx.settle_voice(self.file, self.profile);
+        }
+    }
+}
+
+async fn recognise(
+    ctx: &Arc<Ctx>,
+    chat: i64,
+    file: i64,
+    document: &grammers_client::media::Document,
+    duration: f64,
+    active_words: &[String],
+) -> Option<(bool, Option<String>)> {
     let input = input_path(file);
-    if let Err(error) = ctx.client.download_media(&document, &input).await {
+    if let Err(error) = ctx.client.download_media(document, &input).await {
         eprintln!("voice monitor: could not download {file} in {chat}: {error}");
         remove_input(&input).await;
-        return;
+        return None;
     }
 
     let output = tokio::time::timeout(
@@ -1238,27 +1284,23 @@ async fn analyze(
         Ok(Ok(report)) => report,
         Ok(Err(error)) => {
             eprintln!("voice monitor: recognizer failed for {file} in {chat}: {error}");
-            return;
+            return None;
         }
         Err(_) => {
             eprintln!("voice monitor: recognizer timed out for {file} in {chat}");
-            return;
+            return None;
         }
     };
     if report.usable_windows == 0 {
-        return;
+        return None;
     }
 
     let bad = report
         .transcripts
         .iter()
         .filter(|transcript| transcript.confidence.is_none_or(|score| score >= 0.35))
-        .any(|transcript| contains_bad_word_with(&transcript.text, &active_words));
-    let transcript = bad.then(|| transcript_text(&report));
-    ctx.remember_voice(file, profile, bad, transcript.clone());
-    if bad {
-        moderate(&ctx, &message, chat, transcript.as_deref()).await;
-    }
+        .any(|transcript| contains_bad_word_with(&transcript.text, active_words));
+    Some((bad, bad.then(|| transcript_text(&report))))
 }
 
 async fn moderate(ctx: &Arc<Ctx>, message: &Message, chat: i64, transcript: Option<&str>) {

@@ -166,6 +166,9 @@ pub async fn on_participant_update(
         return;
     };
 
+    if ctx.known_bot(user).await == Some(false) {
+        return;
+    }
     let Ok(grammers_client::peer::Peer::User(joined)) = ctx.client.resolve_peer(peer).await else {
         return;
     };

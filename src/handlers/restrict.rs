@@ -198,7 +198,16 @@ pub async fn handle_custom(ctx: &Ctx, message: &Message, view: &super::locks::Vi
     if ctx.settings.indexed_empty(chat, CUSTOM_PREFIX) {
         return false;
     }
-    let candidates = custom_candidates(&[view.command(), view.digits(), view.text()]);
+    let spellings = [view.command(), view.digits(), view.text()];
+    if !ctx.settings.indexed_any(chat, CUSTOM_PREFIX, |trigger| {
+        trigger
+            .split_whitespace()
+            .next()
+            .is_some_and(|head| spellings.iter().any(|text| first_word_is(text, head)))
+    }) {
+        return false;
+    }
+    let candidates = custom_candidates(&spellings);
     let mut actions = vec![None; candidates.len()];
     ctx.settings.with_chat(chat, |settings| {
         for (candidate, action) in candidates.iter().zip(&mut actions) {
@@ -263,6 +272,17 @@ fn tail_after<'a>(text: &'a str, words: &[&str], consumed: usize) -> &'a str {
         return "";
     }
     &text[word_offset(text, words, consumed)..]
+}
+
+fn first_word_is(text: &str, head: &str) -> bool {
+    let Some(word) = text.split_whitespace().next() else {
+        return false;
+    };
+    if word.chars().all(|c| c.to_lowercase().eq([c])) {
+        word == head
+    } else {
+        word.to_lowercase() == head
+    }
 }
 
 fn trigger_candidates(words: &[&str]) -> Vec<(usize, String)> {
@@ -995,6 +1015,7 @@ async fn apply_inner(
     };
 
     if done.is_ok()
+        && !by.unlogged
         && let (Some(chat_id), Some(user)) = (chat.id.bot_api_dialog_id(), target.id.bare_id())
     {
         let mut extra = Vec::new();
@@ -1064,6 +1085,7 @@ pub struct By<'a> {
     pub target_name: &'a str,
     pub case: Option<super::cases::CaseContext>,
     pub admins_too: bool,
+    pub unlogged: bool,
 }
 
 fn until_date_at(now: u64, duration: Option<Duration>) -> i32 {
@@ -1929,6 +1951,28 @@ mod tests {
             .find(|(count, _)| *count == 2)
             .expect("a two-word candidate exists");
         assert_eq!(normalize_phrase("بیرونش۲ کن"), looked_up);
+    }
+
+    #[test]
+    fn the_first_word_prefilter_never_hides_a_candidate() {
+        for text in [
+            "بیرونش کن",
+            "BAN him now please",
+            "Ban",
+            "ΑΣ ΒΓ",
+            "ǅx y",
+            "حذف\u{200c}ش کن الان",
+            "سکوت ۱۰ دقیقه",
+            "  padded   words ",
+        ] {
+            for candidate in custom_candidates(&[text]) {
+                let phrase = candidate.key.strip_prefix(CUSTOM_PREFIX).unwrap();
+                let head = phrase.split_whitespace().next().unwrap();
+                assert!(first_word_is(text, head), "{text} / {phrase}");
+            }
+        }
+        assert!(!first_word_is("سلام دوستان", "بیرونش"));
+        assert!(!first_word_is("", "ban"));
     }
 
     #[test]

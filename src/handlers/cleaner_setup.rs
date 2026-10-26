@@ -96,7 +96,7 @@ fn scheduled_slot(now: u64, chat: i64) -> u64 {
 }
 
 pub async fn run_recommendations(ctx: &Arc<Ctx>) {
-    if !available(ctx) {
+    if !available(ctx) || ctx.cleaner_joins_paused() {
         return;
     }
     let now = SystemTime::now()
@@ -242,7 +242,7 @@ pub async fn add(ctx: &Ctx, peer: PeerRef, chat: i64) -> InputMessage {
         return with_button(InputMessage::new().text("افزودن کلینر در حال انجام است یا همین حالا امتحان شد. چند دقیقه بعد دوباره بررسی کنید."), chat, true);
     }
     let result = cleaner::install(ctx, peer).await;
-    ctx.forget_user_chats();
+    ctx.forget_user_chat(chat);
     if result.is_ok()
         && let Err(error) = ctx
             .settings

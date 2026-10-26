@@ -41,6 +41,24 @@ const CHUNK: usize = 100;
 
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 
+const RIGHTS_RETRY_AFTER: Duration = Duration::from_secs(3600);
+
+fn retry_after(error: &grammers_client::InvocationError) -> Option<Duration> {
+    let grammers_client::InvocationError::Rpc(rpc) = error else {
+        return Some(RETRY_AFTER);
+    };
+    match rpc.name.as_str() {
+        "CHANNEL_PRIVATE" | "CHANNEL_INVALID" | "CHAT_INVALID" | "PEER_ID_INVALID" => None,
+        "CHAT_ADMIN_REQUIRED" | "MESSAGE_DELETE_FORBIDDEN" | "RIGHT_FORBIDDEN" => {
+            Some(RIGHTS_RETRY_AFTER)
+        }
+        _ if rpc.code == 420 => Some(
+            RETRY_AFTER.max(Duration::from_secs(u64::from(rpc.value.unwrap_or_default()))),
+        ),
+        _ => Some(RETRY_AFTER),
+    }
+}
+
 const MAX_DEFERRED_PER_SWEEP: usize = 2_000;
 
 pub fn unix_now() -> i64 {
@@ -186,20 +204,27 @@ async fn process_deferred(ctx: &std::sync::Arc<Ctx>) {
             let ctx = std::sync::Arc::clone(&owner);
             async move {
                 let mut completed = 0;
+                let mut retry = Some(RETRY_AFTER);
                 if let Some(chat_ref) = ctx.chat_ref(chat) {
                     for chunk in ids.chunks(CHUNK) {
                         if let Err(e) = ctx.client.delete_messages(chat_ref, chunk).await {
                             eprintln!("delayed delete: could not delete in {chat}: {e}");
+                            retry = retry_after(&e);
                             break;
                         }
                         completed += chunk.len();
                     }
                 }
-                for id in &ids[..completed] {
+                let done = if retry.is_none() { ids.len() } else { completed };
+                for id in &ids[..done] {
                     ctx.remember_pending_drop(chat, *id);
                 }
-                for id in &ids[completed..] {
-                    ctx.schedule_delete(chat, *id, Instant::now() + RETRY_AFTER);
+                for id in &ids[done..] {
+                    ctx.schedule_delete(
+                        chat,
+                        *id,
+                        Instant::now() + retry.unwrap_or(RETRY_AFTER),
+                    );
                 }
             }
         },
@@ -259,25 +284,29 @@ pub async fn sweep(ctx: &std::sync::Arc<Ctx>) {
                     return;
                 };
                 let mut attempted = 0;
+                let mut retry = Some(RETRY_AFTER);
                 for chunk in ids.chunks(CHUNK) {
                     if let Err(e) = ctx.client.delete_messages(chat_ref, chunk).await {
                         eprintln!("temp media: could not delete in {chat}: {e}");
+                        retry = retry_after(&e);
                         break;
                     }
                     attempted += chunk.len();
                 }
-                if let Err(error) = ctx.settings.drop_pending(chat, &ids[..attempted]).await {
-                    log::warn!(
-                        "temp media: durable cleanup for {attempted} deleted messages in {chat} failed; queued for database retry: {error}"
-                    );
-                    let retry: Vec<_> = ids[..attempted]
-                        .iter()
-                        .map(|message| (chat, *message))
-                        .collect();
-                    ctx.retry_pending_drops(&retry);
+                if retry.is_none() {
+                    attempted = ids.len();
                 }
+                let done: Vec<_> = ids[..attempted]
+                    .iter()
+                    .map(|message| (chat, *message))
+                    .collect();
+                ctx.retry_pending_drops(&done);
                 for id in &ids[attempted..] {
-                    ctx.restore_temp_media(chat, *id, Instant::now() + RETRY_AFTER);
+                    ctx.restore_temp_media(
+                        chat,
+                        *id,
+                        Instant::now() + retry.unwrap_or(RETRY_AFTER),
+                    );
                 }
             }
         },
@@ -441,5 +470,30 @@ mod tests {
         }
         assert_eq!(pending.len(), MAX_PENDING);
         assert_eq!(pending.front().map(|&(_, id)| id), Some(10));
+    }
+
+    #[test]
+    fn a_refused_delete_is_retried_by_what_refused_it() {
+        let rpc = |code: i32, message: &str| {
+            grammers_client::InvocationError::Rpc(
+                grammers_client::tl::types::RpcError {
+                    error_code: code,
+                    error_message: message.into(),
+                }
+                .into(),
+            )
+        };
+        assert_eq!(super::retry_after(&rpc(400, "CHANNEL_PRIVATE")), None);
+        assert_eq!(super::retry_after(&rpc(400, "PEER_ID_INVALID")), None);
+        assert_eq!(
+            super::retry_after(&rpc(403, "MESSAGE_DELETE_FORBIDDEN")),
+            Some(super::RIGHTS_RETRY_AFTER)
+        );
+        assert_eq!(
+            super::retry_after(&rpc(420, "FLOOD_WAIT_900")),
+            Some(Duration::from_secs(900))
+        );
+        assert_eq!(super::retry_after(&rpc(420, "FLOOD_WAIT_5")), Some(super::RETRY_AFTER));
+        assert_eq!(super::retry_after(&rpc(500, "INTERNAL")), Some(super::RETRY_AFTER));
     }
 }

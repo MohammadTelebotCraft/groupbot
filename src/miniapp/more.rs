@@ -187,7 +187,20 @@ pub async fn slow_set(
     }
 }
 
+const REPORT_TEST_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+const BOT_LOOKUP_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(3);
+
+fn too_soon() -> Response {
+    refused(
+        StatusCode::TOO_MANY_REQUESTS,
+        "کمی صبر کنید و دوباره امتحان کنید.",
+    )
+}
+
 pub async fn report_test(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> Response {
+    if !ctx.claim_miniapp_telegram(gate.chat, 1, REPORT_TEST_COOLDOWN) {
+        return too_soon();
+    }
     let body = match stats::daily_body(&ctx, gate.chat, stats::today()).await {
         Ok(body) => body,
         Err(error) => {
@@ -324,6 +337,9 @@ pub async fn allowed_bots_add(
         .trim_start_matches('@');
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return refused(StatusCode::BAD_REQUEST, "یوزرنیم ربات را بنویسید، مثل @examplebot");
+    }
+    if !ctx.claim_miniapp_telegram(gate.chat, 2, BOT_LOOKUP_COOLDOWN) {
+        return too_soon();
     }
     let peer = match ctx.client.resolve_username(name).await {
         Ok(Some(peer)) => peer,

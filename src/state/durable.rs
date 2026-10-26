@@ -420,13 +420,12 @@ impl Settings {
             None
         } else {
             Some(
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT tally_rows FROM durable_counts WHERE id = 0 FOR UPDATE",
-                )
-                .fetch_one(&mut *tx)
-                .await?,
+                sqlx::query_scalar::<_, i64>("SELECT tally_rows FROM durable_counts WHERE id = 0")
+                    .fetch_one(&mut *tx)
+                    .await?,
             )
         };
+        let mut tallies_added = 0_i64;
         for rows in batch.tallies.chunks(1000) {
             let chats: Vec<_> = rows.iter().map(|r| r.0).collect();
             let counters: Vec<_> = rows.iter().map(|r| &r.1).collect();
@@ -465,8 +464,9 @@ impl Settings {
                 )));
             }
             let current = tally_rows.ok_or_else(|| {
-                sqlx::Error::Protocol("tally capacity metadata was not locked".to_owned())
+                sqlx::Error::Protocol("tally capacity metadata was not read".to_owned())
             })?;
+            tallies_added += new_rows;
             let projected = current.checked_add(new_rows).ok_or_else(|| {
                 sqlx::Error::Protocol("projected tally row count overflowed bigint".to_owned())
             })?;
@@ -485,11 +485,21 @@ impl Settings {
                 .bind(chats).bind(counters).bind(values?).bind(day).execute(&mut *tx).await?;
             tally_rows = Some(projected);
         }
-        if let Some(tally_rows) = tally_rows {
-            sqlx::query("UPDATE durable_counts SET tally_rows = $1 WHERE id = 0")
-                .bind(tally_rows)
-                .execute(&mut *tx)
-                .await?;
+        if tallies_added > 0 {
+            let reserved: Option<i64> = sqlx::query_scalar(
+                "UPDATE durable_counts SET tally_rows = tally_rows + $1
+                 WHERE id = 0 AND tally_rows + $1 <= $2
+                 RETURNING tally_rows",
+            )
+            .bind(tallies_added)
+            .bind(self.max_tally_rows.unwrap_or(i64::MAX / 2))
+            .fetch_optional(&mut *tx)
+            .await?;
+            if reserved.is_none() {
+                return Err(StatsPersistenceError::permanent(format!(
+                    "statistics batch would add {tallies_added} tally rows past the shard limit"
+                )));
+            }
         }
         for rows in batch.counts.chunks(5000) {
             let added_by_member: std::collections::HashMap<_, _> = rows

@@ -724,7 +724,12 @@ async fn apply_response_policy_action(
     Ok(Some("response"))
 }
 
-pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, ephemeral_origin: bool) {
+pub async fn on_callback(
+    ctx: &std::sync::Arc<Ctx>,
+    query: &CallbackQuery,
+    payload: &str,
+    ephemeral_origin: bool,
+) {
     let mut parts = payload.splitn(3, ':');
     let (Some(opener), Some(chat), Some(action)) = (parts.next(), parts.next(), parts.next())
     else {
@@ -1708,7 +1713,7 @@ fn bulk_markup(chat: i64, opener: i64, on: bool) -> ReplyMarkup {
 }
 
 async fn list_callback(
-    ctx: &Ctx,
+    ctx: &std::sync::Arc<Ctx>,
     query: &CallbackQuery,
     rest: &str,
     chat: i64,
@@ -1745,18 +1750,30 @@ async fn list_callback(
     let page = match entry_key.and_then(|key| lists::clearing(key).map(|c| (key, c))) {
         Some((_, false)) => lists::confirm_clear(ctx, chat_ref, chat, kind, opener).await,
         Some((_, true)) => {
-            if let Err(error) = lists::clear_all(ctx, chat_ref, chat, kind).await {
-                ::log::warn!("panel: clear {} for {chat} failed: {error}", kind.title());
-                let _ = query
-                    .answer()
-                    .alert(if error.commit_outcome_unknown() {
-                        "نتیجه پاکسازی نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
-                    } else {
-                        "پاکسازی کامل نشد؛ دوباره تلاش کنید."
-                    })
-                    .send()
-                    .await;
-                return;
+            match lists::clear_all(ctx, chat_ref, chat, kind).await {
+                Ok(lists::Cleared::Done(_)) => {}
+                Ok(lists::Cleared::Continuing(removed)) => {
+                    let _ = query
+                        .answer()
+                        .alert(format!(
+                            "تا اینجا {removed} مورد حذف شد. بقیه در پس زمینه ادامه دارد و پایانش در گروه اعلام می شود."
+                        ))
+                        .send()
+                        .await;
+                }
+                Err(error) => {
+                    ::log::warn!("panel: clear {} for {chat} failed: {error}", kind.title());
+                    let _ = query
+                        .answer()
+                        .alert(if error.commit_outcome_unknown() {
+                            "نتیجه پاکسازی نامشخص است؛ پیش از تلاش دوباره وضعیت را بررسی کنید."
+                        } else {
+                            error.told()
+                        })
+                        .send()
+                        .await;
+                    return;
+                }
             }
             lists::view(ctx, chat_ref, chat, kind, opener).await
         }

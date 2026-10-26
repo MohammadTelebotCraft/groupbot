@@ -628,7 +628,12 @@ async fn recover_one(ctx: &Ctx, pending: PendingStrictAction) {
     }
 }
 
+pub(super) const HOURLY_AFTER_ATTEMPTS: u32 = 12;
+
 fn retry_delay_secs(attempts: u32) -> i64 {
+    if attempts >= HOURLY_AFTER_ATTEMPTS {
+        return 3600;
+    }
     let exponent = attempts.saturating_sub(1).min(6);
     (5_i64 * (1_i64 << exponent)).min(300)
 }
@@ -691,7 +696,9 @@ mod tests {
         assert_eq!(retry_delay_secs(1), 5);
         assert_eq!(retry_delay_secs(2), 10);
         assert_eq!(retry_delay_secs(7), 300);
-        assert_eq!(retry_delay_secs(u32::MAX), 300);
+        assert_eq!(retry_delay_secs(11), 300);
+        assert_eq!(retry_delay_secs(12), 3600);
+        assert_eq!(retry_delay_secs(u32::MAX), 3600);
     }
 
     #[test]

@@ -306,11 +306,14 @@ pub async fn announce_complete(ctx: &Ctx, chat_ref: PeerRef, chat: i64) {
         .await;
 }
 
-pub async fn ensure_cleaner(ctx: &Arc<Ctx>, chat_ref: PeerRef, chat: i64) -> bool {
+pub async fn ensure_cleaner(ctx: &Arc<Ctx>, chat_ref: PeerRef, chat: i64, announce: bool) -> bool {
     if ctx.cleaner_id().is_none() || ctx.user_client().is_none() {
         return false;
     }
     if ctx.settings.is_locked(chat, CLEANER_ADDED) {
+        return false;
+    }
+    if !announce && ctx.cleaner_joins_paused() {
         return false;
     }
     if !ctx.claim_cleaner_install(chat) {
@@ -369,9 +372,14 @@ pub async fn ensure_cleaner(ctx: &Arc<Ctx>, chat_ref: PeerRef, chat: i64) -> boo
             Err(reason) => {
                 retry = true;
                 eprintln!("install: cleaner not added to {chat}: {reason}");
-                Some(format!(
-                    "کلینر اضافه نشد · {reason}\nبعدا «افزودن کلینر» را بفرستید."
-                ))
+                if announce {
+                    Some(format!(
+                        "کلینر اضافه نشد · {reason}\nبعدا «افزودن کلینر» را بفرستید."
+                    ))
+                } else {
+                    ctx.defer_setup_probe(chat, QUIET_CLEANER_RETRY);
+                    None
+                }
             }
         };
         if let Some(told) = told {
@@ -381,10 +389,12 @@ pub async fn ensure_cleaner(ctx: &Arc<Ctx>, chat_ref: PeerRef, chat: i64) -> boo
             }
             let _ = ctx.client.send_message(chat_ref, body).await;
         }
-        ctx.forget_user_chats();
+        ctx.forget_user_chat(chat);
     });
     true
 }
+
+pub const QUIET_CLEANER_RETRY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
 
 fn cleaner_record_failure(error: &crate::state::SettingsWriteError) -> &'static str {
     if error.commit_outcome_unknown() {
@@ -455,7 +465,7 @@ pub async fn handle(ctx: &Arc<Ctx>, message: &Message) -> bool {
 
     if super::owner(ctx, chat).is_none() {
         if super::autoconfig::configure(ctx, chat_ref).await {
-            ensure_cleaner(ctx, chat_ref, chat).await;
+            ensure_cleaner(ctx, chat_ref, chat, true).await;
             return true;
         }
         if super::owner(ctx, chat).is_none() {
@@ -469,7 +479,7 @@ pub async fn handle(ctx: &Arc<Ctx>, message: &Message) -> bool {
         }
     }
 
-    let joining = ensure_cleaner(ctx, chat_ref, chat).await;
+    let joining = ensure_cleaner(ctx, chat_ref, chat, true).await;
     let _ = message
         .reply(super::premium::html(format!(
             "<b>نصب ربات</b>\n\n\

@@ -63,11 +63,9 @@ pub async fn on_participant_update(ctx: &Ctx, update: &tl::types::UpdateChannelP
         return;
     }
 
-    let window = Duration::from_secs(u64::from(window(ctx, chat)) * 60);
-    let count = ctx.record_removal(chat, actor, window);
-    if count <= limit(ctx, chat) as usize {
+    let Some(count) = removal_punishes(ctx, chat, actor) else {
         return;
-    }
+    };
 
     let Some(chat_ref) = ctx
         .chat_ref(chat)
@@ -76,6 +74,12 @@ pub async fn on_participant_update(ctx: &Ctx, update: &tl::types::UpdateChannelP
         return;
     };
     punish(ctx, chat_ref, chat, actor, count).await;
+}
+
+fn removal_punishes(ctx: &Ctx, chat: i64, actor: i64) -> Option<usize> {
+    let window = Duration::from_secs(u64::from(window(ctx, chat)) * 60);
+    let count = ctx.record_removal(chat, actor, window);
+    (count > limit(ctx, chat) as usize && ctx.claim_betrayal(chat, actor)).then_some(count)
 }
 
 async fn punish(ctx: &Ctx, chat_ref: PeerRef, chat: i64, actor: i64, count: usize) {
@@ -129,4 +133,24 @@ async fn punish(ctx: &Ctx, chat_ref: PeerRef, chat: i64, actor: i64, count: usiz
             )),
         )
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]
+    async fn one_burst_punishes_its_admin_once() {
+        const CHAT: i64 = -100_777_000_123;
+        let (ctx, _pool) = super::super::live_ctx().await;
+        let punished: Vec<usize> = (0..30)
+            .filter_map(|_| removal_punishes(&ctx, CHAT, 7))
+            .collect();
+        assert_eq!(punished, [DEFAULT_LIMIT as usize + 1]);
+        let other = (0..30)
+            .filter_map(|_| removal_punishes(&ctx, CHAT, 8))
+            .count();
+        assert_eq!(other, 1);
+    }
 }

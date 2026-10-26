@@ -157,7 +157,6 @@ enum PeriodicCheckpointError {
     OwnedTaskFailed {
         count: usize,
     },
-    OwnedTaskTimeout,
     CursorCommitTimeout,
     CursorCommitFailed(String),
     PersistenceBarrierPoisoned,
@@ -183,9 +182,6 @@ impl std::fmt::Display for PeriodicCheckpointError {
             Self::OwnedTaskFailed { count } => write!(
                 formatter,
                 "{count} owned continuation(s) failed during the checkpoint barrier"
-            ),
-            Self::OwnedTaskTimeout => formatter.write_str(
-                "owned continuations exceeded the periodic checkpoint budget and were cancelled",
             ),
             Self::CursorCommitTimeout => formatter.write_str(
                 "cursor storage exceeded the periodic checkpoint budget after commit authorization",
@@ -428,6 +424,20 @@ async fn periodic_update_checkpoint(
     background_tasks: &mut tokio::task::JoinSet<()>,
     deadline: tokio::time::Instant,
 ) -> std::result::Result<PeriodicCheckpointOutcome, PeriodicCheckpointError> {
+    let mut running = ctx.begin_owned_checkpoint();
+    match tokio::time::timeout_at(deadline, running.join_current()).await {
+        Ok(0) => {}
+        Ok(count) => return Err(PeriodicCheckpointError::OwnedTaskFailed { count }),
+        Err(_) => {
+            running.retain_for_shutdown(ctx);
+            return Ok(PeriodicCheckpointOutcome::Deferred {
+                reason: "an owned continuation outlived the checkpoint budget; intake was not paused and no cursor was advanced"
+                    .to_owned(),
+            });
+        }
+    }
+    drop(running);
+
     let bot = request_update_checkpoint("bot", bot_commands)?;
     let cleaner = match request_update_checkpoint("cleaner", cleaner_commands) {
         Ok(checkpoint) => checkpoint,
@@ -449,13 +459,14 @@ async fn periodic_update_checkpoint(
         completed: cleaner_completed,
     } = cleaner;
 
-    let (bot_ready, cleaner_ready) =
-        tokio::time::timeout_at(deadline, async { tokio::join!(bot_ready, cleaner_ready) })
-            .await
-            .map_err(|_| PeriodicCheckpointError::WorkerStopped {
-                label: "bot or cleaner",
-                phase: "barrier deadline",
-            })?;
+    let Ok((bot_ready, cleaner_ready)) =
+        tokio::time::timeout_at(deadline, async { tokio::join!(bot_ready, cleaner_ready) }).await
+    else {
+        return Ok(PeriodicCheckpointOutcome::Deferred {
+            reason: "the update backlog did not drain inside the checkpoint budget; no cursor was advanced"
+                .to_owned(),
+        });
+    };
     if bot_ready.is_err() {
         return Err(PeriodicCheckpointError::WorkerStopped {
             label: bot_label,
@@ -504,7 +515,10 @@ async fn periodic_update_checkpoint(
         Ok(failures) => failures,
         Err(_) => {
             owned.retain_for_shutdown(ctx);
-            return Err(PeriodicCheckpointError::OwnedTaskTimeout);
+            return Ok(PeriodicCheckpointOutcome::Deferred {
+                reason: "an owned continuation outlived the checkpoint budget; no cursor was advanced"
+                    .to_owned(),
+            });
         }
     };
     if owned_failures != 0 {
@@ -585,6 +599,39 @@ async fn periodic_update_checkpoint(
     finish_periodic_cursor_commit(bot_result, cleaner_result)
 }
 
+async fn checkpoint_abandoned(checkpoint: &mut Option<UpdateCheckpointCommand>) {
+    match checkpoint {
+        Some(command) => command.ready.closed().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn sleep_until_or_never(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+const RECEIVE_RETRIES: u32 = 10;
+
+fn receive_retry(
+    error: &grammers_client::InvocationError,
+    failures: u32,
+) -> Option<std::time::Duration> {
+    use grammers_client::InvocationError;
+    use std::time::Duration;
+    let backoff = Duration::from_secs((1u64 << failures.min(6)).min(60));
+    match error {
+        InvocationError::Rpc(rpc) if rpc.code == 420 => Some(
+            backoff.max(Duration::from_secs(u64::from(rpc.value.unwrap_or_default()))),
+        ),
+        InvocationError::Rpc(rpc) if rpc.code >= 500 || rpc.code < 0 => Some(backoff),
+        InvocationError::Io(_) | InvocationError::Transport(_) => Some(backoff),
+        _ => None,
+    }
+}
+
 async fn run_bot_updates(
     ctx: Arc<Ctx>,
     client: Client,
@@ -608,11 +655,13 @@ async fn run_bot_updates(
         concurrency,
         handlers::PER_CHAT_UPDATES,
         UPDATES_CHANNEL_CAPACITY.get(),
-    );
+    )
+    .with_lane_cap(UPDATES_CHANNEL_CAPACITY.get() / 4);
+    let mut receive_failures = 0u32;
     'updates: loop {
         let mut handler_panics = 0usize;
         let mut checkpoint = None;
-        let mut receive_error = loop {
+        let mut receive_error = 'receive: loop {
             while let Some(finished) = tasks.try_join_next() {
                 handler_panics += usize::from(!telemetry.complete(finished));
             }
@@ -628,24 +677,92 @@ async fn run_bot_updates(
             telemetry
                 .queued
                 .store(tasks.pending() as u64, Ordering::Relaxed);
-            let update = tokio::select! {
-                _ = stopping.changed() => break None,
-                command = checkpoint_commands.recv() => {
-                    checkpoint = command;
-                    break None;
-                }
-                finished = tasks.join_next(), if tasks.active() > 0 => {
-                    if let Some(finished) = finished {
-                        handler_panics += usize::from(!telemetry.complete(finished));
+            if !tasks.has_room() {
+                tokio::select! {
+                    _ = stopping.changed() => break None,
+                    command = checkpoint_commands.recv() => {
+                        checkpoint = command;
+                        break None;
                     }
-                    continue;
+                    finished = tasks.join_next(), if tasks.active() > 0 => {
+                        if let Some(finished) = finished {
+                            handler_panics += usize::from(!telemetry.complete(finished));
+                        }
+                    }
                 }
-                update = updates.next(), if tasks.has_room() => update,
+                continue;
+            }
+            let mut receive = std::pin::pin!(updates.next());
+            let update = loop {
+                tokio::select! {
+                    _ = stopping.changed() => break 'receive None,
+                    command = checkpoint_commands.recv() => {
+                        checkpoint = command;
+                        break 'receive None;
+                    }
+                    finished = tasks.join_next(), if tasks.active() > 0 => {
+                        if let Some(finished) = finished {
+                            handler_panics += usize::from(!telemetry.complete(finished));
+                        }
+                        tasks.start(|update| {
+                            let ctx = Arc::clone(&ctx);
+                            async move {
+                                handlers::dispatch(&ctx, update).await;
+                            }
+                        });
+                        telemetry
+                            .active
+                            .store(tasks.active() as u64, Ordering::Relaxed);
+                        telemetry
+                            .queued
+                            .store(tasks.pending() as u64, Ordering::Relaxed);
+                    }
+                    update = &mut receive => break update,
+                }
             };
             match update {
                 Ok(update) => {
+                    receive_failures = 0;
                     telemetry.received.fetch_add(1, Ordering::Relaxed);
+                    let shed = tasks.shed();
                     tasks.push(handlers::dispatch_key(&update), update);
+                    if tasks.shed() != shed && tasks.shed() % 256 == 1 {
+                        log::warn!(
+                            "updates: one chat is over its share of the queue; {} oldest updates shed so far",
+                            tasks.shed()
+                        );
+                    }
+                }
+                Err(error) if receive_failures < RECEIVE_RETRIES => {
+                    let Some(wait) = receive_retry(&error, receive_failures) else {
+                        break Some(error);
+                    };
+                    receive_failures += 1;
+                    log::warn!(
+                        "updates: receive failed ({error}); retrying in {wait:?} ({receive_failures}/{RECEIVE_RETRIES})"
+                    );
+                    let resume = tokio::time::Instant::now() + wait;
+                    loop {
+                        tokio::select! {
+                            _ = stopping.changed() => break 'receive None,
+                            command = checkpoint_commands.recv() => {
+                                checkpoint = command;
+                                break 'receive None;
+                            }
+                            finished = tasks.join_next(), if tasks.active() > 0 => {
+                                if let Some(finished) = finished {
+                                    handler_panics += usize::from(!telemetry.complete(finished));
+                                }
+                                tasks.start(|update| {
+                                    let ctx = Arc::clone(&ctx);
+                                    async move {
+                                        handlers::dispatch(&ctx, update).await;
+                                    }
+                                });
+                            }
+                            _ = tokio::time::sleep_until(resume) => break,
+                        }
+                    }
                 }
                 Err(error) => break Some(error),
             }
@@ -734,6 +851,15 @@ async fn run_bot_updates(
                     if let Some(finished) = finished {
                         handler_panics += usize::from(!telemetry.complete(finished));
                     }
+                }
+                _ = checkpoint_abandoned(&mut checkpoint),
+                    if cursor_error.is_none() && *stopping.borrow() == UpdateShutdown::Running => {
+                    if handler_panics != 0 {
+                        return Err(UpdateWorkerError::HandlerPanicked {
+                            count: handler_panics,
+                        });
+                    }
+                    continue 'updates;
                 }
             }
         }
@@ -1126,17 +1252,10 @@ async fn main() -> Result {
     }
     let learner_flag = format!("learner:{}", handlers::imgfilter::LEARNER);
     let relearn_all = migrating || !settings.is_locked(0, &learner_flag);
-    let phrase_filters = settings.try_phrase_image_filter_keys().await?;
+    let phrase_filters = settings.try_phrase_image_filters().await?;
     let mut refreshed = 0usize;
-    for (chat, name) in phrase_filters {
-        let row = settings
-            .try_image_filter(chat, &name)
-            .await?
-            .ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "vision migration row disappeared for {chat}/{name}"
-                ))
-            })?;
+    for (chat, row) in phrase_filters {
+        let name = row.name.clone();
         if !relearn_all
             && handlers::imgfilter::written_by_learn(&handlers::imgfilter::dequantize(
                 &row.vector,
@@ -1363,11 +1482,13 @@ async fn main() -> Result {
             cleaner_concurrency,
             handlers::PER_CHAT_UPDATES,
             UPDATES_CHANNEL_CAPACITY.get(),
-        );
+        )
+        .with_lane_cap(UPDATES_CHANNEL_CAPACITY.get() / 4);
+        let mut receive_failures = 0u32;
         'updates: loop {
             let mut handler_panics = 0usize;
             let mut checkpoint = None;
-            let mut receive_error = loop {
+            let mut receive_error = 'receive: loop {
                 while let Some(finished) = tasks.try_join_next() {
                     handler_panics += usize::from(!cleaner_worker_telemetry.complete(finished));
                 }
@@ -1383,23 +1504,54 @@ async fn main() -> Result {
                 cleaner_worker_telemetry
                     .queued
                     .store(tasks.pending() as u64, Ordering::Relaxed);
-                let update = tokio::select! {
-                    _ = cleaner_stopping.changed() => break None,
-                    command = cleaner_checkpoints.recv() => {
-                        checkpoint = command;
-                        break None;
-                    }
-                    finished = tasks.join_next(), if tasks.active() > 0 => {
-                        if let Some(finished) = finished {
-                            handler_panics +=
-                                usize::from(!cleaner_worker_telemetry.complete(finished));
+                if !tasks.has_room() {
+                    tokio::select! {
+                        _ = cleaner_stopping.changed() => break None,
+                        command = cleaner_checkpoints.recv() => {
+                            checkpoint = command;
+                            break None;
                         }
-                        continue;
+                        finished = tasks.join_next(), if tasks.active() > 0 => {
+                            if let Some(finished) = finished {
+                                handler_panics +=
+                                    usize::from(!cleaner_worker_telemetry.complete(finished));
+                            }
+                        }
                     }
-                    update = updates.next(), if tasks.has_room() => update,
+                    continue;
+                }
+                let mut receive = std::pin::pin!(updates.next());
+                let update = loop {
+                    tokio::select! {
+                        _ = cleaner_stopping.changed() => break 'receive None,
+                        command = cleaner_checkpoints.recv() => {
+                            checkpoint = command;
+                            break 'receive None;
+                        }
+                        finished = tasks.join_next(), if tasks.active() > 0 => {
+                            if let Some(finished) = finished {
+                                handler_panics +=
+                                    usize::from(!cleaner_worker_telemetry.complete(finished));
+                            }
+                            tasks.start(|message| {
+                                let ctx = Arc::clone(&cleaner_ctx);
+                                async move {
+                                    handlers::bots::on_cleaner_message(&ctx, &message).await;
+                                }
+                            });
+                            cleaner_worker_telemetry
+                                .active
+                                .store(tasks.active() as u64, Ordering::Relaxed);
+                            cleaner_worker_telemetry
+                                .queued
+                                .store(tasks.pending() as u64, Ordering::Relaxed);
+                        }
+                        update = &mut receive => break update,
+                    }
                 };
                 match update {
                     Ok(grammers_client::update::Update::NewMessage(message)) => {
+                        receive_failures = 0;
                         if !handlers::bots::cleaner_candidate(&cleaner_ctx, &message) {
                             continue;
                         }
@@ -1409,8 +1561,52 @@ async fn main() -> Result {
                             .fetch_add(1, Ordering::Relaxed);
                         tasks.push(key, message);
                     }
-                    Ok(_) => {}
-                    Err(error) => break Some(error),
+                    Ok(_) => receive_failures = 0,
+                    Err(error) => {
+                        let signed_out = matches!(
+                            &error,
+                            grammers_client::InvocationError::Rpc(rpc) if rpc.code == 401
+                        );
+                        let wait = if signed_out {
+                            log::warn!("cleaner: signed out ({error}); its update stream waits");
+                            None
+                        } else {
+                            let Some(wait) = receive_retry(&error, receive_failures)
+                                .filter(|_| receive_failures < RECEIVE_RETRIES)
+                            else {
+                                break Some(error);
+                            };
+                            receive_failures += 1;
+                            log::warn!(
+                                "cleaner: receive failed ({error}); retrying in {wait:?} ({receive_failures}/{RECEIVE_RETRIES})"
+                            );
+                            Some(tokio::time::Instant::now() + wait)
+                        };
+                        loop {
+                            tokio::select! {
+                                _ = cleaner_stopping.changed() => break 'receive None,
+                                command = cleaner_checkpoints.recv() => {
+                                    checkpoint = command;
+                                    break 'receive None;
+                                }
+                                finished = tasks.join_next(), if tasks.active() > 0 => {
+                                    if let Some(finished) = finished {
+                                        handler_panics += usize::from(
+                                            !cleaner_worker_telemetry.complete(finished),
+                                        );
+                                    }
+                                    tasks.start(|message| {
+                                        let ctx = Arc::clone(&cleaner_ctx);
+                                        async move {
+                                            handlers::bots::on_cleaner_message(&ctx, &message)
+                                                .await;
+                                        }
+                                    });
+                                }
+                                _ = sleep_until_or_never(wait) => break,
+                            }
+                        }
+                    }
                 }
             };
             let mut cursor_error = if matches!(
@@ -1512,6 +1708,16 @@ async fn main() -> Result {
                                 usize::from(!cleaner_worker_telemetry.complete(finished));
                         }
                     }
+                    _ = checkpoint_abandoned(&mut checkpoint),
+                        if cursor_error.is_none()
+                            && *cleaner_stopping.borrow() == UpdateShutdown::Running => {
+                        if handler_panics != 0 {
+                            return Err(UpdateWorkerError::HandlerPanicked {
+                                count: handler_panics,
+                            });
+                        }
+                        continue 'updates;
+                    }
                 }
             }
             if handler_panics != 0 {
@@ -1543,6 +1749,13 @@ async fn main() -> Result {
         Arc::clone(&ctx),
         background_stopping.clone(),
     ));
+    if let Some(copies) = ctx.take_racing_copies() {
+        background_tasks.spawn(handlers::nsfw::run_racing_copies(
+            Arc::clone(&ctx),
+            copies,
+            background_stopping.clone(),
+        ));
+    }
     let autoconfig_ctx = Arc::clone(&ctx);
     background_tasks.spawn(async move {
         let _epoch = autoconfig_ctx.background_epoch().await;
@@ -2272,6 +2485,156 @@ mod tests {
         request_update_checkpoint, stop_shutdown_watcher, validate_nonempty_env_value,
     };
     use std::fs;
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]
+    async fn a_checkpoint_that_runs_out_of_budget_is_deferred_not_fatal() {
+        use super::{PeriodicCheckpointOutcome, UpdateCheckpointCommand};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let (ctx, _pool) = crate::handlers::live_ctx().await;
+        let ctx = Arc::new(ctx);
+        let mut background = tokio::task::JoinSet::new();
+
+        let (bot_tx, mut bot_rx) = tokio::sync::mpsc::channel::<UpdateCheckpointCommand>(1);
+        let (cleaner_tx, mut cleaner_rx) = tokio::sync::mpsc::channel::<UpdateCheckpointCommand>(1);
+        let outcome = super::periodic_update_checkpoint(
+            &ctx,
+            &bot_tx,
+            &cleaner_tx,
+            &mut background,
+            tokio::time::Instant::now() + Duration::from_millis(50),
+        )
+        .await
+        .expect("a slow drain is not fatal");
+        assert!(matches!(outcome, PeriodicCheckpointOutcome::Deferred { .. }));
+        assert!(bot_rx.recv().await.unwrap().ready.send(()).is_err());
+        assert!(cleaner_rx.recv().await.unwrap().ready.send(()).is_err());
+
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        ctx.spawn_owned(async move {
+            let _ = finished.await;
+        });
+        let (bot_tx, mut bot_rx) = tokio::sync::mpsc::channel::<UpdateCheckpointCommand>(1);
+        let (cleaner_tx, mut cleaner_rx) =
+            tokio::sync::mpsc::channel::<UpdateCheckpointCommand>(1);
+        let outcome = super::periodic_update_checkpoint(
+            &ctx,
+            &bot_tx,
+            &cleaner_tx,
+            &mut background,
+            tokio::time::Instant::now() + Duration::from_millis(200),
+        )
+        .await
+        .expect("a long owned task is not fatal");
+        assert!(matches!(outcome, PeriodicCheckpointOutcome::Deferred { .. }));
+        assert!(bot_rx.try_recv().is_err());
+        assert!(cleaner_rx.try_recv().is_err());
+        let mut next = ctx.begin_owned_checkpoint();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), next.join(&ctx))
+                .await
+                .is_err()
+        );
+        finish.send(()).unwrap();
+        assert_eq!(next.join(&ctx).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_draining_worker_learns_the_checkpoint_was_given_up() {
+        use std::time::Duration;
+        let (commands, mut received) = tokio::sync::mpsc::channel(1);
+        let pending = super::request_update_checkpoint("bot", &commands).unwrap();
+        let mut checkpoint = received.recv().await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                super::checkpoint_abandoned(&mut checkpoint)
+            )
+            .await
+            .is_err(),
+            "a coordinator still waiting is not an abandoned checkpoint"
+        );
+        drop(pending);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            super::checkpoint_abandoned(&mut checkpoint),
+        )
+        .await
+        .expect("dropping the barrier is the coordinator giving up");
+        let mut none = None;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), super::checkpoint_abandoned(&mut none))
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn transient_receive_errors_are_retried_and_the_rest_end_the_worker() {
+        use grammers_client::InvocationError;
+        use std::time::Duration;
+        let rpc = |code: i32, message: &str| {
+            InvocationError::Rpc(
+                grammers_client::tl::types::RpcError {
+                    error_code: code,
+                    error_message: message.to_owned(),
+                }
+                .into(),
+            )
+        };
+        let io = || InvocationError::Io(std::io::Error::other("reset"));
+        assert_eq!(super::receive_retry(&io(), 0), Some(Duration::from_secs(1)));
+        assert_eq!(super::receive_retry(&io(), 3), Some(Duration::from_secs(8)));
+        assert_eq!(super::receive_retry(&io(), 9), Some(Duration::from_secs(60)));
+        assert_eq!(
+            super::receive_retry(&rpc(500, "INTERNAL"), 0),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            super::receive_retry(&rpc(420, "FLOOD_WAIT_300"), 0),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(super::receive_retry(&rpc(401, "AUTH_KEY_UNREGISTERED"), 0), None);
+        assert_eq!(super::receive_retry(&rpc(400, "CHANNEL_INVALID"), 0), None);
+        assert_eq!(super::receive_retry(&InvocationError::Dropped, 0), None);
+        const { assert!(super::RECEIVE_RETRIES >= 5) };
+    }
+
+    #[tokio::test]
+    async fn a_pending_receive_survives_turns_that_other_branches_win() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let sent = AtomicUsize::new(0);
+        let answer = tokio::sync::Notify::new();
+        let receive = || async {
+            sent.fetch_add(1, Ordering::Relaxed);
+            answer.notified().await;
+            42
+        };
+        let (finished, mut finishing) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..100 {
+            finished.send(()).unwrap();
+        }
+
+        let mut turns = 0;
+        let mut receive = std::pin::pin!(receive());
+        let received = loop {
+            tokio::select! {
+                biased;
+                received = &mut receive => break received,
+                Some(()) = finishing.recv() => {
+                    turns += 1;
+                    if turns == 100 {
+                        answer.notify_one();
+                    }
+                }
+            }
+        };
+        assert_eq!(received, 42);
+        assert_eq!(turns, 100);
+        assert_eq!(sent.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn route_file_is_strict_and_bounded() {

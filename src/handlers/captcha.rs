@@ -154,10 +154,10 @@ pub async fn on_join(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
             "join persistence for {chat} could not resume quarantined moderation: {error}"
         ));
     }
-    let joined_users = super::joined_users(ctx, message).await;
     if !ctx.settings.is_locked(chat, MODE) {
         return false;
     }
+    let joined_users = super::joined_users(ctx, message).await;
     let Ok(Some(chat_ref)) = message.peer_ref().await else {
         return false;
     };
@@ -218,6 +218,9 @@ pub(super) async fn resume_member_rejoin(
     now: i64,
 ) -> Result<(), sqlx::Error> {
     let _member = restrict::lock_member(ctx, chat, user).await;
+    if !ctx.settings.awaits_rejoin(chat, user).await? {
+        return Ok(());
+    }
     ctx.settings
         .resume_warning_on_rejoin(chat, user, now)
         .await?;

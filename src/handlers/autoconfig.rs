@@ -65,8 +65,11 @@ fn setup_service(action: Option<&tl::enums::MessageAction>, me: i64) -> bool {
 fn needs_setup(ctx: &Ctx, chat: i64) -> bool {
     super::owner(ctx, chat).is_none()
         || (super::cleaner_setup::available(ctx)
+            && !ctx.cleaner_joins_paused()
             && !ctx.settings.is_locked(chat, install::CLEANER_ADDED))
 }
+
+const NOT_READY_PROBE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 pub async fn on_message(ctx: &Arc<Ctx>, message: &Message, state: &super::ChatState) {
     if !super::is_group_message(ctx, message).await {
@@ -80,7 +83,14 @@ pub async fn on_message(ctx: &Arc<Ctx>, message: &Message, state: &super::ChatSt
 }
 
 async fn queue_recovery(ctx: &Arc<Ctx>, chat: i64, announce: bool) {
-    let permit = ctx.sweep_slot().await;
+    let permit = if announce {
+        ctx.sweep_slot().await
+    } else {
+        let Some(permit) = ctx.try_sweep_slot() else {
+            return;
+        };
+        permit
+    };
     let ctx = Arc::clone(ctx);
     Arc::clone(&ctx).spawn_owned(async move {
         let _permit = permit;
@@ -139,7 +149,7 @@ pub async fn recover_startup(ctx: Arc<Ctx>) {
     super::bounded(chats, super::FLEET_CAMPAIGNS, move |chat| {
         let ctx = Arc::clone(&ctx);
         async move {
-            if ctx.owns_chat(chat) {
+            if ctx.owns_chat(chat) && needs_setup(&ctx, chat) {
                 if ctx.resolve_group(chat).await.is_none() {
                     log::info!("auto-config: skipped non-group or unresolved peer {chat}");
                     return;
@@ -228,6 +238,7 @@ async fn reconcile(
         if announce {
             install::announce(ctx, chat_ref, chat, &standing).await;
         }
+        ctx.defer_setup_probe(chat, NOT_READY_PROBE);
         return true;
     }
     let was_installed = super::owner(ctx, chat).is_some();
@@ -236,7 +247,7 @@ async fn reconcile(
     if announce && was_installed && installed && !configured {
         install::announce_complete(ctx, chat_ref, chat).await;
     }
-    install::ensure_cleaner(ctx, chat_ref, chat).await;
+    install::ensure_cleaner(ctx, chat_ref, chat, announce).await;
     installed
 }
 

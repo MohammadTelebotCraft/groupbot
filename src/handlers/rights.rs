@@ -532,7 +532,7 @@ async fn deliver_notice_guarded(
 
 pub async fn run_due(ctx: &std::sync::Arc<Ctx>) {
     let started = tokio::time::Instant::now();
-    let mut offset = 0_i64;
+    let mut attempted: Vec<i64> = Vec::new();
     for _ in 0..MAX_PAGES_PER_RUN {
         if started.elapsed() >= RUN_BUDGET {
             log::warn!(
@@ -542,7 +542,7 @@ pub async fn run_due(ctx: &std::sync::Arc<Ctx>) {
         }
         let due = match ctx
             .settings
-            .default_rights_due_page(now(), DUE_PAGE, offset)
+            .default_rights_due_page(now(), DUE_PAGE, &attempted)
             .await
         {
             Ok(due) => due,
@@ -555,7 +555,7 @@ pub async fn run_due(ctx: &std::sync::Arc<Ctx>) {
             return;
         }
         let page_full = due.len() == usize::try_from(DUE_PAGE).unwrap_or(usize::MAX);
-        offset = offset.saturating_add(i64::try_from(due.len()).unwrap_or(i64::MAX));
+        attempted.extend_from_slice(&due);
         let owner = std::sync::Arc::clone(ctx);
         let page = super::bounded(due, super::FLEET_CONCURRENCY, move |chat| {
             let ctx = std::sync::Arc::clone(&owner);

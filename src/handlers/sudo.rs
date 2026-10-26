@@ -115,8 +115,6 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str) {
 
 async fn page(ctx: &Ctx, section: &str) -> Result<String, sqlx::Error> {
     let day = super::stats::today();
-    let fleet = ctx.settings.fleet(day).await?;
-
     let head = "<b>داشبورد کل</b>";
     match section {
         "top" => {
@@ -127,6 +125,7 @@ async fn page(ctx: &Ctx, section: &str) -> Result<String, sqlx::Error> {
             ))
         }
         "use" => {
+            let fleet = ctx.settings.fleet(day).await?;
             let tracked = tracked();
             let keys: Vec<&str> = tracked.iter().map(|(key, _)| *key).collect();
             let counts = ctx.settings.adoption(&keys).await?;
@@ -137,6 +136,7 @@ async fn page(ctx: &Ctx, section: &str) -> Result<String, sqlx::Error> {
             ))
         }
         _ => {
+            let fleet = ctx.settings.fleet(day).await?;
             let quiet = fleet.chats.saturating_sub(fleet.active_today);
             Ok(format!(
                 "{head} › <b>خلاصه</b>\n\n\

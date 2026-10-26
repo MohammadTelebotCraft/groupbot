@@ -15,6 +15,9 @@ async fn invite(ctx: &Ctx, chat: i64, chat_ref: PeerRef) -> Option<String> {
     {
         return Some(link);
     }
+    if !ctx.may_export_left_back_invite(chat) {
+        return None;
+    }
 
     let exported = match ctx
         .client
@@ -32,6 +35,7 @@ async fn invite(ctx: &Ctx, chat: i64, chat_ref: PeerRef) -> Option<String> {
         Ok(exported) => exported,
         Err(e) => {
             eprintln!("left back: could not create invite for {chat}: {e}");
+            ctx.left_back_export_failed(chat);
             return None;
         }
     };

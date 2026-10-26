@@ -163,6 +163,16 @@ pub async fn set_rank(
         Ok(_) => return Ok(()),
         Err(e) => e,
     };
+    let known_member = chat_ref
+        .id
+        .bot_api_dialog_id()
+        .and_then(|chat| ctx.cached_admins(chat))
+        .zip(user)
+        .is_some_and(|(admins, user)| !admins.contains(&user));
+    let flood = matches!(&failed, grammers_client::InvocationError::Rpc(rpc) if rpc.code == 420);
+    if known_member || flood {
+        return Err(failed);
+    }
 
     let Some((peer, _)) = super::admin_ref(ctx, chat_ref, user.unwrap_or_default()).await else {
         return Err(failed);

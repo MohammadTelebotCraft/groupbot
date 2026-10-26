@@ -285,7 +285,7 @@ pub async fn notify(
     let Some(user) = message.sender_id().and_then(PeerId::bare_id) else {
         return;
     };
-    if !ctx.may_notify(chat, user) {
+    if !ctx.may_notify_filtered(chat, user) {
         return;
     }
     let key = ctx.keep_deleted(deleted_text.to_owned());

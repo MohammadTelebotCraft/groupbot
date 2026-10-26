@@ -7,6 +7,7 @@
 
   const STATE_MESSAGES = {
     auth_failed: "این صفحه باید از داخل ربات باز شود.",
+    auth_unavailable: "سرور موقتا در دسترس نیست؛ کمی بعد دوباره امتحان کنید.",
     chat_unknown: "ربات دیگر در این گروه نیست یا شناخته شده نیست.",
     not_admin: "شما ادمین این گروه نیستید.",
     set_denied: "دسترسی تنظیمات برای شما بسته است.",
@@ -295,6 +296,12 @@
     if (e && e.status === 429) return toast((e && e.detail) || "کمی صبر کنید و دوباره امتحان کنید.", "warn");
     if (e && e.status === 403 && !e.detail) return toast("دسترسی این کار برای شما بسته است.", "warn");
     toast((e && e.detail) || STATE_MESSAGES[e && e.message] || "انجام نشد. دوباره امتحان کنید.");
+  }
+
+  function unsure(d) {
+    if (!(d && d.accepted && d.error)) return false;
+    toast(d.error, "warn");
+    return true;
   }
 
   async function takeDash(d) {
@@ -595,13 +602,23 @@
     return { pct: Math.round((done / list.length) * 100), done, total: list.length, list };
   }
 
+  function renderFatal(glyph, title, sub, retry) {
+    app.innerHTML =
+      '<aside id="rail"></aside><div id="view"><div id="main" class="nobar"><div class="empty fatal"><div class="glyph">' + icon(glyph, 32, 1.6) + "</div>" +
+      '<div class="t">' + esc(title) + "</div>" + (sub ? '<div class="s">' + esc(sub) + "</div>" : "") +
+      (retry ? '<button class="btn ghost" data-reboot>' + icon("refresh", 16) + " تلاش دوباره</button>" : "") +
+      "</div></div></div>";
+    document.body.classList.add("nobar");
+  }
+
   async function start() {
     applyTheme();
     if (!initData) {
-      app.innerHTML = '<div class="state error">' + STATE_MESSAGES.auth_failed + "</div>";
+      renderFatal("shieldOff", STATE_MESSAGES.auth_failed, "در گروه «پنل» بفرستید یا از دکمه منوی ربات وارد شوید.", false);
       return;
     }
-    if (tg) {
+    if (tg && !start.wired) {
+      start.wired = true;
       tg.ready();
       tg.expand();
       try {
@@ -620,8 +637,9 @@
     try {
       groups = (await api("/groups")).groups;
     } catch (e) {
-      app.innerHTML = '<div class="state error">' + esc(e.detail || STATE_MESSAGES[e.message] || "خطایی رخ داد.") +
-        '<div style="margin-top:16px"><button class="btn ghost" data-reboot>' + icon("refresh", 16) + " تلاش دوباره</button></div></div>";
+      const auth = e.message === "auth_failed";
+      renderFatal(auth ? "shieldOff" : "wifiOff", e.detail || STATE_MESSAGES[e.message] || "گروه ها خوانده نشد.",
+        auth ? "نشست شما معتبر نیست یا منقضی شده؛ مینی اپ را ببندید و دوباره از ربات باز کنید." : "اتصال را بررسی کنید و دوباره امتحان کنید.", !auth);
       return;
     }
     S.groups = groups;
@@ -787,13 +805,19 @@
   }
 
   function renderChatError(e) {
-    const msg = STATE_MESSAGES[e.message] || "دسترسی امکان پذیر نیست.";
+    const known = Object.prototype.hasOwnProperty.call(STATE_MESSAGES, e.message) && e.message !== "auth_unavailable";
+    const msg = STATE_MESSAGES[e.message] || "اطلاعات این گروه خوانده نشد.";
+    const sub = e.message === "not_admin" ? "اگر تازه ادمین شده اید، چند دقیقه بعد دوباره امتحان کنید."
+      : e.message === "chat_unknown" ? "ربات را دوباره به گروه اضافه و ادمین کنید."
+      : known ? "" : "اتصال را بررسی کنید و دوباره امتحان کنید.";
     app.innerHTML =
       '<aside id="rail"></aside><div id="view">' + renderTop(true) +
-      '<div id="main" class="nobar"><div class="empty"><div class="glyph">' + icon("shieldOff", 32, 1.6) + "</div>" +
-      '<div class="t">' + esc(msg) + "</div>" +
+      '<div id="main" class="nobar"><div class="empty"><div class="glyph">' + icon(known ? "shieldOff" : "wifiOff", 32, 1.6) + "</div>" +
+      '<div class="t">' + esc(msg) + "</div>" + (sub ? '<div class="s">' + esc(sub) + "</div>" : "") +
+      '<div class="btns" style="justify-content:center">' +
+      (known ? "" : '<button class="btn ghost" data-retry-chat>' + icon("refresh", 16) + " تلاش دوباره</button>") +
       (S.groups && S.groups.length > 1 ? '<button class="btn" data-picker>انتخاب گروه دیگر</button>' : "") +
-      "</div></div></div>" + renderOverlays();
+      "</div></div></div></div>" + renderOverlays();
     document.body.classList.add("nobar");
     syncBack();
   }
@@ -1139,7 +1163,7 @@
       let delta = "";
       if (prev != null) {
         const diff = now - prev;
-        delta = diff === 0 ? "مثل دیروز" : '<span class="' + (diff > 0 ? "up" : "down") + '">' + icon(diff > 0 ? "arrowUp" : "arrowDown", 11, 3) + fa(Math.abs(diff)) + "</span> از دیروز";
+        delta = diff === 0 ? "مثل دیروز" : '<span class="' + (diff > 0 ? "up" : "down") + (id === "joined" ? " good" : "") + '">' + icon(diff > 0 ? "arrowUp" : "arrowDown", 11, 3) + fa(Math.abs(diff)) + "</span> از دیروز";
       }
       return '<button class="kpi" data-kpi="' + id + '"><div class="l">' + icon(m.icon, 14) + label + " · امروز</div><div class=\"v\">" + fa(now) + '</div><div class="d">' + delta + "</div>" +
         '<div class="spark">' + values.map((v) => '<i style="height:' + Math.max(8, (v / max) * 100) + '%"></i>').join("") + "</div></button>";
@@ -1860,7 +1884,7 @@
         '<input class="text-input" id="answer-trigger" maxlength="64" placeholder="وقتی کسی نوشت… مثلا «سلام»" />' +
         '<textarea class="text-input" id="answer-text" maxlength="3500" placeholder="ربات جواب بدهد… مثلا «درود، خوش آمدی»" style="min-height:84px;margin-top:8px"></textarea>' +
         '<button class="btn block" style="margin-top:10px" data-answer-add>' + icon("plus", 16) + " افزودن پاسخ</button>" +
-        '<div class="hint start">مخاطب پاسخ ها: ' + esc(pickLabel("an_act")) + ' · <button class="more" style="display:inline;padding:0" data-open="an">تغییر</button> · پاسخ با عکس: در گروه روی پیام «تنظیم پاسخ ‹کلمه›».</div></div>';
+        '<div class="hint start">مخاطب پاسخ ها: ' + esc(pickLabel("an_act")) + ' · <button class="more" data-open="an">تغییر</button> · پاسخ با عکس: در گروه روی پیام «تنظیم پاسخ ‹کلمه›».</div></div>';
     } else if (LIST_HOWTO[kind]) {
       html += '<div class="note mute">' + icon("info", 16) + "<span>" + LIST_HOWTO[kind] + "</span></div>";
     }
@@ -2303,29 +2327,32 @@
     window.scrollTo(0, 0);
   }
 
+  function thenReload(d) {
+    return reloadTopPage().then(() => d);
+  }
+
+  function clearDraftAndReload(d) {
+    const page = currentPage();
+    if (page) page.draft = null;
+    return thenReload(d);
+  }
+
   const CONFIRMS = {
-    "log-off": () => ({ title: "کانال لاگ قطع شود؟", sub: "رویدادها دیگر جایی ثبت نمی شود؛ هر وقت خواستید دوباره وصل کنید.", label: "قطع", run: () => api("/log/off", { method: "POST" }).then(() => reloadTopPage()) }),
+    "log-off": () => ({ title: "کانال لاگ قطع شود؟", sub: "رویدادها دیگر جایی ثبت نمی شود؛ هر وقت خواستید دوباره وصل کنید.", label: "قطع", run: () => api("/log/off", { method: "POST" }).then(thenReload) }),
     "welcome-off": () => ({
       title: "پیام خوشامد حذف شود؟", sub: "متن و رسانه اش پاک می شود.", label: "حذف",
-      run: () => api("/welcome/off", { method: "POST" }).then(() => {
-        const page = currentPage();
-        if (page) page.draft = null;
-        return reloadTopPage();
-      }),
+      run: () => api("/welcome/off", { method: "POST" }).then(clearDraftAndReload),
     }),
     "rules-off": () => ({
       title: "قوانین حذف شود؟", sub: "«قوانین» در گروه دیگر چیزی نشان نمی دهد.", label: "حذف",
-      run: () => api("/rules", { method: "POST", body: { text: "" } }).then(() => {
-        const page = currentPage();
-        if (page) page.draft = null;
-        return reloadTopPage();
-      }),
+      run: () => api("/rules", { method: "POST", body: { text: "" } }).then(clearDraftAndReload),
     }),
     "voice-clear": () => ({
       title: "همه کلمه های ویس پاک شود؟", sub: "کلمه های سفارشی حذف و پیش فرض ها خاموش می شوند؛ پیش فرض ها با یک دکمه برمی گردند.", label: "پاک کردن همه",
       run: () => api("/voice/clear", { method: "POST" }).then((d) => {
         const page = currentPage();
         if (page && d && d.words) page.data = d;
+        return d;
       }),
     }),
   };
@@ -2340,7 +2367,7 @@
         title: "همه " + fa(n) + " مورد از «" + LIST_KINDS[kind][0] + "» حذف شود؟",
         sub: "برگشت ندارد." + (kind === "ban" ? " کسانی که بن شده اند می توانند دوباره بیایند." : ""),
         label: "حذف همه",
-        run: () => api("/lists/" + kind, { method: "DELETE" }).then(() => reloadTopPage()),
+        run: () => api("/lists/" + kind, { method: "DELETE" }).then(thenReload),
       };
     }
     if (key === "locks-off") {
@@ -2357,7 +2384,7 @@
       title: "«" + decode(name) + "» عزل شود؟",
       sub: "از ادمینی گروه و ربات برداشته می شود. ربات فقط ادمین هایی را می تواند عزل کند که خودش اضافه کرده.",
       label: "عزل",
-      run: () => api("/admins/" + id, { method: "DELETE" }).then(() => loadAdmins()),
+      run: () => api("/admins/" + id, { method: "DELETE" }).then((d) => loadAdmins().then(() => d)),
     };
   }
 
@@ -2441,10 +2468,14 @@
 
   async function applyPolicy(action) {
     if (!S.sheet || S.sheet.id !== "response-policy") return;
+    const sheet = S.sheet;
+    let d = null;
     const ok = await write(async () => {
-      S.sheet.data = await api("/response-policy/apply", { method: "POST", body: action });
+      d = await api("/response-policy/apply", { method: "POST", body: action });
     });
-    if (!ok) return;
+    if (!ok || S.sheet !== sheet) return;
+    if (unsure(d) || !d || !d.overrides) return loadSheetData("/response-policy");
+    sheet.data = d;
     haptic("sel");
     drawSheet();
   }
@@ -2455,6 +2486,11 @@
     const ok = await write(async () => {
       d = await api(path, Object.assign({ method: "POST" }, opts || {}));
     });
+    if (ok && unsure(d)) {
+      const f = sheet && (feature(sheet.id) || EXTRA_SHEETS[sheet.id]);
+      if (f && f.load && S.sheet === sheet) loadSheetData(f.load);
+      return false;
+    }
     if (ok && sheet && S.sheet === sheet && d) {
       sheet.data = d;
       if (done) done(d);
@@ -2665,6 +2701,7 @@
     let el;
 
     if (hit("[data-reboot]")) return start();
+    if (hit("[data-retry-chat]") && S.chat != null) return loadChat(S.chat);
 
     if (S.palette) {
       if (t.id === "palette") return closePalette();
@@ -2841,13 +2878,16 @@
       const username = input.value.trim();
       if (!username) return input.focus();
       const page = currentPage();
+      let d = null;
       const ok = await write(async () => {
-        const d = await api("/allowed-bots", { method: "POST", body: { username } });
+        d = await api("/allowed-bots", { method: "POST", body: { username } });
         if (page && page.data && d && d.bots) page.data.allowedBots = d;
       });
       if (ok) {
-        haptic("ok");
-        toast(username + " مجاز شد.", "ok");
+        if (!unsure(d)) {
+          haptic("ok");
+          toast(username + " مجاز شد.", "ok");
+        }
         render();
       }
       return;
@@ -2942,8 +2982,9 @@
       el = hit("[data-log-connect]");
       el.disabled = true;
       const page = currentPage();
+      let d = null;
       const ok = await write(async () => {
-        const d = await api("/log/channel", { method: "POST", body: { channel } });
+        d = await api("/log/channel", { method: "POST", body: { channel } });
         if (page && d && d.kinds) {
           page.data = d;
           S.logInfo = d;
@@ -2951,8 +2992,12 @@
       });
       el.disabled = false;
       if (ok) {
-        haptic("ok");
-        toast("کانال لاگ وصل شد.", "ok");
+        if (unsure(d)) {
+          if (page) loadPage(page);
+        } else {
+          haptic("ok");
+          toast("کانال لاگ وصل شد.", "ok");
+        }
         loadHealth();
         render();
       }
@@ -2975,10 +3020,18 @@
     }
     if (hit("[data-confirm-run]")) {
       const c = S.confirm;
+      if (!c) return;
       S.confirm = null;
       render();
-      const ok = await write(c.run);
+      let d = null;
+      const ok = await write(async () => {
+        d = await c.run();
+      });
       if (ok) {
+        if (unsure(d)) {
+          render();
+          return;
+        }
         if (!c.quiet) {
           haptic("ok");
           toast("انجام شد.", "ok");
@@ -3035,11 +3088,14 @@
       const page = currentPage();
       if (!page || !DOCS[page.id]) return;
       const text = page.draft || "";
+      el = hit("[data-doc-save]");
+      el.disabled = true;
+      let d = null;
       const ok = await write(async () => {
-        const d = await api(DOCS[page.id].path, { method: "POST", body: { text } });
-        if (d && d.error) toast(d.error, "warn");
+        d = await api(DOCS[page.id].path, { method: "POST", body: { text } });
       });
-      if (ok) {
+      el.disabled = false;
+      if (ok && !unsure(d)) {
         haptic("ok");
         page.saved = text;
         setClosingConfirmation(false);
@@ -3226,18 +3282,26 @@
     if (hit("[data-joingate-save]")) {
       const channel = document.getElementById("join-gate-input").value.trim();
       if (!channel) return document.getElementById("join-gate-input").focus();
-      const ok = await write(() => api("/join-gate", { method: "POST", body: { channel } }));
+      let d = null;
+      const ok = await write(async () => {
+        d = await api("/join-gate", { method: "POST", body: { channel } });
+      });
       if (ok) {
-        haptic("ok");
-        toast("ذخیره شد.", "ok");
+        if (!unsure(d)) {
+          haptic("ok");
+          toast("ذخیره شد.", "ok");
+        }
         reloadTopPage();
       }
       return;
     }
     if (hit("[data-joingate-off]")) {
-      const ok = await write(() => api("/join-gate", { method: "POST", body: { channel: "" } }));
+      let d = null;
+      const ok = await write(async () => {
+        d = await api("/join-gate", { method: "POST", body: { channel: "" } });
+      });
       if (ok) {
-        toast("عضویت اجباری خاموش شد.", "ok");
+        if (!unsure(d)) toast("عضویت اجباری خاموش شد.", "ok");
         reloadTopPage();
       }
       return;
@@ -3352,7 +3416,7 @@
       const max = Number(num.max);
       if (!Number.isInteger(n) || n < min || n > max) {
         toast("عددی بین " + fa(min) + " تا " + fa(max) + " بنویسید.", "warn");
-        num.value = num.dataset.value;
+        num.value = num.defaultValue;
         return;
       }
       applySetting(num.dataset.numberApply + ":" + n);

@@ -768,6 +768,9 @@ async fn settle_inner(ctx: &Ctx, pending: &PendingWarningAction, outcome: Delive
 }
 
 fn retry_delay_secs(attempts: u32) -> i64 {
+    if attempts >= super::strict::HOURLY_AFTER_ATTEMPTS {
+        return 3600;
+    }
     (5_i64 * (1_i64 << attempts.min(6))).min(300)
 }
 
@@ -830,7 +833,9 @@ mod tests {
         assert_eq!(retry_delay_secs(0), 5);
         assert_eq!(retry_delay_secs(1), 10);
         assert_eq!(retry_delay_secs(6), 300);
-        assert_eq!(retry_delay_secs(u32::MAX), 300);
+        assert_eq!(retry_delay_secs(11), 300);
+        assert_eq!(retry_delay_secs(12), 3600);
+        assert_eq!(retry_delay_secs(u32::MAX), 3600);
     }
 
     #[test]

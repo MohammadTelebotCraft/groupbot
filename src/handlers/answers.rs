@@ -112,6 +112,9 @@ async fn answer(ctx: &Ctx, message: &Message, chat: i64, view: &super::locks::Vi
     if !allowed {
         return false;
     }
+    if !ctx.may_answer(chat) {
+        return true;
+    }
 
     let Some(mut answer) = StoredAnswer::decode(&stored) else {
         log::warn!("answers: invalid stored formatting for {chat}/{trigger}");
@@ -519,5 +522,17 @@ mod tests {
                 "«{command}» would silently claim ordinary speech"
             );
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]
+    async fn a_busy_trigger_is_answered_at_the_group_pace_not_queued_behind_it() {
+        const CHAT: i64 = -100_777_000_128;
+        let (ctx, _pool) = super::super::live_ctx().await;
+        let answered = (0..30).filter(|_| ctx.may_answer(CHAT)).count();
+        assert_eq!(answered, 1);
+        assert!(ctx.may_answer(CHAT - 1));
+        tokio::time::sleep(super::super::GROUP_PACE).await;
+        assert!(ctx.may_answer(CHAT));
     }
 }

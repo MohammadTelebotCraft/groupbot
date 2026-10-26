@@ -127,23 +127,24 @@ const DAYS: u64 = 7;
 pub async fn activity(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> Response {
     let today = stats::today();
     let mut days: Vec<Value> = Vec::with_capacity(DAYS as usize);
+    let first = today.saturating_sub(DAYS - 1);
+    let mut week = match ctx.settings.tallies_range(gate.chat, first, today).await {
+        Ok(week) => week,
+        Err(error) => {
+            ::log::warn!(
+                "miniapp: activity read for {} from day {first} failed: {error}",
+                gate.chat
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "آمار گروه خوانده نشد؛ دوباره تلاش کنید." })),
+            )
+                .into_response();
+        }
+    };
     for back in 0..DAYS {
         let day = today - back;
-        let tallies = match ctx.settings.tallies(gate.chat, day).await {
-            Ok(tallies) => tallies,
-            Err(error) => {
-                ::log::warn!(
-                    "miniapp: activity read for {}/{} failed: {error}",
-                    gate.chat,
-                    day
-                );
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({ "error": "آمار گروه خوانده نشد؛ دوباره تلاش کنید." })),
-                )
-                    .into_response();
-            }
-        };
+        let tallies = week.remove(&day).unwrap_or_default();
         let counters: Vec<Value> = COUNTERS
             .iter()
             .map(|(key, label)| {
