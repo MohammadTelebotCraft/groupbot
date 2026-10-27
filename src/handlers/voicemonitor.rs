@@ -1268,19 +1268,15 @@ async fn recognise(
     active_words: &[String],
 ) -> Option<(bool, Option<String>)> {
     let input = input_path(file);
-    match tokio::time::timeout(DOWNLOAD_TIMEOUT, ctx.client.download_media(document, &input)).await
+    if let Err(why) = download_within(
+        DOWNLOAD_TIMEOUT,
+        &input,
+        ctx.client.download_media(document, &input),
+    )
+    .await
     {
-        Ok(Ok(_)) => {}
-        Ok(Err(error)) => {
-            eprintln!("voice monitor: could not download {file} in {chat}: {error}");
-            remove_input(&input).await;
-            return None;
-        }
-        Err(_) => {
-            eprintln!("voice monitor: download of {file} in {chat} timed out");
-            remove_input(&input).await;
-            return None;
-        }
+        eprintln!("voice monitor: {file} in {chat}: {why}");
+        return None;
     }
 
     let output = tokio::time::timeout(
@@ -1410,6 +1406,20 @@ async fn remove_input(path: &PathBuf) {
     let _ = tokio::fs::remove_file(path).await;
 }
 
+async fn download_within<T, E: std::fmt::Display>(
+    deadline: Duration,
+    input: &PathBuf,
+    download: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<(), String> {
+    let failed = match tokio::time::timeout(deadline, download).await {
+        Ok(Ok(_)) => return Ok(()),
+        Ok(Err(error)) => format!("could not download: {error}"),
+        Err(_) => "download timed out".to_owned(),
+    };
+    remove_input(input).await;
+    Err(failed)
+}
+
 pub fn normalize(text: &str) -> String {
     let mut normalized = String::with_capacity(text.len());
     for character in text.chars() {
@@ -1498,6 +1508,40 @@ fn is_default_word(word: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_stalled_or_refused_download_ends_and_leaves_no_file() {
+        let input = std::env::temp_dir().join(format!(
+            "groupbot-voice-download-test-{}",
+            std::process::id()
+        ));
+        std::fs::write(&input, b"partial").unwrap();
+        let started = std::time::Instant::now();
+        let stalled = download_within(
+            Duration::from_millis(50),
+            &input,
+            std::future::pending::<Result<(), String>>(),
+        )
+        .await;
+        assert_eq!(stalled, Err("download timed out".to_owned()));
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        assert!(!input.exists(), "the stalled download's file is removed");
+
+        std::fs::write(&input, b"partial").unwrap();
+        let refused = download_within(Duration::from_secs(5), &input, async {
+            Err::<(), _>("FILE_REFERENCE_EXPIRED")
+        })
+        .await;
+        assert!(refused.unwrap_err().contains("FILE_REFERENCE_EXPIRED"));
+        assert!(!input.exists(), "the refused download's file is removed");
+
+        std::fs::write(&input, b"whole").unwrap();
+        let finished =
+            download_within(Duration::from_secs(5), &input, async { Ok::<_, String>(()) }).await;
+        assert_eq!(finished, Ok(()));
+        assert!(input.exists(), "a finished download is left for the recognizer");
+        std::fs::remove_file(&input).unwrap();
+    }
 
     #[test]
     fn normalizes_arabic_forms_and_zero_width_joiners() {

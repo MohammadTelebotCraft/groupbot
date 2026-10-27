@@ -439,19 +439,27 @@ fn file_matches(path: &std::path::Path, expected: &[u8]) -> bool {
     hash.finalize() == Sha256::digest(expected)
 }
 
+fn stage(
+    staging: &std::path::Path,
+    write: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    write(staging).inspect_err(|_| {
+        let _cleanup_result = std::fs::remove_file(staging);
+    })
+}
+
 fn publish_embedded(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     if file_matches(path, bytes) {
         return Ok(());
     }
     let sequence = RUNTIME_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let staging = path.with_extension(format!("so.{}.{sequence}.partial", std::process::id()));
-    if let Err(error) = std::fs::write(&staging, bytes) {
-        let _cleanup_result = std::fs::remove_file(&staging);
-        return Err(format!(
+    stage(&staging, |at| std::fs::write(at, bytes)).map_err(|error| {
+        format!(
             "could not stage ONNX Runtime at {}: {error}",
             staging.display()
-        ));
-    }
+        )
+    })?;
     if let Err(publish_error) = std::fs::rename(&staging, path) {
         if !file_matches(path, bytes) {
             let _cleanup_result = std::fs::remove_file(&staging);
@@ -6596,6 +6604,23 @@ mod tests {
         );
     }
     use super::*;
+
+    #[test]
+    fn a_failed_stage_leaves_no_partial_file() {
+        let staging = std::env::temp_dir().join(format!(
+            "groupbot-stage-test-{}.partial",
+            std::process::id()
+        ));
+        let failed = stage(&staging, |at| {
+            std::fs::write(at, b"half")?;
+            Err(std::io::Error::other("no space left on device"))
+        });
+        assert!(failed.is_err());
+        assert!(!staging.exists(), "a failed write leaves nothing behind");
+        stage(&staging, |at| std::fs::write(at, b"whole")).unwrap();
+        assert!(staging.exists(), "a finished one is left to be published");
+        std::fs::remove_file(&staging).unwrap();
+    }
 
     #[tokio::test]
     #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]

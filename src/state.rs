@@ -6662,6 +6662,67 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "rehearsal on a restored dump; needs FORGET_REHEARSAL_URL and FORGET_REHEARSAL_CHAT"]
+    async fn rehearse_forgetting_a_departed_group_on_a_copy() {
+        let (Ok(url), Ok(chat)) = (
+            std::env::var("FORGET_REHEARSAL_URL"),
+            std::env::var("FORGET_REHEARSAL_CHAT"),
+        ) else {
+            return;
+        };
+        let chat: i64 = chat.parse().expect("a chat id");
+        let settings = Settings::connect(&url).await.unwrap();
+        let tables = [
+            "moderation_case_events",
+            "moderation_cases",
+            "pending_warn_actions",
+            "pending_strict_actions",
+            "pending_rank_awards",
+            "pending_captchas",
+            "pending_deletes",
+            "image_filters",
+            "default_rights_state",
+            "notes",
+            "tallies",
+            "counters",
+            "settings",
+            "shard_migration_receipts",
+            "durable_chats",
+        ];
+        let rows = |table: &'static str, own: bool| {
+            let pool = settings.pool.clone();
+            let filter = if own { "=" } else { "<>" };
+            async move {
+                sqlx::query_scalar::<_, i64>(&format!(
+                    "SELECT count(*) FROM {table} WHERE chat_id {filter} $1"
+                ))
+                .bind(chat)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let mut others = Vec::new();
+        let mut owned = 0;
+        for table in tables {
+            others.push(rows(table, false).await);
+            owned += rows(table, true).await;
+        }
+        assert!(owned > 0, "the group has rows to forget");
+
+        assert!(
+            settings.forget_chat(chat, "left_day").await.unwrap(),
+            "the group must be recorded as gone in the copy"
+        );
+        for (table, other) in tables.into_iter().zip(others) {
+            assert_eq!(rows(table, true).await, 0, "{table} kept the group's rows");
+            assert_eq!(rows(table, false).await, other, "{table} lost another group's rows");
+        }
+        assert_eq!(settings.durable_chat_hash(chat), None);
+        println!("rehearsal: forgot {owned} rows of {chat}; every other group's rows untouched");
+    }
+
+    #[tokio::test]
     #[ignore = "isolated PostgreSQL idle-chat cleanup test"]
     async fn forget_idle_forgets_kicked_members_by_their_last_day() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
