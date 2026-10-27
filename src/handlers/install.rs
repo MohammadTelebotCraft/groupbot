@@ -19,13 +19,17 @@ const QUIET_DAYS: i64 = 30;
 const DEPARTED_PAGE: i64 = 64;
 
 pub async fn departed(ctx: &Ctx, chat: i64) {
-    if ctx.settings.value(chat, LEFT_DAY).is_some() {
+    if left_or_forgotten(ctx, chat) {
         return;
     }
     let today = super::stats::today().to_string();
     if let Err(error) = ctx.settings.try_set_value(chat, LEFT_DAY, &today).await {
         log::warn!("install: {chat}: could not record the bot's removal: {error}");
     }
+}
+
+pub fn left_or_forgotten(ctx: &Ctx, chat: i64) -> bool {
+    ctx.settings.value(chat, LEFT_DAY).is_some() || ctx.settings.durable_chat_hash(chat).is_none()
 }
 
 pub async fn present(ctx: &Ctx, chat: i64) {
@@ -677,6 +681,49 @@ mod tests {
         }
         assert!(!not_in_basic_group(basic, &refused("CHAT_WRITE_FORBIDDEN")));
         assert!(!not_in_basic_group(basic, &refused("FLOOD_WAIT")));
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: the settings mirror decides what is known"]
+    async fn a_forgotten_group_stays_forgotten() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let db = sqlx::PgPool::connect(&url).await.unwrap();
+        let (gone, never) = (-999_999_999_731_i64, -999_999_999_732_i64);
+        for table in ["settings", "durable_chats"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE chat_id = ANY($1)"))
+                .bind(vec![gone, never])
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let rows = |chat: i64| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT (SELECT count(*) FROM settings WHERE chat_id = $1)
+                          + (SELECT count(*) FROM durable_chats WHERE chat_id = $1)",
+                )
+                .bind(chat)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            }
+        };
+        let (ctx, _pool) = super::super::live_ctx().await;
+
+        ctx.settings.try_set_value(gone, "hash", "0").await.unwrap();
+        assert!(!left_or_forgotten(&ctx, gone), "an admitted group the bot is in");
+        departed(&ctx, gone).await;
+        assert!(left_or_forgotten(&ctx, gone), "recorded as left");
+        assert!(ctx.settings.forget_chat(gone, LEFT_DAY).await.unwrap());
+        assert_eq!(rows(gone).await, 0);
+        assert!(left_or_forgotten(&ctx, gone), "a pass that listed it skips it");
+
+        departed(&ctx, gone).await;
+        assert_eq!(ctx.settings.durable_chat_hash(gone), None);
+        assert_eq!(rows(gone).await, 0);
+        departed(&ctx, never).await;
+        assert_eq!(rows(never).await, 0);
     }
 
     fn rights(all: bool) -> tl::types::ChatAdminRights {

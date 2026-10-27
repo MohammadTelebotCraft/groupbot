@@ -132,7 +132,7 @@ pub async fn run_recommendations(ctx: &Arc<Ctx>) {
             {
                 return;
             }
-            if ctx.settings.value(chat, install::LEFT_DAY).is_some() {
+            if install::left_or_forgotten(&ctx, chat) {
                 return;
             }
             let Some(peer) = ctx.resolve_group(chat).await else {

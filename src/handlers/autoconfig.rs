@@ -149,7 +149,10 @@ pub async fn recover_startup(ctx: Arc<Ctx>) {
     super::bounded(chats, super::FLEET_CAMPAIGNS, move |chat| {
         let ctx = Arc::clone(&ctx);
         async move {
-            if ctx.owns_chat(chat) && needs_setup(&ctx, chat) {
+            if ctx.owns_chat(chat)
+                && !install::left_or_forgotten(&ctx, chat)
+                && needs_setup(&ctx, chat)
+            {
                 if ctx.resolve_group(chat).await.is_none() {
                     log::info!("auto-config: skipped non-group or unresolved peer {chat}");
                     return;
