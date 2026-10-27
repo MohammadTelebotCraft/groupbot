@@ -1304,6 +1304,26 @@ pub async fn recover_awards(ctx: &std::sync::Arc<Ctx>) {
     }
 }
 
+pub const PRUNED_DAY: &str = "pruned_day";
+
+pub fn prune_is_due(ctx: &Ctx) -> bool {
+    due_after(ctx.settings.value_parsed::<u64>(0, PRUNED_DAY), today())
+}
+
+fn due_after(last: Option<u64>, today: u64) -> bool {
+    last.is_none_or(|day| day < today)
+}
+
+pub async fn mark_pruned(ctx: &Ctx) {
+    if let Err(error) = ctx
+        .settings
+        .try_set_value(0, PRUNED_DAY, &today().to_string())
+        .await
+    {
+        log::warn!("stats: could not record today's prune: {error}");
+    }
+}
+
 pub async fn prune(ctx: &Ctx) -> Result<u64, sqlx::Error> {
     const BATCH: usize = 500;
 
@@ -1772,6 +1792,13 @@ pub async fn count_add(ctx: &Ctx, message: &Message, added: usize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_prune_runs_once_a_calendar_day() {
+        assert!(super::due_after(None, 20_753), "never run: run now");
+        assert!(super::due_after(Some(20_752), 20_753), "yesterday's: run today");
+        assert!(!super::due_after(Some(20_753), 20_753), "today's: done");
+    }
+
     #[test]
     fn one_photo_asked_for_still_counts_them_all() {
         use grammers_client::tl;

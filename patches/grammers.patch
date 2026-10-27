@@ -1872,7 +1872,7 @@ index dbc6df6..aaad2c2 100644
                  revoke: false,
                  peer: peer.into(),
 diff --git a/grammers-client/src/client/files.rs b/grammers-client/src/client/files.rs
-index 3ba3c02..84f6967 100644
+index 3ba3c02..74f09ee 100644
 --- a/grammers-client/src/client/files.rs
 +++ b/grammers-client/src/client/files.rs
 @@ -8,6 +8,7 @@
@@ -1892,7 +1892,7 @@ index 3ba3c02..84f6967 100644
  };
  
  use super::Client;
-@@ -33,6 +34,83 @@ const FILE_MIGRATE_ERROR: i32 = 303;
+@@ -33,6 +34,95 @@ const FILE_MIGRATE_ERROR: i32 = 303;
  const BIG_FILE_SIZE: usize = 10 * 1024 * 1024;
  const WORKER_COUNT: usize = 4;
  
@@ -1926,6 +1926,18 @@ index 3ba3c02..84f6967 100644
 +        ));
 +    }
 +    Ok(offset + received)
++}
++
++/// Whether a chunk that met `AUTH_KEY_UNREGISTERED` on `dc` may re-authorize there and try
++/// again: once per datacenter per chunk. A second refusal from the same datacenter is the
++/// answer — the home datacenter's own authorization is gone, which no copy can fix — and the
++/// download ends with it instead of asking again for ever.
++fn may_reauthorize(reauthorized: &mut Vec<i32>, dc: i32) -> bool {
++    if reauthorized.contains(&dc) {
++        return false;
++    }
++    reauthorized.push(dc);
++    true
 +}
 +
 +fn checked_chunk_offset(offset: i64, limit: i32, chunks: i32) -> Result<i64, io::Error> {
@@ -1976,7 +1988,7 @@ index 3ba3c02..84f6967 100644
  /// Iterator returned by [`Client::iter_download`].
  pub struct DownloadIter {
      client: Client,
-@@ -59,9 +137,8 @@ impl DownloadIter {
+@@ -59,9 +149,8 @@ impl DownloadIter {
      /// the range `MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE`.
      pub fn chunk_size(mut self, size: i32) -> Self {
          assert!((MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&size) && size % MIN_CHUNK_SIZE == 0);
@@ -1988,7 +2000,7 @@ index 3ba3c02..84f6967 100644
          }
          self
      }
-@@ -70,11 +147,21 @@ impl DownloadIter {
+@@ -70,11 +159,21 @@ impl DownloadIter {
      /// skip less data, modify the `chunk_size` before calling this method, and then reset it to
      /// any value you want.
      pub fn skip_chunks(mut self, n: i32) -> Self {
@@ -2013,7 +2025,7 @@ index 3ba3c02..84f6967 100644
          }
          self
      }
-@@ -91,7 +178,7 @@ impl DownloadIter {
+@@ -91,7 +190,7 @@ impl DownloadIter {
              DownloadIterVariant::Request(r) => r,
              DownloadIterVariant::PreDownloaded(data) => {
                  self.done = true;
@@ -2022,13 +2034,11 @@ index 3ba3c02..84f6967 100644
              }
              DownloadIterVariant::PreFailed(error) => {
                  return Err(InvocationError::Io(error));
-@@ -105,13 +192,30 @@ impl DownloadIter {
+@@ -105,13 +204,28 @@ impl DownloadIter {
          let mut dc = self
              .dc_id
              .map_or_else(|| self.client.0.session.home_dc_id(), Ok)?;
-+        // Each datacenter is re-authorized at most once per chunk. A second `AUTH_KEY_UNREGISTERED`
-+        // from it is the answer — the home datacenter's own authorization is gone, which no copy
-+        // can fix — not a reason to ask again.
++        // See `may_reauthorize`.
 +        let mut reauthorized = Vec::new();
  
          loop {
@@ -2056,7 +2066,7 @@ index 3ba3c02..84f6967 100644
  
                      if reached_known_size || f.bytes.len() < request.limit as usize {
                          self.done = true;
-@@ -120,22 +224,30 @@ impl DownloadIter {
+@@ -120,22 +234,30 @@ impl DownloadIter {
                          }
                      }
  
@@ -2077,9 +2087,9 @@ index 3ba3c02..84f6967 100644
 +                    got: "upload.FileCdnRedirect",
 +                }),
 +                Err(InvocationError::Rpc(err))
-+                    if &err.name == "AUTH_KEY_UNREGISTERED" && !reauthorized.contains(&dc) =>
++                    if &err.name == "AUTH_KEY_UNREGISTERED"
++                        && may_reauthorize(&mut reauthorized, dc) =>
 +                {
-+                    reauthorized.push(dc);
 +                    match self.client.recopy_auth_to_dc(dc).await {
                          Ok(_) => continue,
                          Err(e) => Err(e),
@@ -2094,7 +2104,7 @@ index 3ba3c02..84f6967 100644
                      continue;
                  }
                  Err(e) => Err(e),
-@@ -146,6 +258,81 @@ impl DownloadIter {
+@@ -146,6 +268,81 @@ impl DownloadIter {
  
  /// Method implementations related to uploading or downloading files.
  impl Client {
@@ -2176,7 +2186,7 @@ index 3ba3c02..84f6967 100644
      /// Returns a new iterator over the contents of a media document that will be downloaded.
      ///
      /// # Examples
-@@ -191,10 +378,7 @@ impl Client {
+@@ -191,10 +388,7 @@ impl Client {
                  client: self.clone(),
                  done: false,
                  size: None,
@@ -2188,7 +2198,7 @@ index 3ba3c02..84f6967 100644
                  dc_id: downloadable.dc_id(),
              }
          }
-@@ -260,18 +444,29 @@ impl Client {
+@@ -260,18 +454,29 @@ impl Client {
          workers: usize,
          dc_id: i32,
      ) -> Result<(), InvocationError> {
@@ -2223,11 +2233,11 @@ index 3ba3c02..84f6967 100644
          let mut tasks = vec![];
          for _ in 0..workers {
              let location = location.clone();
-@@ -281,20 +476,22 @@ impl Client {
+@@ -281,20 +486,22 @@ impl Client {
              let task = tokio::task::spawn(async move {
                  let mut retry_offset = None;
                  let mut task_dc = dc_id;
-+                // Each datacenter re-authorized at most once per chunk, as in `DownloadIter::next`.
++                // See `may_reauthorize`.
 +                let mut reauthorized = Vec::new();
                  loop {
                      // Calculate file offset
@@ -2251,7 +2261,7 @@ index 3ba3c02..84f6967 100644
                      // Fetch from telegram
                      let request = &tl::functions::upload::GetFile {
                          precise: true,
-@@ -305,15 +502,42 @@ impl Client {
+@@ -305,15 +512,41 @@ impl Client {
                      };
                      match client.invoke_in_dc(task_dc, request).await {
                          Ok(tl::enums::upload::File::File(file)) => {
@@ -2291,15 +2301,14 @@ index 3ba3c02..84f6967 100644
                          }
                          Err(InvocationError::Rpc(err)) if &err.name == "AUTH_KEY_UNREGISTERED" => {
 -                            match client.copy_auth_to_dc(task_dc).await {
-+                            if reauthorized.contains(&task_dc) {
++                            if !may_reauthorize(&mut reauthorized, task_dc) {
 +                                return Err(InvocationError::Rpc(err));
 +                            }
-+                            reauthorized.push(task_dc);
 +                            match client.recopy_auth_to_dc(task_dc).await {
                                  Ok(_) => {
                                      retry_offset = Some(offset);
                                      continue;
-@@ -323,7 +547,12 @@ impl Client {
+@@ -323,7 +556,12 @@ impl Client {
                          }
                          Err(InvocationError::Rpc(err)) => {
                              if err.code == FILE_MIGRATE_ERROR {
@@ -2313,7 +2322,7 @@ index 3ba3c02..84f6967 100644
                                  retry_offset = Some(offset);
                                  continue;
                              }
-@@ -345,7 +574,13 @@ impl Client {
+@@ -345,7 +583,13 @@ impl Client {
                  file.seek(SeekFrom::Start(offset)).await?;
              }
              file.write_all(&data).await?;
@@ -2328,7 +2337,7 @@ index 3ba3c02..84f6967 100644
          }
  
          // Check if all tasks finished succesfully
-@@ -408,7 +643,7 @@ impl Client {
+@@ -408,7 +652,7 @@ impl Client {
          };
  
          let big_file = size > BIG_FILE_SIZE;
@@ -2337,7 +2346,7 @@ index 3ba3c02..84f6967 100644
          let total_parts = parts.total_parts();
  
          if big_file {
-@@ -420,7 +655,7 @@ impl Client {
+@@ -420,7 +664,7 @@ impl Client {
                  let task = async move {
                      while let Some((part, bytes)) = parts.next_part().await? {
                          let ok = handle
@@ -2346,7 +2355,7 @@ index 3ba3c02..84f6967 100644
                                  file_id,
                                  file_part: part,
                                  file_total_parts: total_parts,
-@@ -430,10 +665,7 @@ impl Client {
+@@ -430,10 +674,7 @@ impl Client {
                              .map_err(io::Error::other)?;
  
                          if !ok {
@@ -2358,7 +2367,7 @@ index 3ba3c02..84f6967 100644
                          }
                      }
                      Ok(())
-@@ -458,7 +690,7 @@ impl Client {
+@@ -458,7 +699,7 @@ impl Client {
              while let Some((part, bytes)) = parts.next_part().await? {
                  md5.consume(&bytes);
                  let ok = self
@@ -2367,7 +2376,7 @@ index 3ba3c02..84f6967 100644
                          file_id,
                          file_part: part,
                          bytes,
-@@ -467,10 +699,7 @@ impl Client {
+@@ -467,10 +708,7 @@ impl Client {
                      .map_err(io::Error::other)?;
  
                  if !ok {
@@ -2379,7 +2388,7 @@ index 3ba3c02..84f6967 100644
                  }
              }
              Ok(Uploaded::from_raw(
-@@ -514,12 +743,19 @@ impl Client {
+@@ -514,12 +752,19 @@ impl Client {
          let path = path.as_ref();
  
          let mut file = fs::File::open(path).await?;
@@ -2403,7 +2412,7 @@ index 3ba3c02..84f6967 100644
  
          self.upload_stream(&mut file, size, name).await
      }
-@@ -536,15 +772,20 @@ struct PartStream<'a, S: AsyncRead + Unpin> {
+@@ -536,15 +781,20 @@ struct PartStream<'a, S: AsyncRead + Unpin> {
  }
  
  impl<'a, S: AsyncRead + Unpin> PartStream<'a, S> {
@@ -2428,7 +2437,7 @@ index 3ba3c02..84f6967 100644
      }
  
      fn total_parts(&self) -> i32 {
-@@ -585,3 +826,82 @@ impl<'a, S: AsyncRead + Unpin> PartStream<'a, S> {
+@@ -585,3 +835,97 @@ impl<'a, S: AsyncRead + Unpin> PartStream<'a, S> {
          res
      }
  }
@@ -2436,6 +2445,21 @@ index 3ba3c02..84f6967 100644
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
++
++    #[test]
++    fn a_chunk_reauthorizes_each_datacenter_once() {
++        let mut reauthorized = Vec::new();
++        assert!(may_reauthorize(&mut reauthorized, 4));
++        assert!(
++            !may_reauthorize(&mut reauthorized, 4),
++            "the same refusal twice is the answer, not a reason to loop"
++        );
++        assert!(
++            may_reauthorize(&mut reauthorized, 2),
++            "a migration to another datacenter still gets its own"
++        );
++        assert!(!may_reauthorize(&mut reauthorized, 2));
++    }
 +
 +    #[test]
 +    fn web_document_bounds_reject_oversize_and_invalid_chunks() {

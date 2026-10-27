@@ -132,6 +132,9 @@ pub async fn run_recommendations(ctx: &Arc<Ctx>) {
             {
                 return;
             }
+            if ctx.settings.value(chat, install::LEFT_DAY).is_some() {
+                return;
+            }
             let Some(peer) = ctx.resolve_group(chat).await else {
                 return;
             };
@@ -143,6 +146,9 @@ pub async fn run_recommendations(ctx: &Arc<Ctx>) {
                 && let Err(error) = ctx.client.send_message(peer, body).await
             {
                 log::warn!("cleaner recommendation: cannot send to {chat}: {error}");
+                if install::not_in_basic_group(peer, &error) {
+                    install::departed(&ctx, chat).await;
+                }
                 return;
             }
             if let Err(error) = ctx

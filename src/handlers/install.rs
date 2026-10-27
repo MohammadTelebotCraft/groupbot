@@ -14,6 +14,8 @@ const CHECKED_DAY: &str = "checked_day";
 
 const DEPARTED_DAYS: i64 = 90;
 
+const QUIET_DAYS: i64 = 30;
+
 const DEPARTED_PAGE: i64 = 64;
 
 pub async fn departed(ctx: &Ctx, chat: i64) {
@@ -35,6 +37,15 @@ pub async fn present(ctx: &Ctx, chat: i64) {
     }
 }
 
+pub fn not_in_basic_group(chat_ref: PeerRef, error: &grammers_client::InvocationError) -> bool {
+    chat_ref.id.kind() == PeerKind::Chat
+        && matches!(
+            error,
+            grammers_client::InvocationError::Rpc(rpc)
+                if matches!(rpc.name.as_str(), "PEER_ID_INVALID" | "CHAT_ID_INVALID" | "CHAT_FORBIDDEN")
+        )
+}
+
 async fn presence(ctx: &Ctx, chat_ref: PeerRef) -> Option<bool> {
     if chat_ref.id.kind() == PeerKind::Channel {
         return match standing(ctx, chat_ref).await {
@@ -51,16 +62,16 @@ async fn presence(ctx: &Ctx, chat_ref: PeerRef) -> Option<bool> {
     {
         Ok(tl::enums::messages::Chats::Chats(chats)) => chats.chats,
         Ok(tl::enums::messages::Chats::Slice(chats)) => chats.chats,
+        Err(error) if not_in_basic_group(chat_ref, &error) => return Some(false),
         Err(error) => {
             eprintln!("install: cannot read basic group {id}: {error}");
             return None;
         }
     };
-    chats.into_iter().find_map(|chat| match chat {
-        tl::enums::Chat::Forbidden(chat) if chat.id == id => Some(false),
-        tl::enums::Chat::Chat(chat) if chat.id == id => Some(!(chat.left || chat.deactivated)),
-        _ => None,
-    })
+    Some(chats.into_iter().any(|chat| match chat {
+        tl::enums::Chat::Chat(chat) => chat.id == id && !(chat.left || chat.deactivated),
+        _ => false,
+    }))
 }
 
 pub async fn forget_departed(ctx: &Ctx) {
@@ -80,8 +91,9 @@ pub async fn forget_departed(ctx: &Ctx) {
         Err(error) => log::warn!("install: departed groups unavailable: {error}"),
     }
 
+    let quiet_since = today.saturating_sub(QUIET_DAYS);
     let admitted_before =
-        super::tempmedia::unix_now().saturating_sub(DEPARTED_DAYS.saturating_mul(86_400));
+        super::tempmedia::unix_now().saturating_sub(QUIET_DAYS.saturating_mul(86_400));
     let mut quiet = Vec::new();
     for batch in ctx.settings.chats().chunks(500) {
         let room = DEPARTED_PAGE.saturating_sub(i64::try_from(quiet.len()).unwrap_or(i64::MAX));
@@ -90,7 +102,13 @@ pub async fn forget_departed(ctx: &Ctx) {
         }
         match ctx
             .settings
-            .quiet_unchecked(batch, horizon, admitted_before, (LEFT_DAY, CHECKED_DAY), room)
+            .quiet_unchecked(
+                batch,
+                quiet_since,
+                admitted_before,
+                (LEFT_DAY, CHECKED_DAY),
+                room,
+            )
             .await
         {
             Ok(found) => quiet.extend(found),
@@ -629,6 +647,37 @@ pub async fn handle(ctx: &Arc<Ctx>, message: &Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_basic_groups_membership_errors_say_the_bot_is_gone() {
+        use grammers_client::InvocationError;
+        use grammers_client::session::types::PeerAuth;
+        let refused = |name: &str| {
+            InvocationError::Rpc(grammers_client::sender::RpcError {
+                code: 400,
+                name: name.into(),
+                value: None,
+                caused_by: None,
+            })
+        };
+        let basic = PeerRef {
+            id: PeerId::chat(5_410_460_921).unwrap(),
+            auth: PeerAuth::from_hash(0),
+        };
+        let channel = PeerRef {
+            id: PeerId::channel(12).unwrap(),
+            auth: PeerAuth::from_hash(7),
+        };
+        for name in ["PEER_ID_INVALID", "CHAT_ID_INVALID", "CHAT_FORBIDDEN"] {
+            assert!(not_in_basic_group(basic, &refused(name)), "{name}");
+            assert!(
+                !not_in_basic_group(channel, &refused(name)),
+                "a channel's {name} may be its stored hash"
+            );
+        }
+        assert!(!not_in_basic_group(basic, &refused("CHAT_WRITE_FORBIDDEN")));
+        assert!(!not_in_basic_group(basic, &refused("FLOOD_WAIT")));
+    }
 
     fn rights(all: bool) -> tl::types::ChatAdminRights {
         tl::types::ChatAdminRights {

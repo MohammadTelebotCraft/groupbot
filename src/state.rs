@@ -580,6 +580,7 @@ pub const MAX_SETTING_VALUE_BYTES: usize = 16 * 1024;
 const VALIDATED_SETTING_KEYS: &[&str] = &[
     "left_day",
     "checked_day",
+    "pruned_day",
     "strict_limit",
     "strict_time",
     "strict_action",
@@ -653,7 +654,7 @@ fn validate_persisted_setting(key: &str, value: &str) -> std::result::Result<(),
         "gate_every" | "gate_ttl" => parse_bounded_setting(key, value, 0, 3_600),
         "report_at" | "auto_purge_at" => parse_bounded_setting(key, value, 0, 1_439),
         "auto_purge_count" => parse_bounded_setting(key, value, 0, 100_000),
-        "report_day" | "auto_purge_day" | "left_day" | "checked_day" => value
+        "report_day" | "auto_purge_day" | "left_day" | "checked_day" | "pruned_day" => value
             .parse::<u64>()
             .map(|_| ())
             .map_err(|_| CorruptSetting::new(key, value, "a non-negative day number")),

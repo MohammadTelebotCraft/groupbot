@@ -1934,8 +1934,7 @@ async fn main() -> Result {
     let stats_ctx = Arc::clone(&ctx);
     let mut stats_stopping = background_stopping.clone();
     background_tasks.spawn(async move {
-        let mut flushes: u32 = 1;
-        let mut prune_due = false;
+        let mut pruned_on = None;
         let mut tick = tokio::time::interval(STATS_FLUSH);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -1945,18 +1944,18 @@ async fn main() -> Result {
                     let _epoch = stats_ctx.background_epoch().await;
                     handlers::stats::flush(&stats_ctx).await;
 
-                    if flushes.is_multiple_of(1440) {
-                        prune_due = true;
-                    }
-                    if prune_due {
+                    let today = handlers::stats::today();
+                    if pruned_on != Some(today) && handlers::stats::prune_is_due(&stats_ctx) {
                         match handlers::stats::prune(&stats_ctx).await {
-                            Ok(_) => prune_due = false,
+                            Ok(_) => {
+                                pruned_on = Some(today);
+                                handlers::stats::mark_pruned(&stats_ctx).await;
+                            }
                             Err(error) => {
                                 log::warn!("counter prune failed; retrying next stats tick: {error}");
                             }
                         }
                     }
-                    flushes += 1;
                 }
             }
         }
