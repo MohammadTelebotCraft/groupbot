@@ -19,6 +19,8 @@ const RECOVERY_PAGE: i64 = super::FLEET_CAMPAIGNS as i64;
 const RECOVERY_LIMIT: usize = 100;
 const FRESH_RECOVERY_SHARE: i64 = 3;
 const RETRY_RECOVERY_SHARE: i64 = 1;
+const PARKED_RETENTION_SECS: i64 = 30 * 86_400;
+const PARKED_PURGE_PAGE: i64 = 64;
 pub const LIMIT_RANGE: (u32, u32) = (1, 100);
 pub const LIMIT_PRESETS: &[u32] = &[2, 3, 5, 7, 10];
 
@@ -385,7 +387,7 @@ pub async fn recover_pending(ctx: &Arc<Ctx>) {
 
         let count = pending.len();
         if count == 0 {
-            return;
+            break;
         }
         handled += count;
         let owner = Arc::clone(ctx);
@@ -395,8 +397,19 @@ pub async fn recover_pending(ctx: &Arc<Ctx>) {
         })
         .await;
         if count < capacity as usize {
-            return;
+            break;
         }
+    }
+
+    let before = unix_now().saturating_sub(PARKED_RETENTION_SECS);
+    match ctx
+        .settings
+        .purge_parked_warning_actions(before, PARKED_PURGE_PAGE)
+        .await
+    {
+        Ok(0) => {}
+        Ok(count) => log::warn!("warns: purged {count} penalties parked past retention"),
+        Err(error) => log::warn!("warns: parked-penalty purge failed: {error}"),
     }
 }
 

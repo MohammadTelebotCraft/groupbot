@@ -208,6 +208,13 @@ impl Settings {
              ON pending_strict_actions (terminal_at, chat_id, user_id)
              WHERE terminal_at IS NOT NULL",
         )
+        .execute(&mut *connection)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS pending_strict_parked_age
+             ON pending_strict_actions (available_at, chat_id, user_id)
+             WHERE awaiting_rejoin AND terminal_at IS NULL",
+        )
         .execute(connection)
         .await?;
         Ok(())
@@ -356,7 +363,8 @@ impl Settings {
         }
 
         let admitted: bool = sqlx::query_scalar(
-            "SELECT count(*) < $2 FROM pending_strict_actions WHERE chat_id = $1",
+            "SELECT count(*) < $2 FROM pending_strict_actions
+             WHERE chat_id = $1 AND terminal_at IS NULL AND NOT awaiting_rejoin",
         )
         .bind(chat)
         .bind(MAX_PENDING_STRICT_ACTIONS_PER_CHAT)
@@ -638,6 +646,26 @@ impl Settings {
         .await?;
         Ok(removed.rows_affected())
     }
+
+    pub async fn purge_parked_strict_actions(&self, before: i64, limit: i64) -> Result<u64> {
+        let removed = sqlx::query(
+            "DELETE FROM pending_strict_actions
+             WHERE awaiting_rejoin AND terminal_at IS NULL AND lease_token IS NULL
+               AND available_at <= $1
+               AND ctid IN (
+                 SELECT ctid FROM pending_strict_actions
+                 WHERE awaiting_rejoin AND terminal_at IS NULL AND lease_token IS NULL
+                   AND available_at <= $1
+                 ORDER BY available_at, chat_id, user_id
+                 FOR UPDATE SKIP LOCKED LIMIT $2
+             )",
+        )
+        .bind(before)
+        .bind(limit.clamp(1, 256))
+        .execute(&self.pool)
+        .await?;
+        Ok(removed.rows_affected())
+    }
 }
 
 #[cfg(test)]
@@ -694,6 +722,46 @@ mod tests {
         .execute(&settings.pool)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated PostgreSQL strict parking retention test"]
+    async fn parked_actions_neither_fill_the_cap_nor_stay_for_good() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let settings = Settings::connect(&url).await.unwrap();
+        let chat = -999_999_998_640_i64;
+        clean(&settings, chat).await;
+        let departed: Vec<i64> = (1..=MAX_PENDING_STRICT_ACTIONS_PER_CHAT).collect();
+        sqlx::query(
+            "INSERT INTO pending_strict_actions
+             (chat_id, user_id, action, threshold, target_name, wipe_history,
+              created_at, available_at, awaiting_rejoin)
+             SELECT $1, user_id, 'ban', 1, 'member', FALSE, 100, 100, TRUE
+             FROM UNNEST($2::bigint[]) AS departed(user_id)",
+        )
+        .bind(chat)
+        .bind(&departed)
+        .execute(&settings.pool)
+        .await
+        .unwrap();
+
+        let next = settings
+            .increment_strict(violation(chat, 10_000, 100, 1, StrictAction::Ban, None))
+            .await
+            .unwrap()
+            .expect("parked actions do not count against the cap");
+        assert_eq!(next.intent, StrictIntentState::Active);
+
+        while settings.purge_parked_strict_actions(200, 256).await.unwrap() > 0 {}
+        let left: Vec<(i64, bool)> = sqlx::query_as(
+            "SELECT user_id, awaiting_rejoin FROM pending_strict_actions WHERE chat_id = $1",
+        )
+        .bind(chat)
+        .fetch_all(&settings.pool)
+        .await
+        .unwrap();
+        assert_eq!(left, [(10_000, false)], "the live action is not parked and stays");
+        clean(&settings, chat).await;
     }
 
     #[tokio::test]

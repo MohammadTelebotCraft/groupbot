@@ -632,6 +632,10 @@ fn receive_retry(
     }
 }
 
+fn dormant_channel_cap(ctx: &Ctx) -> usize {
+    ctx.max_runtime_chats().saturating_mul(2)
+}
+
 async fn run_bot_updates(
     ctx: Arc<Ctx>,
     client: Client,
@@ -647,6 +651,7 @@ async fn run_bot_updates(
             UpdatesConfiguration {
                 catch_up: true,
                 drop_idle_channels: true,
+                max_dormant_channels: dormant_channel_cap(&ctx),
             },
         )
         .await
@@ -1474,6 +1479,7 @@ async fn main() -> Result {
                 UpdatesConfiguration {
                     catch_up: true,
                     drop_idle_channels: true,
+                    max_dormant_channels: dormant_channel_cap(&cleaner_ctx),
                 },
             )
             .await

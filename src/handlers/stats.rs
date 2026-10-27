@@ -1147,6 +1147,11 @@ pub async fn flush(ctx: &std::sync::Arc<Ctx>) -> bool {
     if let Err(error) = ctx.settings.prune_stats_receipts().await {
         log::error!("stats: receipt cleanup deferred: {error}");
     }
+    match ctx.settings.purge_terminal_rank_awards(5_000).await {
+        Ok(0) => {}
+        Ok(count) => log::info!("stats: forgot {count} rank awards that ran out of attempts"),
+        Err(error) => log::warn!("stats: terminal rank award purge deferred: {error}"),
+    }
     pending.is_none() && ctx.stats_flush_batches() == 0
 }
 
@@ -1312,6 +1317,7 @@ pub async fn prune(ctx: &Ctx) -> Result<u64, sqlx::Error> {
     if dropped > 0 {
         println!("forgot {dropped} members quiet for {FORGET_DAYS}+ days");
     }
+    super::install::forget_departed(ctx).await;
     Ok(dropped)
 }
 

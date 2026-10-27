@@ -78,6 +78,7 @@ const WINDOW_SECONDS: f64 = 20.0;
 const FULL_SCAN_SECONDS: f64 = 90.0;
 const MAX_WINDOWS: usize = 6;
 const JOB_TIMEOUT: Duration = Duration::from_secs(240);
+const DOWNLOAD_TIMEOUT: Duration = JOB_TIMEOUT;
 const CONFIG_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_TRANSCRIPT_TEXT_CHARS: usize = 4_096;
 const CALLBACK_TEXT_CHARS: usize = 180;
@@ -1267,10 +1268,19 @@ async fn recognise(
     active_words: &[String],
 ) -> Option<(bool, Option<String>)> {
     let input = input_path(file);
-    if let Err(error) = ctx.client.download_media(document, &input).await {
-        eprintln!("voice monitor: could not download {file} in {chat}: {error}");
-        remove_input(&input).await;
-        return None;
+    match tokio::time::timeout(DOWNLOAD_TIMEOUT, ctx.client.download_media(document, &input)).await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            eprintln!("voice monitor: could not download {file} in {chat}: {error}");
+            remove_input(&input).await;
+            return None;
+        }
+        Err(_) => {
+            eprintln!("voice monitor: download of {file} in {chat} timed out");
+            remove_input(&input).await;
+            return None;
+        }
     }
 
     let output = tokio::time::timeout(

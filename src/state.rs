@@ -205,6 +205,9 @@ const INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS pending_warn_actions_retry_due
      ON pending_warn_actions (claimed_until, attempts, created_at, chat_id, user_id)
      WHERE attempts > 0 AND NOT awaiting_rejoin",
+    "CREATE INDEX IF NOT EXISTS pending_warn_actions_parked_age
+     ON pending_warn_actions (claimed_until, chat_id, user_id)
+     WHERE awaiting_rejoin",
 ];
 
 pub type Idle = (Vec<(i64, String, u64)>, u64);
@@ -575,6 +578,8 @@ pub const MAX_SETTING_KEY_BYTES: usize = 512;
 pub const MAX_SETTING_VALUE_BYTES: usize = 16 * 1024;
 
 const VALIDATED_SETTING_KEYS: &[&str] = &[
+    "left_day",
+    "checked_day",
     "strict_limit",
     "strict_time",
     "strict_action",
@@ -648,7 +653,7 @@ fn validate_persisted_setting(key: &str, value: &str) -> std::result::Result<(),
         "gate_every" | "gate_ttl" => parse_bounded_setting(key, value, 0, 3_600),
         "report_at" | "auto_purge_at" => parse_bounded_setting(key, value, 0, 1_439),
         "auto_purge_count" => parse_bounded_setting(key, value, 0, 100_000),
-        "report_day" | "auto_purge_day" => value
+        "report_day" | "auto_purge_day" | "left_day" | "checked_day" => value
             .parse::<u64>()
             .map(|_| ())
             .map_err(|_| CorruptSetting::new(key, value, "a non-negative day number")),
@@ -3115,6 +3120,24 @@ impl Settings {
         .await
     }
 
+    pub async fn purge_parked_warning_actions(&self, before: i64, limit: i64) -> Result<u64> {
+        let removed = sqlx::query(
+            "DELETE FROM pending_warn_actions
+             WHERE awaiting_rejoin AND lease_token IS NULL AND claimed_until <= $1
+               AND ctid IN (
+                 SELECT ctid FROM pending_warn_actions
+                 WHERE awaiting_rejoin AND lease_token IS NULL AND claimed_until <= $1
+                 ORDER BY claimed_until, chat_id, user_id
+                 FOR UPDATE SKIP LOCKED LIMIT $2
+             )",
+        )
+        .bind(before)
+        .bind(limit.clamp(1, 256))
+        .execute(&self.pool)
+        .await?;
+        Ok(removed.rows_affected())
+    }
+
     pub async fn resume_warning_on_rejoin(&self, chat: i64, user: i64, now: i64) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         lock_durable_member_rejoin(&mut tx, chat, user).await?;
@@ -3350,7 +3373,8 @@ impl Settings {
         let deleted = sqlx::query_scalar::<_, i64>(
             "WITH removed AS (
                  DELETE FROM counters
-                 WHERE chat_id = ANY($1) AND seen > 0 AND seen <= $2
+                 WHERE chat_id = ANY($1)
+                   AND ((seen > 0 AND seen <= $2) OR (seen = 0 AND day > 0 AND day <= $2))
                  RETURNING 1
              ), adjusted AS (
                  UPDATE durable_counts
@@ -3367,6 +3391,168 @@ impl Settings {
         .fetch_one(&self.pool)
         .await?;
         nonnegative_counter("deleted idle member count", deleted)
+    }
+
+    pub async fn chats_marked_before(&self, key: &str, day: i64, limit: i64) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            "SELECT chat_id FROM settings
+             WHERE key = $1 AND chat_id <> 0
+               AND CASE WHEN value ~ '^[0-9]{1,18}$' THEN value::bigint <= $2 ELSE FALSE END
+             ORDER BY chat_id LIMIT $3",
+        )
+        .bind(key)
+        .bind(day)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn quiet_unchecked(
+        &self,
+        chats: &[i64],
+        day: i64,
+        admitted_before: i64,
+        (marked, checked): (&str, &str),
+        limit: i64,
+    ) -> Result<Vec<i64>> {
+        sqlx::query_scalar(
+            "SELECT owner.chat_id FROM durable_chats AS owner
+             WHERE owner.chat_id = ANY($1) AND owner.admitted_at <= $3
+               AND NOT EXISTS (SELECT 1 FROM tallies
+                               WHERE tallies.chat_id = owner.chat_id AND tallies.day >= $2)
+               AND NOT EXISTS (SELECT 1 FROM settings
+                               WHERE settings.chat_id = owner.chat_id AND settings.key = $4)
+               AND NOT EXISTS (SELECT 1 FROM settings
+                               WHERE settings.chat_id = owner.chat_id AND settings.key = $5
+                                 AND CASE WHEN settings.value ~ '^[0-9]{1,18}$'
+                                          THEN settings.value::bigint >= $2 ELSE FALSE END)
+             ORDER BY owner.chat_id LIMIT $6",
+        )
+        .bind(chats)
+        .bind(day)
+        .bind(admitted_before)
+        .bind(marked)
+        .bind(checked)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn forget_chat(
+        &self,
+        chat: i64,
+        marker: &str,
+    ) -> std::result::Result<bool, SettingsWriteError> {
+        const OWNED: &[&str] = &[
+            "moderation_case_events",
+            "moderation_cases",
+            "pending_warn_actions",
+            "pending_strict_actions",
+            "pending_rank_awards",
+            "pending_deletes",
+            "image_filters",
+            "default_rights_state",
+            "settings",
+        ];
+        if chat == 0 {
+            return Ok(false);
+        }
+        if !self.ownership.alive.load(Ordering::Acquire) {
+            return Err(SettingsWriteError::UncertainState);
+        }
+        let slot = self.write_slot(chat);
+        let _writing = slot.lock().await;
+        let _capacity = self.capacity_write.lock().await;
+        if !self.ownership.alive.load(Ordering::Acquire) {
+            return Err(SettingsWriteError::UncertainState);
+        }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(SettingsWriteError::Database)?;
+        let marked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM settings WHERE chat_id = $1 AND key = $2)",
+        )
+        .bind(chat)
+        .bind(marker)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(SettingsWriteError::Database)?;
+        if !marked {
+            return Ok(false);
+        }
+        let mut deleted = [0_i64; 4];
+        for (counted, table) in deleted
+            .iter_mut()
+            .zip(["counters", "tallies", "notes", "pending_captchas"])
+        {
+            *counted = sqlx::query(&format!("DELETE FROM {table} WHERE chat_id = $1"))
+                .bind(chat)
+                .execute(&mut *transaction)
+                .await
+                .map_err(SettingsWriteError::Database)?
+                .rows_affected()
+                .try_into()
+                .unwrap_or(i64::MAX);
+        }
+        for table in OWNED {
+            sqlx::query(&format!("DELETE FROM {table} WHERE chat_id = $1"))
+                .bind(chat)
+                .execute(&mut *transaction)
+                .await
+                .map_err(SettingsWriteError::Database)?;
+        }
+        sqlx::query("DELETE FROM durable_chats WHERE chat_id = $1")
+            .bind(chat)
+            .execute(&mut *transaction)
+            .await
+            .map_err(SettingsWriteError::Database)?;
+        let [counters, tallies, notes, captchas] = deleted;
+        sqlx::query(
+            "UPDATE durable_counts
+             SET counter_rows = GREATEST(counter_rows - $1, 0),
+                 tally_rows = GREATEST(tally_rows - $2, 0),
+                 note_rows = GREATEST(note_rows - $3, 0)
+             WHERE id = 0",
+        )
+        .bind(counters)
+        .bind(tallies)
+        .bind(notes)
+        .execute(&mut *transaction)
+        .await
+        .map_err(SettingsWriteError::Database)?;
+        sqlx::query(
+            "UPDATE captcha_counts SET captcha_rows = GREATEST(captcha_rows - $1, 0) WHERE id = 0",
+        )
+        .bind(captchas)
+        .execute(&mut *transaction)
+        .await
+        .map_err(SettingsWriteError::Database)?;
+
+        let mut commit = MirrorCommitGuard::new(&self.ownership);
+        transaction
+            .commit()
+            .await
+            .map_err(SettingsWriteError::CommitUncertain)?;
+        if let Some(settings) = self.cache.write().unwrap().remove(&chat) {
+            let bytes = settings
+                .iter()
+                .map(|(key, value)| setting_size(key, value))
+                .fold(0_usize, usize::saturating_add);
+            for (total, gone) in [
+                (&self.setting_rows, settings.len()),
+                (&self.setting_bytes, bytes),
+            ] {
+                let _ = total.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                    Some(held.saturating_sub(gone))
+                });
+            }
+        }
+        self.index.write().unwrap().remove(&chat);
+        self.durable_chats.write().unwrap().remove(&chat);
+        commit.disarm();
+        Ok(true)
     }
 
     pub async fn image_filters(&self, chat: i64) -> Result<Vec<ImageFilterRow>> {
@@ -6271,6 +6457,246 @@ mod tests {
 
         sqlx::query(wipe)
             .bind(&both)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated PostgreSQL warning parking retention test"]
+    async fn parked_warning_penalties_are_forgotten_past_retention() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let chat = -999_999_999_741;
+        let settings = Settings::connect(&url).await.unwrap();
+        admit_test_chats(&settings, &[chat]).await;
+        let wipe = "DELETE FROM pending_warn_actions WHERE chat_id = $1";
+        sqlx::query(wipe)
+            .bind(chat)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO pending_warn_actions
+             (chat_id, user_id, penalty, created_at, claimed_until, awaiting_rejoin)
+             VALUES ($1, 1, 'ban', 100, 100, TRUE),
+                    ($1, 2, 'ban', 100, 300, TRUE),
+                    ($1, 3, 'mute', 100, 100, FALSE)",
+        )
+        .bind(chat)
+        .execute(&settings.pool)
+        .await
+        .unwrap();
+
+        while settings.purge_parked_warning_actions(200, 64).await.unwrap() > 0 {}
+        let left: Vec<i64> = sqlx::query_scalar(
+            "SELECT user_id FROM pending_warn_actions WHERE chat_id = $1 ORDER BY user_id",
+        )
+        .bind(chat)
+        .fetch_all(&settings.pool)
+        .await
+        .unwrap();
+        assert_eq!(left, [2, 3]);
+
+        sqlx::query(wipe)
+            .bind(chat)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+    }
+
+    async fn wipe_test_chats(url: &str, chats: &[i64]) {
+        let pool = sqlx::PgPool::connect(url).await.unwrap();
+        for table in [
+            "moderation_case_events",
+            "moderation_cases",
+            "pending_warn_actions",
+            "pending_strict_actions",
+            "pending_rank_awards",
+            "pending_captchas",
+            "pending_deletes",
+            "image_filters",
+            "default_rights_state",
+            "notes",
+            "tallies",
+            "counters",
+            "settings",
+            "durable_chats",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE chat_id = ANY($1)"))
+                .bind(chats)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated PostgreSQL departed-group forgetting test"]
+    async fn forget_chat_takes_everything_a_departed_group_owns() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let chat = -999_999_999_742;
+        wipe_test_chats(&url, &[chat]).await;
+        let settings = Settings::connect(&url).await.unwrap();
+        settings.try_set_value(chat, "hash", "7").await.unwrap();
+        settings.try_set(chat, "audit_flag", true).await.unwrap();
+        let member = Bump {
+            chat,
+            user: 1,
+            name: String::new(),
+            added: 1,
+        };
+        settings.bump(vec![member], 100, 14, 3).await.unwrap();
+        settings.add_tallies(&[(chat, "k_text", 2)], 100).await.unwrap();
+        settings.set_note(chat, 1, "note").await.unwrap();
+        for statement in [
+            "INSERT INTO pending_deletes (chat_id, message_id, due_at) VALUES ($1, 1, 1)",
+            "INSERT INTO pending_warn_actions (chat_id, user_id, penalty, created_at)
+             VALUES ($1, 1, 'ban', 1)",
+        ] {
+            sqlx::query(statement)
+                .bind(chat)
+                .execute(&settings.pool)
+                .await
+                .unwrap();
+        }
+        let budgets = || {
+            let pool = settings.pool.clone();
+            async move {
+                sqlx::query_as::<_, (i64, i64, i64)>(
+                    "SELECT counter_rows, tally_rows, note_rows FROM durable_counts WHERE id = 0",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let before = budgets().await;
+
+        assert!(
+            !settings.forget_chat(chat, "left_day").await.unwrap(),
+            "a group not recorded as gone is never forgotten"
+        );
+        assert_eq!(settings.durable_chat_hash(chat), Some(7));
+
+        settings.try_set_value(chat, "left_day", "1").await.unwrap();
+        assert!(settings.forget_chat(chat, "left_day").await.unwrap());
+        for table in [
+            "moderation_case_events",
+            "moderation_cases",
+            "pending_warn_actions",
+            "pending_strict_actions",
+            "pending_rank_awards",
+            "pending_captchas",
+            "pending_deletes",
+            "image_filters",
+            "default_rights_state",
+            "notes",
+            "tallies",
+            "counters",
+            "settings",
+            "shard_migration_receipts",
+            "durable_chats",
+        ] {
+            let left: i64 =
+                sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE chat_id = $1"))
+                    .bind(chat)
+                    .fetch_one(&settings.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(left, 0, "{table} kept rows of a forgotten group");
+        }
+        assert_eq!(settings.value(chat, "hash"), None);
+        assert_eq!(settings.durable_chat_hash(chat), None);
+        let gone = |held: i64| (held - 1).max(0);
+        assert_eq!(
+            budgets().await,
+            (gone(before.0), gone(before.1), gone(before.2))
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated PostgreSQL departed-group discovery test"]
+    async fn quiet_and_departed_groups_are_found_by_their_days() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let (quiet, busy, marked, checked) = (
+            -999_999_999_743_i64,
+            -999_999_999_744_i64,
+            -999_999_999_745_i64,
+            -999_999_999_746_i64,
+        );
+        let all = [quiet, busy, marked, checked];
+        wipe_test_chats(&url, &all).await;
+        let settings = Settings::connect(&url).await.unwrap();
+        admit_test_chats(&settings, &all).await;
+        settings.add_tallies(&[(busy, "k_text", 1)], 500).await.unwrap();
+        settings.try_set_value(marked, "left_day", "300").await.unwrap();
+        settings
+            .try_set_value(checked, "checked_day", "450")
+            .await
+            .unwrap();
+        let keys = ("left_day", "checked_day");
+
+        let found = settings
+            .quiet_unchecked(&all, 400, 1_000, keys, 64)
+            .await
+            .unwrap();
+        assert_eq!(found, [quiet]);
+        let found = settings
+            .quiet_unchecked(&all, 500, 1_000, keys, 64)
+            .await
+            .unwrap();
+        assert_eq!(found, [checked, quiet]);
+        assert!(
+            settings
+                .quiet_unchecked(&all, 400, -1, keys, 64)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let before = |day| settings.chats_marked_before("left_day", day, 1_000);
+        assert!(!before(299).await.unwrap().contains(&marked));
+        assert!(before(300).await.unwrap().contains(&marked));
+        wipe_test_chats(&url, &all).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated PostgreSQL idle-chat cleanup test"]
+    async fn forget_idle_forgets_kicked_members_by_their_last_day() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let chat = -999_999_999_740;
+        let settings = Settings::connect(&url).await.unwrap();
+        admit_test_chats(&settings, &[chat]).await;
+        let wipe = "DELETE FROM counters WHERE chat_id = $1";
+        sqlx::query(wipe)
+            .bind(chat)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+        let spoke = |user| Bump {
+            chat,
+            user,
+            name: String::new(),
+            added: 1,
+        };
+        settings.bump(vec![spoke(1)], 100, 14, 3).await.unwrap();
+        settings.bump(vec![spoke(2)], 200, 28, 6).await.unwrap();
+        settings.clear_seen(chat, 1).await.unwrap();
+        settings.clear_seen(chat, 2).await.unwrap();
+        settings.set_warns(chat, 3, 1).await.unwrap();
+
+        assert_eq!(settings.forget_idle(&[chat], 150).await.unwrap(), 1);
+        let kept: Vec<i64> = sqlx::query_scalar(
+            "SELECT user_id FROM counters WHERE chat_id = $1 ORDER BY user_id",
+        )
+        .bind(chat)
+        .fetch_all(&settings.pool)
+        .await
+        .unwrap();
+        assert_eq!(kept, [2, 3]);
+
+        sqlx::query(wipe)
+            .bind(chat)
             .execute(&settings.pool)
             .await
             .unwrap();

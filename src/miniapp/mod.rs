@@ -14,16 +14,120 @@ mod settings;
 mod voice;
 mod words;
 
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::FromRef;
 use axum::routing::get;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::handlers::Ctx;
 
 const DEFAULT_CONCURRENCY: usize = 64;
 const MAX_CONCURRENCY: usize = 1024;
+
+const IDLE: Duration = Duration::from_secs(60);
+
+struct Idling {
+    listener: tokio::net::TcpListener,
+    idle: Duration,
+}
+
+impl axum::serve::Listener for Idling {
+    type Io = IdleTimeout<tokio::net::TcpStream>;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (io, addr) =
+            <tokio::net::TcpListener as axum::serve::Listener>::accept(&mut self.listener).await;
+        (IdleTimeout::new(io, self.idle), addr)
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
+struct IdleTimeout<S> {
+    inner: S,
+    idle: Duration,
+    deadline: Pin<Box<tokio::time::Sleep>>,
+}
+
+impl<S> IdleTimeout<S> {
+    fn new(inner: S, idle: Duration) -> Self {
+        Self {
+            inner,
+            idle,
+            deadline: Box::pin(tokio::time::sleep(idle)),
+        }
+    }
+
+    fn progressed(&mut self) {
+        let next = tokio::time::Instant::now() + self.idle;
+        self.deadline.as_mut().reset(next);
+    }
+
+    fn expired<T>(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<T>> {
+        match self.deadline.as_mut().poll(cx) {
+            Poll::Ready(()) => Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Mini App connection idle",
+            ))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for IdleTimeout<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        match Pin::new(&mut this.inner).poll_read(cx, buf) {
+            Poll::Ready(result) => {
+                if buf.filled().len() > before {
+                    this.progressed();
+                }
+                Poll::Ready(result)
+            }
+            Poll::Pending => this.expired(cx),
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for IdleTimeout<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_write(cx, buf) {
+            Poll::Ready(result) => {
+                if matches!(result, Ok(written) if written > 0) {
+                    this.progressed();
+                }
+                Poll::Ready(result)
+            }
+            Poll::Pending => this.expired(cx),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
 
 pub struct Config {
     link: String,
@@ -195,14 +299,81 @@ pub async fn serve(
             }
         }
     };
-    axum::serve(bound.listener, router(ctx, bound.concurrency, bound.secret))
-        .with_graceful_shutdown(shutdown)
-        .await
+    axum::serve(
+        Idling {
+            listener: bound.listener,
+            idle: IDLE,
+        },
+        router(ctx, bound.concurrency, bound.secret),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Config, config, parse_concurrency, parse_link};
+
+    #[tokio::test]
+    async fn an_idle_connection_is_closed_and_a_live_one_is_not() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let idle = std::time::Duration::from_millis(300);
+
+        let (_client, server) = tokio::io::duplex(64);
+        let mut silent = super::IdleTimeout::new(server, idle);
+        let started = std::time::Instant::now();
+        let error = silent.read(&mut [0; 8]).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() >= idle);
+
+        let (_client, server) = tokio::io::duplex(8);
+        let mut stalled = super::IdleTimeout::new(server, idle);
+        let error = stalled.write_all(&[0; 64]).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+
+        let (mut client, server) = tokio::io::duplex(64);
+        let mut talking = super::IdleTimeout::new(server, idle);
+        let writer = tokio::spawn(async move {
+            for _ in 0..12 {
+                tokio::time::sleep(idle / 6).await;
+                client.write_all(b"x").await.unwrap();
+            }
+            client
+        });
+        let mut byte = [0; 1];
+        for _ in 0..12 {
+            talking.read_exact(&mut byte).await.unwrap();
+        }
+        let _client = writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_server_answers_and_then_closes_an_idle_keep_alive() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let idle = std::time::Duration::from_millis(300);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let server = tokio::spawn(axum::serve(super::Idling { listener, idle }, app).into_future());
+
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: test\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = vec![0; 1024];
+        let read = stream.read(&mut response).await.unwrap();
+        assert!(String::from_utf8_lossy(&response[..read]).starts_with("HTTP/1.1 200"));
+
+        let closed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read(&mut response),
+        )
+        .await
+        .expect("the server closes an idle connection on its own");
+        assert_eq!(closed.unwrap_or(0), 0, "closed, not answered");
+        server.abort();
+    }
 
     #[test]
     fn concurrency_is_strict_instead_of_clamped_or_defaulted() {

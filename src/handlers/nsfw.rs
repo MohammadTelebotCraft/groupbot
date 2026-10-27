@@ -445,12 +445,13 @@ fn publish_embedded(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> 
     }
     let sequence = RUNTIME_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let staging = path.with_extension(format!("so.{}.{sequence}.partial", std::process::id()));
-    std::fs::write(&staging, bytes).map_err(|error| {
-        format!(
+    if let Err(error) = std::fs::write(&staging, bytes) {
+        let _cleanup_result = std::fs::remove_file(&staging);
+        return Err(format!(
             "could not stage ONNX Runtime at {}: {error}",
             staging.display()
-        )
-    })?;
+        ));
+    }
     if let Err(publish_error) = std::fs::rename(&staging, path) {
         if !file_matches(path, bytes) {
             let _cleanup_result = std::fs::remove_file(&staging);
@@ -4563,6 +4564,21 @@ impl Drop for MediaClaim {
     }
 }
 
+struct AdvertLeader<'a> {
+    ctx: &'a Ctx,
+    id: i64,
+    source: &'a VisionSource,
+    settled: bool,
+}
+
+impl Drop for AdvertLeader<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.ctx.release_advert(self.id, self.source);
+        }
+    }
+}
+
 fn no_filters() -> Arc<Vec<super::imgfilter::Filter>> {
     static EMPTY: std::sync::OnceLock<Arc<Vec<super::imgfilter::Filter>>> =
         std::sync::OnceLock::new();
@@ -4823,16 +4839,17 @@ async fn advert_read(
             Ok(verdict)
         }
         super::AdvertClaim::Leader => {
+            let mut claim = AdvertLeader {
+                ctx,
+                id,
+                source,
+                settled: !cacheable,
+            };
             let started = std::time::Instant::now();
             let (global_slot, chat_slot) =
                 match tokio::time::timeout(OCR_DEADLINE, ctx.ocr_slots(chat)).await {
                     Ok(slots) => slots,
-                    Err(_) => {
-                        if cacheable {
-                            ctx.release_advert(id, source);
-                        }
-                        return Err("OCR admission deadline exceeded".to_owned());
-                    }
+                    Err(_) => return Err("OCR admission deadline exceeded".to_owned()),
                 };
             let admitted = started.elapsed();
             let ocr_started = std::time::Instant::now();
@@ -4847,28 +4864,16 @@ async fn advert_read(
                     .await
                 {
                     Ok(Ok(Ok(result))) => result,
-                    Ok(Ok(Err(error))) => {
-                        if cacheable {
-                            ctx.release_advert(id, source);
-                        }
-                        return Err(error.to_string());
-                    }
-                    Ok(Err(error)) => {
-                        if cacheable {
-                            ctx.release_advert(id, source);
-                        }
-                        return Err(format!("OCR worker failed: {error}"));
-                    }
+                    Ok(Ok(Err(error))) => return Err(error.to_string()),
+                    Ok(Err(error)) => return Err(format!("OCR worker failed: {error}")),
                     Err(_) => {
-                        if cacheable {
-                            ctx.release_advert(id, source);
-                        }
                         return Err("OCR deadline exceeded".to_owned());
                     }
                 };
             let ocr_elapsed = ocr_started.elapsed();
-            if cacheable {
+            if !claim.settled {
                 ctx.finish_advert(id, source, verdict);
+                claim.settled = true;
             }
             log::info!(
                 "advert: chat {chat} file {id} ocr_admission_ms={} ocr_ms={} ocr_total_ms={} frames={} text_bytes={} verdict={} signals={}",
@@ -6591,6 +6596,40 @@ mod tests {
         );
     }
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]
+    async fn an_ocr_read_ended_without_a_verdict_lets_its_waiters_go() {
+        use crate::handlers::AdvertClaim;
+        let (ctx, _pool) = super::super::live_ctx().await;
+        let ctx = Arc::new(ctx);
+        let source = VisionSource::Original;
+        assert!(matches!(
+            ctx.claim_advert(7, &source).await,
+            AdvertClaim::Leader
+        ));
+        let waiter = tokio::spawn({
+            let ctx = Arc::clone(&ctx);
+            async move {
+                matches!(
+                    ctx.claim_advert(7, &VisionSource::Original).await,
+                    AdvertClaim::Leader
+                )
+            }
+        });
+        tokio::task::yield_now().await;
+        drop(AdvertLeader {
+            ctx: &ctx,
+            id: 7,
+            source: &source,
+            settled: false,
+        });
+        let took_over = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("the waiter is not left waiting on a read that is gone")
+            .unwrap();
+        assert!(took_over, "with nothing cached, the waiter leads a read of its own");
+    }
 
     #[test]
     fn document_fetch_retries_only_the_first_minus_503() {

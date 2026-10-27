@@ -1872,7 +1872,7 @@ index dbc6df6..aaad2c2 100644
                  revoke: false,
                  peer: peer.into(),
 diff --git a/grammers-client/src/client/files.rs b/grammers-client/src/client/files.rs
-index 3ba3c02..2149832 100644
+index 3ba3c02..84f6967 100644
 --- a/grammers-client/src/client/files.rs
 +++ b/grammers-client/src/client/files.rs
 @@ -8,6 +8,7 @@
@@ -2022,7 +2022,15 @@ index 3ba3c02..2149832 100644
              }
              DownloadIterVariant::PreFailed(error) => {
                  return Err(InvocationError::Io(error));
-@@ -109,9 +196,22 @@ impl DownloadIter {
+@@ -105,13 +192,30 @@ impl DownloadIter {
+         let mut dc = self
+             .dc_id
+             .map_or_else(|| self.client.0.session.home_dc_id(), Ok)?;
++        // Each datacenter is re-authorized at most once per chunk. A second `AUTH_KEY_UNREGISTERED`
++        // from it is the answer — the home datacenter's own authorization is gone, which no copy
++        // can fix — not a reason to ask again.
++        let mut reauthorized = Vec::new();
+ 
          loop {
              break match self.client.invoke_in_dc(dc, &request).await {
                  Ok(File::File(f)) => {
@@ -2048,7 +2056,7 @@ index 3ba3c02..2149832 100644
  
                      if reached_known_size || f.bytes.len() < request.limit as usize {
                          self.done = true;
-@@ -120,14 +220,16 @@ impl DownloadIter {
+@@ -120,22 +224,30 @@ impl DownloadIter {
                          }
                      }
  
@@ -2062,14 +2070,19 @@ index 3ba3c02..2149832 100644
 -                Ok(File::CdnRedirect(_)) => {
 -                    panic!("API returned File::CdnRedirect even though cdn_supported = false");
 -                }
+-                Err(InvocationError::Rpc(err)) if &err.name == "AUTH_KEY_UNREGISTERED" => {
+-                    match self.client.copy_auth_to_dc(dc).await {
 +                Ok(File::CdnRedirect(_)) => Err(InvocationError::UnexpectedResponse {
 +                    expected: "upload.File with cdn_supported = false",
 +                    got: "upload.FileCdnRedirect",
 +                }),
-                 Err(InvocationError::Rpc(err)) if &err.name == "AUTH_KEY_UNREGISTERED" => {
-                     match self.client.copy_auth_to_dc(dc).await {
++                Err(InvocationError::Rpc(err))
++                    if &err.name == "AUTH_KEY_UNREGISTERED" && !reauthorized.contains(&dc) =>
++                {
++                    reauthorized.push(dc);
++                    match self.client.recopy_auth_to_dc(dc).await {
                          Ok(_) => continue,
-@@ -135,7 +237,10 @@ impl DownloadIter {
+                         Err(e) => Err(e),
                      }
                  }
                  Err(InvocationError::Rpc(err)) if err.code == FILE_MIGRATE_ERROR => {
@@ -2081,7 +2094,7 @@ index 3ba3c02..2149832 100644
                      continue;
                  }
                  Err(e) => Err(e),
-@@ -146,6 +251,81 @@ impl DownloadIter {
+@@ -146,6 +258,81 @@ impl DownloadIter {
  
  /// Method implementations related to uploading or downloading files.
  impl Client {
@@ -2163,7 +2176,7 @@ index 3ba3c02..2149832 100644
      /// Returns a new iterator over the contents of a media document that will be downloaded.
      ///
      /// # Examples
-@@ -191,10 +371,7 @@ impl Client {
+@@ -191,10 +378,7 @@ impl Client {
                  client: self.clone(),
                  done: false,
                  size: None,
@@ -2175,7 +2188,7 @@ index 3ba3c02..2149832 100644
                  dc_id: downloadable.dc_id(),
              }
          }
-@@ -260,18 +437,29 @@ impl Client {
+@@ -260,18 +444,29 @@ impl Client {
          workers: usize,
          dc_id: i32,
      ) -> Result<(), InvocationError> {
@@ -2210,8 +2223,12 @@ index 3ba3c02..2149832 100644
          let mut tasks = vec![];
          for _ in 0..workers {
              let location = location.clone();
-@@ -283,18 +471,18 @@ impl Client {
+@@ -281,20 +476,22 @@ impl Client {
+             let task = tokio::task::spawn(async move {
+                 let mut retry_offset = None;
                  let mut task_dc = dc_id;
++                // Each datacenter re-authorized at most once per chunk, as in `DownloadIter::next`.
++                let mut reauthorized = Vec::new();
                  loop {
                      // Calculate file offset
 -                    let offset: i64 = {
@@ -2234,7 +2251,7 @@ index 3ba3c02..2149832 100644
                      // Fetch from telegram
                      let request = &tl::functions::upload::GetFile {
                          precise: true,
-@@ -305,12 +493,34 @@ impl Client {
+@@ -305,15 +502,42 @@ impl Client {
                      };
                      match client.invoke_in_dc(task_dc, request).await {
                          Ok(tl::enums::upload::File::File(file)) => {
@@ -2261,6 +2278,7 @@ index 3ba3c02..2149832 100644
 +                            if tx.send((offset, file.bytes)).await.is_err() {
 +                                return Ok(());
 +                            }
++                            reauthorized.clear();
                          }
                          Ok(tl::enums::upload::File::CdnRedirect(_)) => {
 -                            panic!(
@@ -2272,8 +2290,16 @@ index 3ba3c02..2149832 100644
 +                            });
                          }
                          Err(InvocationError::Rpc(err)) if &err.name == "AUTH_KEY_UNREGISTERED" => {
-                             match client.copy_auth_to_dc(task_dc).await {
-@@ -323,7 +533,12 @@ impl Client {
+-                            match client.copy_auth_to_dc(task_dc).await {
++                            if reauthorized.contains(&task_dc) {
++                                return Err(InvocationError::Rpc(err));
++                            }
++                            reauthorized.push(task_dc);
++                            match client.recopy_auth_to_dc(task_dc).await {
+                                 Ok(_) => {
+                                     retry_offset = Some(offset);
+                                     continue;
+@@ -323,7 +547,12 @@ impl Client {
                          }
                          Err(InvocationError::Rpc(err)) => {
                              if err.code == FILE_MIGRATE_ERROR {
@@ -2287,7 +2313,7 @@ index 3ba3c02..2149832 100644
                                  retry_offset = Some(offset);
                                  continue;
                              }
-@@ -345,7 +560,13 @@ impl Client {
+@@ -345,7 +574,13 @@ impl Client {
                  file.seek(SeekFrom::Start(offset)).await?;
              }
              file.write_all(&data).await?;
@@ -2302,7 +2328,7 @@ index 3ba3c02..2149832 100644
          }
  
          // Check if all tasks finished succesfully
-@@ -408,7 +629,7 @@ impl Client {
+@@ -408,7 +643,7 @@ impl Client {
          };
  
          let big_file = size > BIG_FILE_SIZE;
@@ -2311,7 +2337,7 @@ index 3ba3c02..2149832 100644
          let total_parts = parts.total_parts();
  
          if big_file {
-@@ -420,7 +641,7 @@ impl Client {
+@@ -420,7 +655,7 @@ impl Client {
                  let task = async move {
                      while let Some((part, bytes)) = parts.next_part().await? {
                          let ok = handle
@@ -2320,7 +2346,7 @@ index 3ba3c02..2149832 100644
                                  file_id,
                                  file_part: part,
                                  file_total_parts: total_parts,
-@@ -430,10 +651,7 @@ impl Client {
+@@ -430,10 +665,7 @@ impl Client {
                              .map_err(io::Error::other)?;
  
                          if !ok {
@@ -2332,7 +2358,7 @@ index 3ba3c02..2149832 100644
                          }
                      }
                      Ok(())
-@@ -458,7 +676,7 @@ impl Client {
+@@ -458,7 +690,7 @@ impl Client {
              while let Some((part, bytes)) = parts.next_part().await? {
                  md5.consume(&bytes);
                  let ok = self
@@ -2341,7 +2367,7 @@ index 3ba3c02..2149832 100644
                          file_id,
                          file_part: part,
                          bytes,
-@@ -467,10 +685,7 @@ impl Client {
+@@ -467,10 +699,7 @@ impl Client {
                      .map_err(io::Error::other)?;
  
                  if !ok {
@@ -2353,7 +2379,7 @@ index 3ba3c02..2149832 100644
                  }
              }
              Ok(Uploaded::from_raw(
-@@ -514,12 +729,19 @@ impl Client {
+@@ -514,12 +743,19 @@ impl Client {
          let path = path.as_ref();
  
          let mut file = fs::File::open(path).await?;
@@ -2377,7 +2403,7 @@ index 3ba3c02..2149832 100644
  
          self.upload_stream(&mut file, size, name).await
      }
-@@ -536,15 +758,20 @@ struct PartStream<'a, S: AsyncRead + Unpin> {
+@@ -536,15 +772,20 @@ struct PartStream<'a, S: AsyncRead + Unpin> {
  }
  
  impl<'a, S: AsyncRead + Unpin> PartStream<'a, S> {
@@ -2402,7 +2428,7 @@ index 3ba3c02..2149832 100644
      }
  
      fn total_parts(&self) -> i32 {
-@@ -585,3 +812,82 @@ impl<'a, S: AsyncRead + Unpin> PartStream<'a, S> {
+@@ -585,3 +826,82 @@ impl<'a, S: AsyncRead + Unpin> PartStream<'a, S> {
          res
      }
  }
@@ -3212,7 +3238,7 @@ index e75f4b9..a9ad375 100644
  pub use messages::{GlobalSearchIter, MessageIter, SearchIter};
  pub use updates::UpdateStream;
 diff --git a/grammers-client/src/client/net.rs b/grammers-client/src/client/net.rs
-index f80d4ae..649f4f3 100644
+index f80d4ae..f830b7e 100644
 --- a/grammers-client/src/client/net.rs
 +++ b/grammers-client/src/client/net.rs
 @@ -9,6 +9,7 @@
@@ -3295,12 +3321,30 @@ index f80d4ae..649f4f3 100644
      /// Like [`Self::invoke`], but in the specified DC.
      ///
      /// <div class="warning">
+@@ -143,4 +202,17 @@ impl Client {
+ 
+         Ok(())
+     }
++
++    /// [`Self::copy_auth_to_dc`] for a datacenter that has just answered `AUTH_KEY_UNREGISTERED`,
++    /// which proves its key holds no authorization whatever the memo says — a key replaced after
++    /// a 404 is the case that happens. Trusting the memo made the copy a no-op, the retry met the
++    /// same error, and the download loops that retry on it spun for ever.
++    pub(crate) async fn recopy_auth_to_dc(&self, target_dc_id: i32) -> Result<(), InvocationError> {
++        self.0
++            .auth_copied_to_dcs
++            .lock()
++            .await
++            .retain(|dc_id| *dc_id != target_dc_id);
++        self.copy_auth_to_dc(target_dc_id).await
++    }
+ }
 diff --git a/grammers-client/src/client/outbound.rs b/grammers-client/src/client/outbound.rs
 new file mode 100644
-index 0000000..638dc9f
+index 0000000..0fbccda
 --- /dev/null
 +++ b/grammers-client/src/client/outbound.rs
-@@ -0,0 +1,528 @@
+@@ -0,0 +1,549 @@
 +use std::collections::HashMap;
 +use std::sync::Arc;
 +use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3555,7 +3599,10 @@ index 0000000..638dc9f
 +    capacity: usize,
 +) -> Duration {
 +    if !next.contains_key(&chat) && next.len() >= capacity {
-+        next.retain(|_, due| *due <= now);
++        // A reservation whose time has come paces nothing any more; the ones still in the future
++        // are the live pacing and must stay. This kept the lapsed ones and dropped the live ones,
++        // so a full map forgot every group's pacing at once.
++        next.retain(|_, due| *due > now);
 +        while next.len() >= capacity {
 +            let Some(oldest) = next
 +                .iter()
@@ -3653,6 +3700,24 @@ index 0000000..638dc9f
 +        assert!(reserve_chat(&mut next, -2, now, interval, 2).is_zero());
 +        assert!(reserve_chat(&mut next, -3, now, interval, 2).is_zero());
 +        assert!(next.len() <= 2);
++    }
++
++    #[test]
++    fn a_full_map_forgets_lapsed_reservations_and_keeps_live_pacing() {
++        let mut next = HashMap::new();
++        let now = Instant::now();
++        let interval = Duration::from_secs(3);
++        reserve_chat(&mut next, -2, now, interval, 2);
++        reserve_chat(&mut next, -1, now + Duration::from_secs(2), interval, 2);
++        // At four seconds -2's turn (three) has passed and -1's (five) has not.
++        let later = now + Duration::from_secs(4);
++        assert!(reserve_chat(&mut next, -3, later, interval, 2).is_zero());
++        assert!(!next.contains_key(&-2), "the lapsed reservation is what makes room");
++        assert_eq!(
++            reserve_chat(&mut next, -1, later, interval, 2),
++            Duration::from_secs(1),
++            "the live one still paces its group"
++        );
 +    }
 +
 +    #[tokio::test]
@@ -7914,7 +7979,7 @@ index cb59857..625d051 100644
 +    }
  }
 diff --git a/grammers-mtproto/src/mtp/encrypted.rs b/grammers-mtproto/src/mtp/encrypted.rs
-index fa55f0b..b1f6769 100644
+index fa55f0b..cd52bc5 100644
 --- a/grammers-mtproto/src/mtp/encrypted.rs
 +++ b/grammers-mtproto/src/mtp/encrypted.rs
 @@ -9,12 +9,13 @@
@@ -8159,7 +8224,27 @@ index fa55f0b..b1f6769 100644
      }
  
      /// **[Ping Messages (PING/PONG)]**
-@@ -1086,8 +1113,9 @@ impl Encrypted {
+@@ -1005,7 +1032,6 @@ impl Encrypted {
+         &mut self,
+         message: manual_tl::Message,
+     ) -> Result<(), DeserializeError> {
+-        // TODO notify upper layers about the need to use getDifference
+         let new_session = tl::enums::NewSession::from_bytes(&message.body)?;
+         match new_session {
+             tl::enums::NewSession::Created(x) => {
+@@ -1015,6 +1041,11 @@ impl Encrypted {
+                     valid_until: i32::MAX,
+                     salt: x.server_salt,
+                 });
++                // Re-sending what the forgotten session dropped, and asking for the updates it
++                // may have dropped too, is the sender's job: only it knows what is in flight.
++                self.deserialization.push(Deserialization::NewSession {
++                    first_msg_id: MsgId(x.first_msg_id),
++                });
+             }
+         }
+         Ok(())
+@@ -1086,8 +1117,9 @@ impl Encrypted {
      /// in a simple container with the same result.
      ///
      /// [Message Copies]: https://core.telegram.org/mtproto/service_messages#message-copies
@@ -8171,7 +8256,7 @@ index fa55f0b..b1f6769 100644
      }
  
      /// **[Packed Object]**
-@@ -1211,25 +1239,31 @@ impl Mtp for Encrypted {
+@@ -1211,25 +1243,31 @@ impl Mtp for Encrypted {
      /// If the buffer is full (request does not fit in the container), returns `None`.
      ///
      /// [MTProto 2.0 guidelines]: https://core.telegram.org/mtproto/description.
@@ -8213,7 +8298,7 @@ index fa55f0b..b1f6769 100644
          }
  
          // If we need to acknowledge messages, this notification goes in with the rest of requests
-@@ -1241,54 +1275,64 @@ impl Mtp for Encrypted {
+@@ -1241,54 +1279,64 @@ impl Mtp for Encrypted {
                  msg_ids: mem::take(&mut self.pending_ack),
              })
              .to_bytes();
@@ -8301,7 +8386,7 @@ index fa55f0b..b1f6769 100644
          }
      }
  
-@@ -1306,7 +1350,10 @@ impl Mtp for Encrypted {
+@@ -1306,7 +1354,10 @@ impl Mtp for Encrypted {
          let _salt = i64::deserialize(&mut buffer)?;
          let session_id = i64::deserialize(&mut buffer)?;
          if session_id != self.session_id {
@@ -8313,7 +8398,7 @@ index fa55f0b..b1f6769 100644
          }
  
          self.process_message(manual_tl::Message::deserialize(&mut buffer)?)?;
-@@ -1352,10 +1399,10 @@ mod tests {
+@@ -1352,10 +1403,10 @@ mod tests {
      #[test]
      fn ensure_serialization_has_salt_session_id() {
          let mut buffer = DequeBuffer::with_capacity(0, 0);
@@ -8327,7 +8412,7 @@ index fa55f0b..b1f6769 100644
  
          // salt comes first, it's zero by default.
          assert_eq!(&buffer[0..8], [0, 0, 0, 0, 0, 0, 0, 0]);
-@@ -1370,10 +1417,10 @@ mod tests {
+@@ -1370,10 +1421,10 @@ mod tests {
      #[test]
      fn ensure_correct_single_serialization() {
          let mut buffer = DequeBuffer::with_capacity(0, 0);
@@ -8341,7 +8426,7 @@ index fa55f0b..b1f6769 100644
  
          let buffer = &buffer[MESSAGE_PREFIX_LEN..];
          ensure_buffer_is_message(buffer, REQUEST, 1);
-@@ -1384,11 +1431,12 @@ mod tests {
+@@ -1384,11 +1435,12 @@ mod tests {
          let mut buffer = DequeBuffer::with_capacity(0, 0);
          let mut mtproto = Encrypted::build()
              .compression_threshold(None)
@@ -8358,7 +8443,7 @@ index fa55f0b..b1f6769 100644
          let buffer = &buffer[MESSAGE_PREFIX_LEN..];
  
          // buffer[0..8] is the msg_id for the container
-@@ -1416,11 +1464,12 @@ mod tests {
+@@ -1416,11 +1468,12 @@ mod tests {
          let mut buffer = DequeBuffer::with_capacity(0, 0);
          let mut mtproto = Encrypted::build()
              .compression_threshold(None)
@@ -8374,7 +8459,7 @@ index fa55f0b..b1f6769 100644
  
          let buffer = &buffer[MESSAGE_PREFIX_LEN..];
          assert_eq!(buffer.len(), 16 + data.len());
-@@ -1431,34 +1480,39 @@ mod tests {
+@@ -1431,34 +1484,39 @@ mod tests {
          let mut buffer = DequeBuffer::with_capacity(0, 0);
          let mut mtproto = Encrypted::build()
              .compression_threshold(None)
@@ -8426,7 +8511,7 @@ index fa55f0b..b1f6769 100644
      }
  
      #[test]
-@@ -1467,10 +1521,11 @@ mod tests {
+@@ -1467,10 +1525,11 @@ mod tests {
          let mut buffer = DequeBuffer::with_capacity(0, 0);
          let mut mtproto = Encrypted::build()
              .compression_threshold(None)
@@ -8441,7 +8526,7 @@ index fa55f0b..b1f6769 100644
          assert!(!buffer.as_ref().windows(4).any(|w| w == GZIP_PACKED_HEADER));
      }
  
-@@ -1482,9 +1537,10 @@ mod tests {
+@@ -1482,9 +1541,10 @@ mod tests {
              let mut buffer = DequeBuffer::with_capacity(0, 0);
              let mut mtproto = Encrypted::build()
                  .compression_threshold(Some(768 * 1024))
@@ -8455,7 +8540,7 @@ index fa55f0b..b1f6769 100644
              assert!(!buffer.as_ref().windows(4).any(|w| w == GZIP_PACKED_HEADER));
          }
          {
-@@ -1492,17 +1548,18 @@ mod tests {
+@@ -1492,18 +1552,43 @@ mod tests {
              let mut buffer = DequeBuffer::with_capacity(0, 0);
              let mut mtproto = Encrypted::build()
                  .compression_threshold(Some(256 * 1024))
@@ -8480,8 +8565,33 @@ index fa55f0b..b1f6769 100644
              assert!(buffer.as_ref().windows(4).any(|w| w == GZIP_PACKED_HEADER));
          }
      }
++
++    #[test]
++    fn a_new_session_is_reported_with_where_it_starts() {
++        let mut mtproto = Encrypted::build().try_finish(auth_key()).unwrap();
++        let body = tl::enums::NewSession::Created(tl::types::NewSessionCreated {
++            first_msg_id: 1234,
++            unique_id: 1,
++            server_salt: 99,
++        })
++        .to_bytes();
++        mtproto
++            .process_message(manual_tl::Message {
++                msg_id: 1,
++                seq_no: 1,
++                body,
++            })
++            .unwrap();
++        assert!(matches!(
++            mtproto.deserialization.as_slice(),
++            [Deserialization::NewSession { first_msg_id }] if *first_msg_id == MsgId(1234)
++        ));
++        assert_eq!(mtproto.salts.len(), 1);
++        assert_eq!(mtproto.salts[0].salt, 99);
++    }
+ }
 diff --git a/grammers-mtproto/src/mtp/mod.rs b/grammers-mtproto/src/mtp/mod.rs
-index 1161c66..0ffa19e 100644
+index 1161c66..9ca3b02 100644
 --- a/grammers-mtproto/src/mtp/mod.rs
 +++ b/grammers-mtproto/src/mtp/mod.rs
 @@ -64,6 +64,47 @@ pub struct DeserializationFailure {
@@ -8532,7 +8642,18 @@ index 1161c66..0ffa19e 100644
  /// Results from the deserialization of a response.
  pub enum Deserialization {
      /// Copy of an `rpc_result` that contained an `Updates` type.
-@@ -133,6 +174,9 @@ pub enum DeserializeError {
+@@ -78,6 +119,10 @@ pub enum Deserialization {
+     BadMessage(BadMessage),
+     /// Generic deserialization failure of a received message.
+     Failure(DeserializationFailure),
++    /// `new_session_created`: the server is now serving this connection in a new session,
++    /// starting at `first_msg_id`. Anything sent before it went to a session the server has
++    /// forgotten, and its answer will never arrive.
++    NewSession { first_msg_id: MsgId },
+ }
+ 
+ impl BadMessage {
+@@ -133,6 +178,9 @@ pub enum DeserializeError {
      /// proved the buffer to be too small.
      MessageBufferTooSmall,
  
@@ -8542,7 +8663,7 @@ index 1161c66..0ffa19e 100644
      /// The server responded with compressed data which we failed to decompress.
      DecompressionFailed,
  
-@@ -143,6 +187,19 @@ pub enum DeserializeError {
+@@ -143,6 +191,19 @@ pub enum DeserializeError {
  
      /// Attempting to decrypt the message failed in some way.
      DecryptionError(crypto::Error),
@@ -8562,7 +8683,7 @@ index 1161c66..0ffa19e 100644
  }
  
  impl std::error::Error for DeserializeError {}
-@@ -165,9 +222,20 @@ impl fmt::Display for DeserializeError {
+@@ -165,9 +226,20 @@ impl fmt::Display for DeserializeError {
                  f,
                  "server responded with a payload that's too small to fit a valid message"
              ),
@@ -8583,7 +8704,7 @@ index 1161c66..0ffa19e 100644
          }
      }
  }
-@@ -179,6 +247,7 @@ impl From<tl::deserialize::Error> for DeserializeError {
+@@ -179,6 +251,7 @@ impl From<tl::deserialize::Error> for DeserializeError {
          match error {
              Err::UnexpectedEof => DeserializeError::MessageBufferTooSmall,
              Err::UnexpectedConstructor { id } => DeserializeError::UnexpectedConstructor { id },
@@ -8591,7 +8712,7 @@ index 1161c66..0ffa19e 100644
          }
      }
  }
-@@ -195,19 +264,17 @@ impl From<crypto::Error> for DeserializeError {
+@@ -195,19 +268,17 @@ impl From<crypto::Error> for DeserializeError {
  /// [Mobile Transport Protocol]: https://core.telegram.org/mtproto/description
  pub trait Mtp {
      /// Serializes one request to the input buffer.
@@ -8618,7 +8739,7 @@ index 1161c66..0ffa19e 100644
  
      /// Finalizes the buffer of requests.
      ///
-@@ -218,7 +285,12 @@ pub trait Mtp {
+@@ -218,7 +289,12 @@ pub trait Mtp {
      ///
      /// When at least one message is serialized, the last generated `MsgId` is returned.
      /// This will either belong to the container (if used) or the last serialized message.
@@ -9007,10 +9128,10 @@ index 165e5a0..add8d19 100644
 +    }
 +}
 diff --git a/grammers-mtsender/src/configuration.rs b/grammers-mtsender/src/configuration.rs
-index e27c257..1486260 100644
+index e27c257..1588c06 100644
 --- a/grammers-mtsender/src/configuration.rs
 +++ b/grammers-mtsender/src/configuration.rs
-@@ -59,19 +59,53 @@ pub struct ConnectionParams {
+@@ -59,19 +59,64 @@ pub struct ConnectionParams {
      /// Maximum number of updates that can be buffered in the internal channel
      /// between the network senders and the updates receiver.
      ///
@@ -9056,16 +9177,27 @@ index e27c257..1486260 100644
 +    /// empties. An account in tens of thousands of channels has most of them idle at any moment,
 +    /// so that queue never drains and the stream stalls permanently.
 +    ///
-+    /// Persisted channel checkpoints remain dormant indefinitely without an eager difference or
-+    /// idle timer. Their next live update wakes the checkpoint and exposes any gap from the stored
++    /// Persisted channel checkpoints remain dormant, up to [`Self::max_dormant_channels`] of
++    /// them, without an eager difference or idle timer. Their next live update wakes the checkpoint and exposes any gap from the stored
 +    /// `pts`. This bounds startup and idle polling work without discarding recovery state.
 +    ///
 +    /// Off by default, which is the behaviour every other client expects.
 +    pub drop_idle_channels: bool,
++
++    /// How many dormant channel checkpoints [`Self::drop_idle_channels`] keeps at most.
++    ///
++    /// Nothing else removes a dormant checkpoint, so one stayed for as long as the session did:
++    /// through every restart, after the account left the channel, for every group that ever
++    /// added a bot. Past this many, those idle longest are forgotten; a forgotten channel's next
++    /// update starts it again at its own `pts`, so only a gap from while it was forgotten goes
++    /// unnoticed. Set it above the number of channels the account really serves.
++    ///
++    /// `usize::MAX` by default, which keeps every checkpoint.
++    pub max_dormant_channels: usize,
  }
  
  /// This trait controls how the [`SenderPoolRunner`] should behave when
-@@ -147,16 +181,21 @@ impl Default for ConnectionParams {
+@@ -147,16 +192,22 @@ impl Default for ConnectionParams {
              #[cfg(feature = "proxy")]
              proxy_url: None,
              retry_policy: Box::new(super::AutoSleep::default()),
@@ -9086,6 +9218,7 @@ index e27c257..1486260 100644
 +        Self {
 +            catch_up: false,
 +            drop_idle_channels: false,
++            max_dormant_channels: usize::MAX,
 +        }
      }
  }
@@ -9328,7 +9461,7 @@ index 406504c..b1a1c63 100644
              }
              Host::Ipv4(v4) => SocketAddr::new(IpAddr::from(v4), port),
 diff --git a/grammers-mtsender/src/sender.rs b/grammers-mtsender/src/sender.rs
-index 619eda2..b31e613 100644
+index 619eda2..d9fccb5 100644
 --- a/grammers-mtsender/src/sender.rs
 +++ b/grammers-mtsender/src/sender.rs
 @@ -62,10 +62,11 @@ pub(crate) fn generate_random_id() -> i64 {
@@ -9370,7 +9503,17 @@ index 619eda2..b31e613 100644
  }
  
  fn deserialize_updates_like(update: Vec<u8>) -> tl::deserialize::Result<UpdatesLike> {
-@@ -119,6 +134,7 @@ struct Request {
+@@ -107,6 +122,9 @@ pub struct Sender<T: Transport, M: Mtp> {
+     addr: ServerAddr,
+     requests: Vec<Request>,
+     next_ping: Instant,
++    /// Where the session the server is serving this connection in began, from the latest
++    /// `new_session_created`; `None` until the first. See `process_new_session`.
++    session_start: Option<MsgId>,
+ 
+     // Transport-level buffers and positions
+     read_buffer: Vec<u8>,
+@@ -119,6 +137,7 @@ struct Request {
      body: Vec<u8>,
      state: RequestState,
      result: oneshot::Sender<Result<Vec<u8>, InvocationError>>,
@@ -9378,7 +9521,72 @@ index 619eda2..b31e613 100644
  }
  
  #[derive(Clone, Debug)]
-@@ -190,6 +206,18 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+@@ -142,6 +161,56 @@ impl MsgIdPair {
+     }
+ }
+ 
++/// Queues again every sent request that went to a session the server has since forgotten, and
++/// answers how many. One nobody is waiting for any more is dropped instead: a keepalive ping's
++/// receiver is gone from the start, and a cancelled caller's admission is released with it.
++///
++/// The boundary is the container `first_msg_id` travelled in, as in tdlib: the messages beside
++/// it in that container reached the new session too.
++fn resend_forgotten(requests: &mut Vec<Request>, first_msg_id: MsgId) -> usize {
++    let boundary = requests
++        .iter()
++        .find_map(|request| match &request.state {
++            RequestState::Sent(pair) if pair.msg_id == first_msg_id => Some(pair.container_msg_id),
++            _ => None,
++        })
++        .unwrap_or(first_msg_id);
++    let mut resent = 0;
++    requests.retain_mut(|request| {
++        let RequestState::Sent(pair) = &request.state else {
++            return true;
++        };
++        if pair.container_msg_id >= boundary {
++            return true;
++        }
++        if request.result.is_closed() {
++            return false;
++        }
++        request.state = RequestState::NotSerialized;
++        resent += 1;
++        true
++    });
++    resent
++}
++
++/// Records where the newest session starts, and answers whether `first_msg_id` replaced a
++/// session the connection already had. The connection's own first session is not a reset, and
++/// neither is the notice the server repeats for an earlier message that reached it late — which
++/// is why this compares positions instead of counting notices.
++fn begins_later_session(start: &mut Option<MsgId>, first_msg_id: MsgId) -> bool {
++    match *start {
++        None => {
++            *start = Some(first_msg_id);
++            false
++        }
++        Some(previous) if first_msg_id > previous => {
++            *start = Some(first_msg_id);
++            true
++        }
++        Some(_) => false,
++    }
++}
++
+ impl<T: Transport, M: Mtp> Sender<T, M> {
+     /// Create a new connection using the specified transport, MTP state and server address.
+     ///
+@@ -156,6 +225,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+             addr,
+             requests: vec![],
+             next_ping: Instant::now() + PING_DELAY,
++            session_start: None,
+ 
+             read_buffer: vec![0; MAXIMUM_DATA],
+             read_tail: 0,
+@@ -190,6 +260,18 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
          body: Vec<u8>,
          tx: oneshot::Sender<Result<Vec<u8>, InvocationError>>,
      ) {
@@ -9397,7 +9605,7 @@ index 619eda2..b31e613 100644
          assert!(body.len() >= 4);
          let req_id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
          debug!(
-@@ -201,6 +229,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+@@ -201,6 +283,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
              body,
              state: RequestState::NotSerialized,
              result: tx,
@@ -9405,7 +9613,7 @@ index 619eda2..b31e613 100644
          });
      }
  
-@@ -213,9 +242,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+@@ -213,9 +296,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
              match rx.try_recv() {
                  Ok(x) => break x,
                  Err(TryRecvError::Empty) => continue,
@@ -9416,7 +9624,7 @@ index 619eda2..b31e613 100644
              }
          }
      }
-@@ -227,7 +254,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+@@ -227,7 +308,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
      /// If an error is returned, the connection should be treated
      /// as dead and the sender instance recreated.
      pub async fn step(&mut self) -> Result<Vec<UpdatesLike>, ReadError> {
@@ -9425,7 +9633,7 @@ index 619eda2..b31e613 100644
          let write_len = self.write_buffer.len() - self.write_head;
          trace!(
              "reading bytes and sending up to {} bytes via network",
-@@ -263,9 +290,9 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+@@ -263,9 +344,9 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
      }
  
      /// Setup the write buffer for the transport, unless a write is already pending.
@@ -9437,7 +9645,7 @@ index 619eda2..b31e613 100644
          }
  
          // TODO add a test to make sure we only ever send the same request once
-@@ -275,7 +302,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+@@ -275,7 +356,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
              .filter(|r| matches!(r.state, RequestState::NotSerialized))
          {
              // TODO make mtp itself use BytesMut to avoid copies
@@ -9446,7 +9654,7 @@ index 619eda2..b31e613 100644
                  assert!(request.body.len() >= 4);
                  let req_id = u32::from_le_bytes([
                      request.body[0],
-@@ -298,7 +325,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+@@ -298,7 +379,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
              }
          }
  
@@ -9455,7 +9663,7 @@ index 619eda2..b31e613 100644
              for request in self.requests.iter_mut() {
                  match request.state {
                      RequestState::Serialized(ref mut pair) => {
-@@ -309,6 +336,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+@@ -309,6 +390,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
              }
              self.transport.pack(&mut self.write_buffer)
          }
@@ -9463,7 +9671,7 @@ index 619eda2..b31e613 100644
      }
  
      /// Handle `n` more read bytes being ready to process by the transport.
-@@ -403,7 +431,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+@@ -403,7 +485,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
          log::warn!(
              "marking all {} request(s) as failed: {}",
              self.requests.len(),
@@ -9472,7 +9680,44 @@ index 619eda2..b31e613 100644
          );
  
          self.requests
-@@ -455,11 +483,17 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+@@ -427,10 +509,36 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+                 Deserialization::RpcError(error) => self.process_error(error),
+                 Deserialization::BadMessage(bad_msg) => self.process_bad_message(bad_msg),
+                 Deserialization::Failure(failure) => self.process_deserialize_error(failure),
++                Deserialization::NewSession { first_msg_id } => {
++                    self.process_new_session(first_msg_id, updates)
++                }
+             }
+         }
+     }
+ 
++    /// The server is serving this connection in a new session, starting at `first_msg_id`.
++    ///
++    /// The first notice arrives with the connection's first message and finds nothing to do. A
++    /// later one means the server forgot the session it had been serving: what was sent before
++    /// `first_msg_id` went to it and will never be answered. Nothing else removes such a request —
++    /// only an answer or the connection's teardown, and the keepalive pings keep the connection
++    /// healthy — so it stayed in `requests` for the connection's life, holding its body, its
++    /// admission slot and its caller, who waited forever. An `updates.getDifference` stranded
++    /// that way stopped update intake. They are sent again, as tdlib does
++    /// (`Session::on_new_session_created`), and the forgotten session's updates are fetched as
++    /// after a reconnect.
++    fn process_new_session(&mut self, first_msg_id: MsgId, updates: &mut Vec<UpdatesLike>) {
++        let resent = resend_forgotten(&mut self.requests, first_msg_id);
++        if begins_later_session(&mut self.session_start, first_msg_id) {
++            warn!(
++                "server created a new session at {first_msg_id:?}; re-sending {resent} unanswered request(s)"
++            );
++            updates.push(UpdatesLike::ConnectionClosed);
++        } else if resent != 0 {
++            info!("new session at {first_msg_id:?}; re-sending {resent} unanswered request(s)");
++        }
++    }
++
+     fn process_own_update(
+         &mut self,
+         updates: &mut Vec<UpdatesLike>,
+@@ -455,11 +563,17 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                  // Check if the original request targeted a channel (e.g. channels.deleteMessages).
                  // If so, the pts belongs to that channel, not the common/user pts sequence.
                  let channel_id = self.peek_request(msg_id).and_then(|request| {
@@ -9494,7 +9739,7 @@ index 619eda2..b31e613 100644
  
                      match request.channel {
                          tl::enums::InputChannel::Channel(c) => Some((c.channel_id, request.id)),
-@@ -467,21 +501,25 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+@@ -467,21 +581,25 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                      }
                  });
                  if let Some((channel_id, message_ids)) = channel_id {
@@ -9522,7 +9767,7 @@ index 619eda2..b31e613 100644
              }
              (Err(e), _) => {
                  // This shouldn't happen. We just made the request, so they shouldn't be stale.
-@@ -507,7 +545,12 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+@@ -507,7 +625,12 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
      fn process_result(&mut self, result: RpcResult) {
          if let Some(req) = self.pop_request(result.msg_id) {
              let x = result.body;
@@ -9536,7 +9781,7 @@ index 619eda2..b31e613 100644
              let res_id = u32::from_le_bytes([x[0], x[1], x[2], x[3]]);
              debug!(
                  "got result {:x} ({}) for request {:?}",
-@@ -548,8 +591,8 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+@@ -548,8 +671,8 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                  RequestState::Serialized(pair)
                      if pair.msg_id == bad_msg.msg_id || pair.container_msg_id == bad_msg.msg_id =>
                  {
@@ -9547,7 +9792,7 @@ index 619eda2..b31e613 100644
                          bad_msg.msg_id,
                          bad_msg.description()
                      );
-@@ -614,7 +657,8 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
+@@ -614,7 +737,8 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
          for i in 0..self.requests.len() {
              match &self.requests[i].state {
                  RequestState::Serialized(pair) if pair.msg_id == msg_id => {
@@ -9557,7 +9802,7 @@ index 619eda2..b31e613 100644
                  }
                  RequestState::Sent(pair) if pair.msg_id == msg_id => {
                      return Some(self.requests.swap_remove(i));
-@@ -673,7 +717,7 @@ pub async fn generate_auth_key<T: Transport>(
+@@ -673,9 +797,10 @@ pub async fn generate_auth_key<T: Transport>(
          mtp: mtp::Encrypted::build()
              .time_offset(time_offset)
              .first_salt(first_salt)
@@ -9565,8 +9810,11 @@ index 619eda2..b31e613 100644
 +            .try_finish(auth_key)?,
          requests: sender.requests,
          next_ping: Instant::now() + PING_DELAY,
++        session_start: None,
          read_buffer: sender.read_buffer,
-@@ -690,5 +734,8 @@ pub async fn connect_with_auth<T: Transport>(
+         read_tail: sender.read_tail,
+         write_buffer: sender.write_buffer,
+@@ -690,5 +815,103 @@ pub async fn connect_with_auth<T: Transport>(
      addr: ServerAddr,
      auth_key: [u8; 256],
  ) -> Result<Sender<T, mtp::Encrypted>, io::Error> {
@@ -9575,6 +9823,101 @@ index 619eda2..b31e613 100644
 +        .try_finish(auth_key)
 +        .map_err(io::Error::other)?;
 +    Sender::connect(transport, mtp, addr).await
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// Message ids the way a connection hands them out: increasing, one per message.
++    fn msg_ids(count: usize) -> Vec<MsgId> {
++        let mut mtp = mtp::Encrypted::build().try_finish([0; 256]).unwrap();
++        let mut buffer = DequeBuffer::with_capacity(0, 0);
++        (0..count)
++            .map(|_| mtp.try_push(&mut buffer, b"Hey!").unwrap().unwrap())
++            .collect()
++    }
++
++    fn sent(
++        msg_id: MsgId,
++        container_msg_id: MsgId,
++    ) -> (Request, oneshot::Receiver<Result<Vec<u8>, InvocationError>>) {
++        let (tx, rx) = oneshot::channel();
++        let request = Request {
++            body: b"Hey!".to_vec(),
++            state: RequestState::Sent(MsgIdPair {
++                msg_id,
++                container_msg_id,
++            }),
++            result: tx,
++            _admission: None,
++        };
++        (request, rx)
++    }
++
++    #[test]
++    fn what_a_forgotten_session_dropped_is_sent_again() {
++        let ids = msg_ids(7);
++        let (in_container, _a) = sent(ids[0], ids[2]);
++        let (beside_it, _b) = sent(ids[1], ids[2]);
++        let (alone, _c) = sent(ids[3], ids[3]);
++        let (abandoned, abandoned_rx) = sent(ids[4], ids[4]);
++        drop(abandoned_rx);
++        let (after, _d) = sent(ids[5], ids[6]);
++        let mut requests = vec![in_container, beside_it, alone, abandoned, after];
++
++        assert_eq!(resend_forgotten(&mut requests, ids[5]), 3);
++        // Nobody waits for the abandoned one, so it is not sent again; it is gone.
++        assert_eq!(requests.len(), 4);
++        assert!(
++            requests[..3]
++                .iter()
++                .all(|request| matches!(request.state, RequestState::NotSerialized))
++        );
++        assert!(matches!(requests[3].state, RequestState::Sent(_)));
++    }
++
++    #[test]
++    fn the_container_the_new_session_began_in_reached_it() {
++        let ids = msg_ids(4);
++        let (before, _a) = sent(ids[0], ids[0]);
++        let (sibling, _b) = sent(ids[1], ids[3]);
++        let (first, _c) = sent(ids[2], ids[3]);
++        let mut requests = vec![before, sibling, first];
++
++        assert_eq!(resend_forgotten(&mut requests, ids[2]), 1);
++        assert!(matches!(requests[0].state, RequestState::NotSerialized));
++        assert!(matches!(requests[1].state, RequestState::Sent(_)));
++        assert!(matches!(requests[2].state, RequestState::Sent(_)));
++    }
++
++    #[test]
++    fn a_connections_own_first_session_resends_nothing() {
++        let ids = msg_ids(2);
++        let (first, _a) = sent(ids[0], ids[0]);
++        let (next, _b) = sent(ids[1], ids[1]);
++        let mut requests = vec![first, next];
++        assert_eq!(resend_forgotten(&mut requests, ids[0]), 0);
++        assert!(
++            requests
++                .iter()
++                .all(|request| matches!(request.state, RequestState::Sent(_)))
++        );
++    }
++
++    #[test]
++    fn only_a_later_session_is_a_reset() {
++        let ids = msg_ids(3);
++        let mut start = None;
++        assert!(!begins_later_session(&mut start, ids[1]), "the first session");
++        assert!(
++            !begins_later_session(&mut start, ids[0]),
++            "the notice repeated for an earlier message"
++        );
++        assert_eq!(start, Some(ids[1]));
++        assert!(begins_later_session(&mut start, ids[2]), "a reset");
++        assert_eq!(start, Some(ids[2]));
++    }
  }
 diff --git a/grammers-mtsender/src/sender_pool.rs b/grammers-mtsender/src/sender_pool.rs
 index 2d90b8d..ce1a704 100644
@@ -10458,7 +10801,7 @@ index 2d90b8d..ce1a704 100644
 +    }
 +}
 diff --git a/grammers-mtsender/src/updates_receiver.rs b/grammers-mtsender/src/updates_receiver.rs
-index eaa5315..f629f97 100644
+index eaa5315..c67a55d 100644
 --- a/grammers-mtsender/src/updates_receiver.rs
 +++ b/grammers-mtsender/src/updates_receiver.rs
 @@ -6,48 +6,114 @@
@@ -10607,7 +10950,7 @@ index eaa5315..f629f97 100644
      }
  }
  
-@@ -91,13 +159,14 @@ impl UpdatesReceiver {
+@@ -91,13 +159,15 @@ impl UpdatesReceiver {
          updates: mpsc::Receiver<UpdatesLike>,
          configuration: UpdatesConfiguration,
      ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -10619,11 +10962,12 @@ index eaa5315..f629f97 100644
              // pristine state instead.
              MessageBoxes::new()
          };
++        message_box.set_max_dormant_channels(configuration.max_dormant_channels);
 +        message_box.set_drop_idle_channels(configuration.drop_idle_channels);
          // Don't bother getting pristine update state if we're not logged in.
          let should_get_state =
              message_box.is_empty() && session.peer(PeerId::self_user()).await?.is_some();
-@@ -108,6 +177,8 @@ impl UpdatesReceiver {
+@@ -108,6 +178,8 @@ impl UpdatesReceiver {
              message_box,
              updates,
              buffer: VecDeque::new(),
@@ -10632,7 +10976,7 @@ index eaa5315..f629f97 100644
              should_get_state,
          })
      }
-@@ -126,8 +197,7 @@ impl UpdatesReceiver {
+@@ -126,8 +198,7 @@ impl UpdatesReceiver {
          let session = self.session.clone();
  
          if self.should_get_state {
@@ -10642,7 +10986,7 @@ index eaa5315..f629f97 100644
                  Ok(tl::enums::updates::State::State(state)) => {
                      session
                          .clone()
-@@ -140,12 +210,14 @@ impl UpdatesReceiver {
+@@ -140,12 +211,14 @@ impl UpdatesReceiver {
                          }))
                          .await?;
                      self.message_box.set_state(state);
@@ -10662,7 +11006,7 @@ index eaa5315..f629f97 100644
          }
  
          loop {
-@@ -158,8 +230,12 @@ impl UpdatesReceiver {
+@@ -158,8 +231,12 @@ impl UpdatesReceiver {
                      self.message_box.get_difference(),
                      match self.message_box.get_channel_difference() {
                          Some(gd) => {
@@ -10677,7 +11021,7 @@ index eaa5315..f629f97 100644
                          }
                          None => None,
                      },
-@@ -168,7 +244,13 @@ impl UpdatesReceiver {
+@@ -168,7 +245,13 @@ impl UpdatesReceiver {
  
              if let Some(request) = get_diff {
                  let response = self.invoke(&request).await?;
@@ -10692,7 +11036,7 @@ index eaa5315..f629f97 100644
                  self.extend_update_queue(updates, users, chats);
                  continue;
              }
-@@ -181,21 +263,18 @@ impl UpdatesReceiver {
+@@ -181,21 +264,18 @@ impl UpdatesReceiver {
                      Err(e) if e.is("PERSISTENT_TIMESTAMP_OUTDATED") => {
                          // According to Telegram's docs:
                          // "Channel internal replication issues, try again later (treat this like an RPC_CALL_FAIL)."
@@ -10721,7 +11065,7 @@ index eaa5315..f629f97 100644
                          }
                          continue;
                      }
-@@ -206,7 +285,8 @@ impl UpdatesReceiver {
+@@ -206,7 +286,8 @@ impl UpdatesReceiver {
                          );
                          {
                              self.message_box
@@ -10731,7 +11075,7 @@ index eaa5315..f629f97 100644
                          }
                          continue;
                      }
-@@ -214,14 +294,20 @@ impl UpdatesReceiver {
+@@ -214,14 +295,20 @@ impl UpdatesReceiver {
                          log::warn!("Telegram is having internal issues: {:#?}", rpc_error);
                          {
                              self.message_box
@@ -10754,7 +11098,7 @@ index eaa5315..f629f97 100644
                  self.extend_update_queue(updates, users, chats);
                  continue;
              }
-@@ -237,14 +323,39 @@ impl UpdatesReceiver {
+@@ -237,14 +324,39 @@ impl UpdatesReceiver {
      /// Synchronize the updates state to the session.
      ///
      /// This is **not** automatically done on drop.
@@ -10795,7 +11139,7 @@ index eaa5315..f629f97 100644
      async fn invoke<R: tl::RemoteCall>(&self, request: &R) -> Result<R::Return, InvocationError> {
          let dc_id = self.session.clone().home_dc_id()?;
          self.handle
-@@ -254,11 +365,8 @@ impl UpdatesReceiver {
+@@ -254,11 +366,8 @@ impl UpdatesReceiver {
      }
  
      async fn process_socket_updates(&mut self, updates: UpdatesLike) {
@@ -10809,7 +11153,7 @@ index eaa5315..f629f97 100644
          }
      }
  
-@@ -268,6 +376,123 @@ impl UpdatesReceiver {
+@@ -268,6 +377,123 @@ impl UpdatesReceiver {
          users: Vec<tl::enums::User>,
          chats: Vec<tl::enums::Chat>,
      ) {
@@ -11345,7 +11689,7 @@ index 383c28a..26659fc 100644
                  key: Key::Channel(u.channel_id),
                  pts: u.pts,
 diff --git a/grammers-session/src/message_box/defs.rs b/grammers-session/src/message_box/defs.rs
-index eeeaf43..f7ddfa8 100644
+index eeeaf43..fd3749a 100644
 --- a/grammers-session/src/message_box/defs.rs
 +++ b/grammers-session/src/message_box/defs.rs
 @@ -6,6 +6,9 @@
@@ -11403,7 +11747,7 @@ index eeeaf43..f7ddfa8 100644
  pub struct MessageBoxes {
      /// Live entries, sorted by key.
      pub(super) entries: Vec<LiveEntry>,
-@@ -85,10 +103,17 @@ pub struct MessageBoxes {
+@@ -85,10 +103,21 @@ pub struct MessageBoxes {
      pub(super) seq: i32,
  
      /// Optimization field to quickly query all entries that are currently being fetched.
@@ -11417,12 +11761,16 @@ index eeeaf43..f7ddfa8 100644
 +    /// its difference fetched. See [`crate::updates::MessageBoxes::set_drop_idle_channels`].
 +    pub(super) drop_idle_channels: bool,
 +
++    /// How many dormant channel entries are kept at most. See
++    /// [`crate::updates::MessageBoxes::set_max_dormant_channels`].
++    pub(super) max_dormant: usize,
++
 +    /// Whether `getting_diff_for` still represents the eager channel scan created by `load`.
 +    pub(super) initial_catch_up_pending: bool,
  }
  
  /// Represents the information needed to correctly handle a specific `tl::enums::Update`.
-@@ -107,7 +132,7 @@ pub(super) struct PtsInfo {
+@@ -107,7 +136,7 @@ pub(super) struct PtsInfo {
  //
  // This is really easy to trigger by spamming messages in a channel (with as little as 3 members works), because
  // the updates produced by the RPC request take a while to arrive (whereas the read update comes faster alone).
@@ -11431,7 +11779,7 @@ index eeeaf43..f7ddfa8 100644
  pub(super) struct PossibleGap {
      pub(super) deadline: Instant,
      /// Pending updates (those with a larger PTS, producing the gap which may later be filled).
-@@ -118,6 +143,14 @@ pub(super) struct PossibleGap {
+@@ -118,6 +147,14 @@ pub(super) struct PossibleGap {
  #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
  pub struct Gap;
  
@@ -11446,7 +11794,7 @@ index eeeaf43..f7ddfa8 100644
  /// Alias for the commonly-referenced three-tuple of update and related peers.
  pub(super) type UpdateAndPeers = (
      Vec<(tl::enums::Update, State)>,
-@@ -129,7 +162,7 @@ pub(super) type UpdateAndPeers = (
+@@ -129,7 +166,7 @@ pub(super) type UpdateAndPeers = (
  ///
  /// Telegram unfortunately also includes update state in types
  /// that are not part of the usual [`tl::enums::Updates`].
@@ -11455,7 +11803,7 @@ index eeeaf43..f7ddfa8 100644
  pub enum UpdatesLike {
      /// The usual variant, received passively from Telegram.
      Updates(tl::enums::Updates),
-@@ -163,6 +196,80 @@ pub enum UpdatesLike {
+@@ -163,6 +200,80 @@ pub enum UpdatesLike {
      /// update) or the updates were cut short during deserialization (very unlikely).
      /// This should be treated as a gap.
      MalformedUpdates,
@@ -11537,7 +11885,7 @@ index eeeaf43..f7ddfa8 100644
  
  // Public interface around the more tightly-packed internal state.
 diff --git a/grammers-session/src/message_box/mod.rs b/grammers-session/src/message_box/mod.rs
-index f7a1278..c68f6c2 100644
+index f7a1278..b06a265 100644
 --- a/grammers-session/src/message_box/mod.rs
 +++ b/grammers-session/src/message_box/mod.rs
 @@ -37,16 +37,21 @@ mod defs;
@@ -11739,7 +12087,7 @@ index f7a1278..c68f6c2 100644
  /// Creation, querying, and setting base state.
  impl MessageBoxes {
      /// Create a new, empty [`MessageBoxes`].
-@@ -105,8 +251,10 @@ impl MessageBoxes {
+@@ -105,8 +251,11 @@ impl MessageBoxes {
              entries: Vec::new(),
              date: NO_DATE,
              seq: NO_SEQ,
@@ -11747,11 +12095,12 @@ index f7a1278..c68f6c2 100644
 +            getting_diff_for: BTreeSet::new(),
              next_deadline: next_updates_deadline(),
 +            drop_idle_channels: false,
++            max_dormant: usize::MAX,
 +            initial_catch_up_pending: false,
          }
      }
  
-@@ -114,7 +262,7 @@ impl MessageBoxes {
+@@ -114,7 +263,7 @@ impl MessageBoxes {
      pub fn load(state: UpdatesState) -> Self {
          trace!("created new message box with state: {:?}", state);
          let mut entries = Vec::with_capacity(2 + state.channels.len());
@@ -11760,7 +12109,7 @@ index f7a1278..c68f6c2 100644
          let deadline = next_updates_deadline();
  
          if state.pts != NO_PTS {
-@@ -123,6 +271,9 @@ impl MessageBoxes {
+@@ -123,6 +272,9 @@ impl MessageBoxes {
                  pts: state.pts,
                  deadline,
                  possible_gap: None,
@@ -11770,7 +12119,7 @@ index f7a1278..c68f6c2 100644
              });
          }
          if state.qts != NO_PTS {
-@@ -131,6 +282,9 @@ impl MessageBoxes {
+@@ -131,6 +283,9 @@ impl MessageBoxes {
                  pts: state.qts,
                  deadline,
                  possible_gap: None,
@@ -11780,7 +12129,7 @@ index f7a1278..c68f6c2 100644
              });
          }
          entries.extend(state.channels.iter().map(|c| LiveEntry {
-@@ -138,6 +292,9 @@ impl MessageBoxes {
+@@ -138,6 +293,9 @@ impl MessageBoxes {
              pts: c.pts,
              deadline,
              possible_gap: None,
@@ -11790,11 +12139,12 @@ index f7a1278..c68f6c2 100644
          }));
          entries.sort_by_key(|entry| entry.key);
  
-@@ -149,6 +306,48 @@ impl MessageBoxes {
+@@ -149,7 +307,88 @@ impl MessageBoxes {
              seq: state.seq,
              getting_diff_for,
              next_deadline: deadline,
 +            drop_idle_channels: false,
++            max_dormant: usize::MAX,
 +            initial_catch_up_pending: true,
 +        }
 +    }
@@ -11803,13 +12153,14 @@ index f7a1278..c68f6c2 100644
 +    /// difference.
 +    ///
 +    /// See [`grammers_mtsender::UpdatesConfiguration::drop_idle_channels`] for what this costs.
-+    /// Only [`Key::Channel`] entries ever become dormant; their checkpoints are retained. The
++    /// Only [`Key::Channel`] entries ever become dormant; their checkpoints are retained, up to
++    /// [`Self::set_max_dormant_channels`]. The
 +    /// common and secondary boxes keep the usual behaviour, so a gap in either is still resolved.
 +    pub fn set_drop_idle_channels(&mut self, drop_idle_channels: bool) {
 +        self.drop_idle_channels = drop_idle_channels;
 +        if self.initial_catch_up_pending {
 +            if drop_idle_channels {
-+                // Keep persisted per-channel pts dormant indefinitely, avoiding both the eager
++                // Keep persisted per-channel pts dormant (up to the cap), avoiding both the eager
 +                // serial startup scan and idle expiry. The first live update wakes the entry;
 +                // if it skipped pts, ordinary gap recovery starts from the persisted checkpoint.
 +                let channel_keys = self
@@ -11824,6 +12175,7 @@ index f7a1278..c68f6c2 100644
 +                self.getting_diff_for
 +                    .retain(|key| !matches!(key, Key::Channel(_)));
 +                self.next_deadline = self.next_active_deadline();
++                self.forget_idlest_dormant();
 +            }
 +            self.initial_catch_up_pending = false;
 +        }
@@ -11836,10 +12188,47 @@ index f7a1278..c68f6c2 100644
 +                }
 +            }
 +            self.next_deadline = self.next_active_deadline();
++        }
++    }
++
++    /// Keep at most `max_dormant` dormant channel entries; `usize::MAX`, the default, keeps them
++    /// all. See [`grammers_mtsender::UpdatesConfiguration::max_dormant_channels`].
++    pub fn set_max_dormant_channels(&mut self, max_dormant: usize) {
++        self.max_dormant = max_dormant;
++        if self.drop_idle_channels {
++            self.forget_idlest_dormant();
++        }
++    }
++
++    /// Forgets the dormant entries idle longest once there are more than `max_dormant`, down to
++    /// nine tenths of it so that the sort runs once per many new dormant channels, not per one.
++    ///
++    /// Nothing else removes a dormant entry, so without this one stayed for as long as the session
++    /// did: through every restart, and after the account left the channel. A forgotten channel's
++    /// next update starts its entry again at its own `pts`, as before checkpoints were kept, so all
++    /// that is lost is noticing a gap from while it was forgotten.
++    fn forget_idlest_dormant(&mut self) {
++        let dormant = self.entries.iter().filter(|entry| entry.dormant).count();
++        if dormant <= self.max_dormant {
++            return;
          }
++        let keep = self.max_dormant - self.max_dormant / 10;
++        let mut idle: Vec<(Instant, Key)> = self
++            .entries
++            .iter()
++            .filter(|entry| entry.dormant)
++            .map(|entry| (entry.deadline, entry.key))
++            .collect();
++        let forget = dormant - keep;
++        // Unique keys make every pair distinct, so exactly `forget` of them sort at or before it.
++        let (_, &mut last, _) = idle.select_nth_unstable(forget - 1);
++        self.entries
++            .retain(|entry| !entry.dormant || (entry.deadline, entry.key) > last);
++        info!("forgot {forget} dormant channel checkpoints past the cap of {}", self.max_dormant);
      }
  
-@@ -195,10 +394,13 @@ impl MessageBoxes {
+     fn entry(&self, key: Key) -> Option<&LiveEntry> {
+@@ -195,10 +434,13 @@ impl MessageBoxes {
      fn set_pts(&mut self, key: Key, pts: i32) {
          if !self.update_entry(key, |entry| entry.pts = pts) {
              self.set_entry(LiveEntry {
@@ -11855,7 +12244,7 @@ index f7a1278..c68f6c2 100644
              });
          }
      }
-@@ -223,7 +425,7 @@ impl MessageBoxes {
+@@ -223,7 +465,7 @@ impl MessageBoxes {
                  .entries
                  .iter()
                  .filter_map(|entry| match entry.key {
@@ -11864,14 +12253,15 @@ index f7a1278..c68f6c2 100644
                      _ => None,
                  })
                  .collect(),
-@@ -247,9 +449,32 @@ impl MessageBoxes {
+@@ -247,9 +489,34 @@ impl MessageBoxes {
          }
  
          if now >= self.next_deadline {
 +            if self.drop_idle_channels {
 +                // A channel that has been silent this long becomes dormant rather than being
-+                // queued for its difference. Its checkpoint remains persisted indefinitely, and
-+                // its next update wakes it and is compared against the retained pts.
++                // queued for its difference. Its checkpoint remains persisted (up to the cap of
++                // dormant entries), and its next update wakes it and is compared against the
++                // retained pts.
 +                //
 +                // `possible_gap` is what makes this safe, and it is not optional. An entry with
 +                // a gap is holding buffered updates that have not been dispatched yet, and its
@@ -11890,6 +12280,7 @@ index f7a1278..c68f6c2 100644
 +                        entry.dormant = true;
 +                    }
 +                }
++                self.forget_idlest_dormant();
 +            }
              self.getting_diff_for
                  .extend(self.entries.iter().filter_map(|entry| {
@@ -11898,7 +12289,7 @@ index f7a1278..c68f6c2 100644
                          debug!("deadline for forcibly fetching updates met for {:?}", entry);
                          Some(entry.key)
                      } else {
-@@ -259,15 +484,19 @@ impl MessageBoxes {
+@@ -259,15 +526,19 @@ impl MessageBoxes {
  
              // When extending `getting_diff_for`, it's important to have the moral equivalent of
              // `begin_get_diff` (that is, clear possible gaps if we're now getting difference).
@@ -11921,7 +12312,7 @@ index f7a1278..c68f6c2 100644
              }
          }
  
-@@ -284,20 +513,29 @@ impl MessageBoxes {
+@@ -284,20 +555,29 @@ impl MessageBoxes {
          self.update_entry(key, |entry| {
              old_deadline = entry.deadline;
              entry.deadline = deadline;
@@ -11956,7 +12347,7 @@ index f7a1278..c68f6c2 100644
                  .unwrap_or_else(next_updates_deadline),
          );
      }
-@@ -317,12 +555,18 @@ impl MessageBoxes {
+@@ -317,12 +597,18 @@ impl MessageBoxes {
              pts: state.pts,
              deadline,
              possible_gap: None,
@@ -11975,7 +12366,7 @@ index f7a1278..c68f6c2 100644
          });
          self.date = state.date;
          self.seq = state.seq;
-@@ -337,9 +581,12 @@ impl MessageBoxes {
+@@ -337,9 +623,12 @@ impl MessageBoxes {
          if self.entry(Key::Channel(id)).is_none() {
              self.set_entry(LiveEntry {
                  key: Key::Channel(id),
@@ -11989,7 +12380,7 @@ index f7a1278..c68f6c2 100644
              });
          }
      }
-@@ -350,23 +597,34 @@ impl MessageBoxes {
+@@ -350,23 +639,34 @@ impl MessageBoxes {
      /// Clears any previous gaps.
      fn try_begin_get_diff(&mut self, key: Key) {
          if !self.getting_diff_for.contains(&key) {
@@ -12031,7 +12422,7 @@ index f7a1278..c68f6c2 100644
  
          debug_assert!(
              self.entry(key)
-@@ -374,6 +632,33 @@ impl MessageBoxes {
+@@ -374,6 +674,33 @@ impl MessageBoxes {
              "gaps shouldn't be created while getting difference"
          );
      }
@@ -12065,7 +12456,7 @@ index f7a1278..c68f6c2 100644
  }
  
  // "Normal" updates flow (processing and detection of gaps).
-@@ -392,7 +677,29 @@ impl MessageBoxes {
+@@ -392,7 +719,29 @@ impl MessageBoxes {
      /// [updates' documentation]: https://core.telegram.org/api/updates
      pub fn process_updates(&mut self, updates: UpdatesLike) -> Result<defs::UpdateAndPeers, Gap> {
          trace!("processing updates: {:?}", updates);
@@ -12096,7 +12487,7 @@ index f7a1278..c68f6c2 100644
  
          // Top level, when handling received `updates` and `updatesCombined`.
          // `updatesCombined` groups all the fields we care about, which is why we use it.
-@@ -400,14 +707,7 @@ impl MessageBoxes {
+@@ -400,14 +749,7 @@ impl MessageBoxes {
          // This assumes all access hashes are already known to the client (socket updates are
          // expected to use `ensure_known_peer_hashes`, and the result from getting difference
          // has to deal with the peers in a different way).
@@ -12112,7 +12503,7 @@ index f7a1278..c68f6c2 100644
              Ok(combined) => combined,
              Err(Gap) => {
                  self.try_begin_get_diff(Key::Common);
-@@ -415,18 +715,21 @@ impl MessageBoxes {
+@@ -415,18 +757,21 @@ impl MessageBoxes {
              }
          };
  
@@ -12143,7 +12534,7 @@ index f7a1278..c68f6c2 100644
                  // Apply
                  Ordering::Equal => {}
                  // Ignore
-@@ -435,12 +738,12 @@ impl MessageBoxes {
+@@ -435,12 +780,12 @@ impl MessageBoxes {
                          "skipping updates that were already handled at seq = {}",
                          self.seq
                      );
@@ -12158,7 +12549,7 @@ index f7a1278..c68f6c2 100644
                      );
                      self.try_begin_get_diff(Key::Common);
                      return Err(Gap);
-@@ -448,6 +751,34 @@ impl MessageBoxes {
+@@ -448,6 +793,34 @@ impl MessageBoxes {
              }
          }
  
@@ -12193,7 +12584,7 @@ index f7a1278..c68f6c2 100644
          // Telegram can send updates out of order (e.g. `ReadChannelInbox` first
          // and then `NewChannelMessage`, both with the same `pts`, but the `count`
          // is `0` and `1` respectively), so we sort them first.
-@@ -472,6 +803,9 @@ impl MessageBoxes {
+@@ -472,6 +845,9 @@ impl MessageBoxes {
                          pts,
                          deadline,
                          possible_gap: None,
@@ -12203,7 +12594,7 @@ index f7a1278..c68f6c2 100644
                      });
                  }
                  self.try_begin_get_diff(key);
-@@ -502,12 +836,19 @@ impl MessageBoxes {
+@@ -502,12 +878,19 @@ impl MessageBoxes {
              self.force_update_entry(
                  LiveEntry {
                      key: info.key,
@@ -12225,7 +12616,7 @@ index f7a1278..c68f6c2 100644
                          // Apply
                          Ordering::Equal => {
                              entry.pts = info.pts;
-@@ -540,12 +881,16 @@ impl MessageBoxes {
+@@ -540,12 +923,16 @@ impl MessageBoxes {
                      };
  
                      if let Some(mut gap) = entry.possible_gap.take() {
@@ -12246,7 +12637,7 @@ index f7a1278..c68f6c2 100644
                                  Ordering::Equal => {
                                      entry.pts = gap_info.pts;
                                      // possible gap can only be resolve if new update closed
-@@ -578,7 +923,7 @@ impl MessageBoxes {
+@@ -578,7 +965,7 @@ impl MessageBoxes {
              self.seq = new_seq;
          }
  
@@ -12255,7 +12646,7 @@ index f7a1278..c68f6c2 100644
      }
  }
  
-@@ -591,7 +936,7 @@ impl MessageBoxes {
+@@ -591,7 +978,7 @@ impl MessageBoxes {
                  let pts = self
                      .entry(Key::Common)
                      .map(|entry| entry.pts)
@@ -12264,7 +12655,7 @@ index f7a1278..c68f6c2 100644
  
                  let gd = tl::functions::updates::GetDifference {
                      pts,
-@@ -611,16 +956,23 @@ impl MessageBoxes {
+@@ -611,16 +998,23 @@ impl MessageBoxes {
          None
      }
  
@@ -12295,7 +12686,7 @@ index f7a1278..c68f6c2 100644
          let finish: bool;
          let result = match difference {
              tl::enums::updates::Difference::Empty(diff) => {
-@@ -677,7 +1029,19 @@ impl MessageBoxes {
+@@ -677,7 +1071,19 @@ impl MessageBoxes {
              self.try_end_get_diff(Key::Secondary);
          }
  
@@ -12316,7 +12707,7 @@ index f7a1278..c68f6c2 100644
      }
  
      fn apply_difference_type(
-@@ -703,19 +1067,18 @@ impl MessageBoxes {
+@@ -703,19 +1109,18 @@ impl MessageBoxes {
  
          // other_updates can contain things like UpdateChannelTooLong and UpdateNewChannelMessage.
          // We need to process those as if they were socket updates to discard any we have already handled.
@@ -12340,7 +12731,7 @@ index f7a1278..c68f6c2 100644
  
          result_updates.extend(
              new_messages
-@@ -757,6 +1120,63 @@ impl MessageBoxes {
+@@ -757,6 +1162,63 @@ impl MessageBoxes {
          })
      }
  
@@ -12404,7 +12795,7 @@ index f7a1278..c68f6c2 100644
      /// Return the request that needs to be made to get a channel's difference, if any.
      ///
      /// Note that this only returns the skeleton of a request.
-@@ -779,26 +1199,30 @@ impl MessageBoxes {
+@@ -779,26 +1241,30 @@ impl MessageBoxes {
              trace!("requesting {:?}", gd);
              Some(gd)
          } else {
@@ -12444,7 +12835,7 @@ index f7a1278..c68f6c2 100644
          let tl::types::updates::ChannelDifference {
              r#final,
              pts,
-@@ -807,29 +1231,30 @@ impl MessageBoxes {
+@@ -807,29 +1273,30 @@ impl MessageBoxes {
              other_updates: updates,
              chats,
              users,
@@ -12490,7 +12881,7 @@ index f7a1278..c68f6c2 100644
  
          result_updates.extend(new_messages.into_iter().map(|message| {
              (
-@@ -847,15 +1272,40 @@ impl MessageBoxes {
+@@ -847,15 +1314,40 @@ impl MessageBoxes {
              )
          }));
  
@@ -12507,8 +12898,12 @@ index f7a1278..c68f6c2 100644
  
 -        (result_updates, users, chats)
 +        Ok((result_updates, users, chats))
-+    }
-+
+     }
+ 
+-    pub fn end_channel_difference(&mut self, reason: PrematureEndReason) {
+-        let (key, channel_id) = self
+-            .channel_in_diff()
+-            .expect("ending channel difference to have a channel in getting_diff_for");
 +    /// Deprecated naming alias for [`Self::try_apply_channel_difference`].
 +    ///
 +    /// This intentionally returns `Result` instead of preserving the old infallible return type:
@@ -12519,12 +12914,8 @@ index f7a1278..c68f6c2 100644
 +        difference: tl::enums::updates::ChannelDifference,
 +    ) -> Result<defs::UpdateAndPeers, Gap> {
 +        self.try_apply_channel_difference(difference)
-     }
- 
--    pub fn end_channel_difference(&mut self, reason: PrematureEndReason) {
--        let (key, channel_id) = self
--            .channel_in_diff()
--            .expect("ending channel difference to have a channel in getting_diff_for");
++    }
++
 +    /// End the active channel difference for an explicit external reason.
 +    ///
 +    /// Returns [`Gap`] if there was no active channel request to end.
@@ -12536,7 +12927,7 @@ index f7a1278..c68f6c2 100644
  
          trace!(
              "ending channel difference for {} because {:?}",
-@@ -863,8 +1313,7 @@ impl MessageBoxes {
+@@ -863,8 +1355,7 @@ impl MessageBoxes {
          );
          match reason {
              PrematureEndReason::TemporaryServerIssues => {
@@ -12546,7 +12937,7 @@ index f7a1278..c68f6c2 100644
              }
              PrematureEndReason::Banned => {
                  self.update_entry(key, |entry| entry.possible_gap = None);
-@@ -872,10 +1321,20 @@ impl MessageBoxes {
+@@ -872,10 +1363,20 @@ impl MessageBoxes {
                  self.pop_entry(key);
              }
          }
@@ -12569,7 +12960,7 @@ index f7a1278..c68f6c2 100644
  pub enum PrematureEndReason {
      /// The channel difference failed to be fetched for a temporary reasons.
 diff --git a/grammers-session/src/message_box/tests.rs b/grammers-session/src/message_box/tests.rs
-index 68bb840..092fc47 100644
+index 68bb840..af135c2 100644
 --- a/grammers-session/src/message_box/tests.rs
 +++ b/grammers-session/src/message_box/tests.rs
 @@ -7,14 +7,15 @@
@@ -13107,10 +13498,10 @@ index 68bb840..092fc47 100644
 +            .try_end_channel_difference(PrematureEndReason::TemporaryServerIssues)
 +            .is_ok()
 +    );
-+    assert!(message_boxes.get_channel_difference().is_none());
+     assert!(message_boxes.get_channel_difference().is_none());
 +    advance_time_by(CHANNEL_DIFFERENCE_RETRY_BASE - Duration::from_millis(1));
 +    message_boxes.check_deadlines();
-     assert!(message_boxes.get_channel_difference().is_none());
++    assert!(message_boxes.get_channel_difference().is_none());
 +    advance_time_by(Duration::from_millis(1));
 +    message_boxes.check_deadlines();
 +    assert_eq!(
@@ -13280,7 +13671,7 @@ index 68bb840..092fc47 100644
  #[test]
  fn test_process_socket_updates_flow_common_pts_possible_gap_resolves() {
      reset_time();
-@@ -629,3 +1162,100 @@ fn test_process_socket_update_for_new_channel_dispatches_first_update() {
+@@ -629,3 +1162,177 @@ fn test_process_socket_update_for_new_channel_dispatches_first_update() {
          ))
      );
  }
@@ -13379,6 +13770,83 @@ index 68bb840..092fc47 100644
 +            pts: 34
 +        }],
 +        "the entry has to still be there"
++    );
++}
++
++#[test]
++fn dormant_checkpoints_past_the_cap_forget_the_idlest() {
++    reset_time();
++    let mut message_boxes = MessageBoxes::new();
++    message_boxes.set_drop_idle_channels(true);
++    message_boxes.set_max_dormant_channels(10);
++    message_boxes.set_state(state(1, 1, 34, 34));
++    // Eleven channels, each last heard from a second after the one before.
++    for channel_id in 1..=11 {
++        message_boxes.try_set_channel_state(channel_id, 34);
++        advance_time_by(Duration::from_secs(1));
++    }
++    advance_time_by(NO_UPDATES_TIMEOUT);
++    message_boxes.check_deadlines();
++    assert_eq!(
++        message_boxes
++            .session_state()
++            .channels
++            .iter()
++            .map(|channel| channel.id)
++            .collect::<Vec<_>>(),
++        (3..=11).collect::<Vec<_>>(),
++        "one past the cap forgets the idlest, down to nine tenths of it"
++    );
++
++    assert!(message_boxes.get_difference().is_some());
++    assert!(
++        message_boxes
++            .try_apply_difference(tl::types::updates::DifferenceEmpty { date: 1, seq: 1 }.into())
++            .is_ok()
++    );
++    // A kept checkpoint still notices a gap; a forgotten channel starts again at its own pts.
++    assert_eq!(
++        message_boxes.process_updates(channel_updates(11, NO_DATE, NO_SEQ, 36)),
++        Ok((Vec::new(), Vec::new(), Vec::new()))
++    );
++    assert_eq!(
++        message_boxes.process_updates(channel_updates(1, NO_DATE, NO_SEQ, 50)),
++        Ok((
++            vec![(
++                channel_update(1, 50),
++                State {
++                    date: 1,
++                    seq: 1,
++                    message_box: Some(MessageBox::Channel {
++                        channel_id: 1,
++                        pts: 50
++                    })
++                }
++            )],
++            vec![],
++            vec![]
++        ))
++    );
++}
++
++#[test]
++fn loaded_checkpoints_past_the_cap_are_forgotten_at_startup() {
++    reset_time();
++    let mut message_boxes = MessageBoxes::load(UpdatesState {
++        pts: 34,
++        qts: 34,
++        date: 1,
++        seq: 1,
++        channels: (1..=20).map(|id| ChannelState { id, pts: 34 }).collect(),
++    });
++    // The order `UpdatesReceiver::create` uses.
++    message_boxes.set_max_dormant_channels(10);
++    message_boxes.set_drop_idle_channels(true);
++    assert_eq!(message_boxes.session_state().channels.len(), 9);
++    assert_eq!(
++        message_boxes.get_channel_difference(),
++        None,
++        "what is kept stays dormant"
 +    );
 +}
 diff --git a/grammers-session/src/peer.rs b/grammers-session/src/peer.rs

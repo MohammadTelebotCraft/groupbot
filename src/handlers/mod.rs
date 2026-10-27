@@ -1649,6 +1649,10 @@ impl Ctx {
         }
     }
 
+    pub fn max_runtime_chats(&self) -> usize {
+        self.max_runtime_chats
+    }
+
     pub fn owns_chat(&self, chat: i64) -> bool {
         self.allowed_chats
             .as_ref()

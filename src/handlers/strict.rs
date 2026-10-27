@@ -613,6 +613,15 @@ pub async fn recover_pending(ctx: &Arc<Ctx>) {
         Ok(count) => log::warn!("strict mode: purged {count} expired terminal actions"),
         Err(error) => log::warn!("strict mode: terminal-action purge failed: {error}"),
     }
+    match ctx
+        .settings
+        .purge_parked_strict_actions(before, DEAD_LETTER_PURGE_PAGE)
+        .await
+    {
+        Ok(0) => {}
+        Ok(count) => log::warn!("strict mode: purged {count} actions parked past retention"),
+        Err(error) => log::warn!("strict mode: parked-action purge failed: {error}"),
+    }
 }
 
 async fn recover_one(ctx: &Ctx, pending: PendingStrictAction) {

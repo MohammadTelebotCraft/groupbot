@@ -184,6 +184,11 @@ fn setup_update(
         tl::enums::Update::ChatParticipantAdd(update) if update.user_id == me => {
             (PeerId::chat(update.chat_id), None, true)
         }
+        tl::enums::Update::ChatParticipantDelete(update) if update.user_id == me => (
+            PeerId::chat(update.chat_id),
+            Some(install::Standing::Gone),
+            true,
+        ),
         tl::enums::Update::Channel(update) => (PeerId::channel(update.channel_id), None, false),
         tl::enums::Update::Chat(update) => (PeerId::chat(update.chat_id), None, false),
         _ => return None,
@@ -232,8 +237,10 @@ async fn reconcile(
         return false;
     }
     if matches!(standing, install::Standing::Gone) {
+        install::departed(ctx, chat).await;
         return true;
     }
+    install::present(ctx, chat).await;
     if !install::ready(&standing) {
         if announce {
             install::announce(ctx, chat_ref, chat, &standing).await;
@@ -528,6 +535,24 @@ mod tests {
         assert!(explicit);
         assert!(setup_update(&promoted, 8).is_none());
         assert!(setup_update(&channel, 0).is_none());
+    }
+
+    #[test]
+    fn a_basic_group_removing_the_bot_reads_as_gone() {
+        let removed: tl::enums::Update = tl::types::UpdateChatParticipantDelete {
+            chat_id: 12,
+            user_id: 7,
+            version: 1,
+        }
+        .into();
+        let (peer, standing, explicit) = setup_update(&removed, 7).unwrap();
+        assert_eq!(peer, PeerId::chat(12).unwrap());
+        assert!(matches!(standing, Some(install::Standing::Gone)));
+        assert!(explicit);
+        assert!(
+            setup_update(&removed, 8).is_none(),
+            "another member leaving is nothing"
+        );
     }
 
     #[test]

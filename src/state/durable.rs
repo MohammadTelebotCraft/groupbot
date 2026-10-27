@@ -246,6 +246,13 @@ impl Settings {
         .execute(&mut *connection)
         .await?;
         sqlx::query(
+            "CREATE INDEX IF NOT EXISTS pending_rank_awards_terminal_age
+             ON pending_rank_awards(terminal_at, chat_id, user_id)
+             WHERE terminal_reason IS NOT NULL",
+        )
+        .execute(&mut *connection)
+        .await?;
+        sqlx::query(
             "CREATE INDEX IF NOT EXISTS pending_rank_awards_claim_v2
              ON pending_rank_awards(created_at, attempts, chat_id, user_id)
              WHERE terminal_reason IS NULL",
@@ -352,11 +359,47 @@ impl Settings {
             inspect_spool(&directory, MAX_SPOOL_BYTES, MAX_SPOOL_FILES)
         })
         .await??;
-        if !inventory.batches.is_empty() || !inventory.temporaries.is_empty() {
+        if !inventory.batches.is_empty() {
+            self.remove_applied_spool(&inventory.batches).await?;
+            return Ok(());
+        }
+        if !inventory.temporaries.is_empty() {
             return Ok(());
         }
         sqlx::query("DELETE FROM applied_stats_batches WHERE id IN (SELECT id FROM applied_stats_batches WHERE applied_at < now() - interval '90 days' ORDER BY applied_at LIMIT 5000)")
             .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn remove_applied_spool(&self, batches: &[PathBuf]) -> DurableResult<()> {
+        let stem = |path: &PathBuf| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        };
+        let ids: Vec<String> = batches.iter().filter_map(stem).collect();
+        let receipts: Vec<(String, Option<Vec<u8>>)> =
+            sqlx::query_as("SELECT id, digest FROM applied_stats_batches WHERE id = ANY($1)")
+                .bind(&ids)
+                .fetch_all(&self.pool)
+                .await?;
+        for (id, digest) in receipts {
+            let (Some(digest), Some(path)) = (
+                digest,
+                batches
+                    .iter()
+                    .find(|&path| stem(path).as_deref() == Some(id.as_str())),
+            ) else {
+                continue;
+            };
+            if tokio::fs::metadata(path).await?.len() > MAX_BATCH_BYTES {
+                continue;
+            }
+            let batch: StatsBatch = serde_json::from_slice(&tokio::fs::read(path).await?)?;
+            if batch.id == id && batch.digest()? == digest {
+                self.finish_stats(&batch).await?;
+            }
+        }
         Ok(())
     }
 
@@ -759,6 +802,23 @@ impl Settings {
         }
         tx.commit().await?;
         Ok(true)
+    }
+
+    pub async fn purge_terminal_rank_awards(&self, limit: i64) -> DurableResult<u64> {
+        let removed = sqlx::query(
+            "DELETE FROM pending_rank_awards
+             WHERE terminal_reason IS NOT NULL AND terminal_at <= now() - interval '30 days'
+               AND ctid IN (
+                 SELECT ctid FROM pending_rank_awards
+                 WHERE terminal_reason IS NOT NULL AND terminal_at <= now() - interval '30 days'
+                 ORDER BY terminal_at, chat_id, user_id
+                 FOR UPDATE SKIP LOCKED LIMIT $1
+             )",
+        )
+        .bind(limit.clamp(1, 5_000))
+        .execute(&self.pool)
+        .await?;
+        Ok(removed.rows_affected())
     }
 }
 
@@ -1460,6 +1520,94 @@ mod tests {
             "PERF {}",
             serde_json::json!({"kind":"durable_statistics", "sql_failure_rolled_back":true, "restart_replay_exactly_once":true, "counter":total,"tally":tally})
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated PostgreSQL statistics spool cleanup"]
+    async fn a_spool_file_left_by_a_failed_finish_is_removed_while_running() {
+        let chat = -999_777_006;
+        let mut settings = Settings::connect(URL).await.unwrap();
+        sqlx::query(
+            "INSERT INTO durable_chats (chat_id, access_hash, admitted_at)
+             VALUES ($1, 0, 0) ON CONFLICT DO NOTHING",
+        )
+        .bind(chat)
+        .execute(&settings.pool)
+        .await
+        .unwrap();
+        let applied = StatsBatch::new(20_000, vec![(chat, "audit_spool".into(), 1)], Vec::new());
+        let waiting = StatsBatch::new(20_000, vec![(chat, "audit_spool".into(), 1)], Vec::new());
+        let directory = std::env::temp_dir().join(format!("groupbot-stats-{}", applied.id));
+        settings.stats_directory = Some(directory.clone());
+        settings.stage_stats(&applied).await.unwrap();
+        assert!(settings.apply_stats(&applied, audit_rank_due).await.unwrap());
+        settings.stage_stats(&waiting).await.unwrap();
+
+        settings.prune_stats_receipts().await.unwrap();
+        assert!(!directory.join(format!("{}.json", applied.id)).exists());
+        assert!(directory.join(format!("{}.json", waiting.id)).exists());
+
+        assert!(settings.apply_stats(&waiting, audit_rank_due).await.unwrap());
+        settings.finish_stats(&waiting).await.unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+        sqlx::query("DELETE FROM applied_stats_batches WHERE id = ANY($1)")
+            .bind(vec![applied.id.clone(), waiting.id.clone()])
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM tallies WHERE chat_id=$1")
+            .bind(chat)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated PostgreSQL rank-outbox retention"]
+    async fn terminal_rank_awards_are_forgotten_after_thirty_days() {
+        let chat = -999_777_007;
+        let settings = Settings::connect(URL).await.unwrap();
+        sqlx::query(
+            "INSERT INTO durable_chats (chat_id, access_hash, admitted_at)
+             VALUES ($1, 0, 0) ON CONFLICT DO NOTHING",
+        )
+        .bind(chat)
+        .execute(&settings.pool)
+        .await
+        .unwrap();
+        let wipe = "DELETE FROM pending_rank_awards WHERE chat_id=$1";
+        sqlx::query(wipe)
+            .bind(chat)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO pending_rank_awards
+                (chat_id, user_id, name, total, awarded, milestone, terminal_reason, terminal_at)
+             VALUES ($1, 1, 'old', 10, 0, 10, 'retry_limit:test', now() - interval '31 days'),
+                    ($1, 2, 'recent', 10, 0, 10, 'retry_limit:test', now() - interval '1 day'),
+                    ($1, 3, 'pending', 10, 0, 10, NULL, NULL)",
+        )
+        .bind(chat)
+        .execute(&settings.pool)
+        .await
+        .unwrap();
+
+        settings.purge_terminal_rank_awards(5_000).await.unwrap();
+        let left: Vec<i64> = sqlx::query_scalar(
+            "SELECT user_id FROM pending_rank_awards WHERE chat_id=$1 ORDER BY user_id",
+        )
+        .bind(chat)
+        .fetch_all(&settings.pool)
+        .await
+        .unwrap();
+        assert_eq!(left, [2, 3], "only the terminal row past thirty days goes");
+
+        sqlx::query(wipe)
+            .bind(chat)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -8,6 +8,137 @@ use super::Ctx;
 
 pub const CLEANER_ADDED: &str = "cln_added";
 
+pub const LEFT_DAY: &str = "left_day";
+
+const CHECKED_DAY: &str = "checked_day";
+
+const DEPARTED_DAYS: i64 = 90;
+
+const DEPARTED_PAGE: i64 = 64;
+
+pub async fn departed(ctx: &Ctx, chat: i64) {
+    if ctx.settings.value(chat, LEFT_DAY).is_some() {
+        return;
+    }
+    let today = super::stats::today().to_string();
+    if let Err(error) = ctx.settings.try_set_value(chat, LEFT_DAY, &today).await {
+        log::warn!("install: {chat}: could not record the bot's removal: {error}");
+    }
+}
+
+pub async fn present(ctx: &Ctx, chat: i64) {
+    if ctx.settings.value(chat, LEFT_DAY).is_none() {
+        return;
+    }
+    if let Err(error) = ctx.settings.try_set(chat, LEFT_DAY, false).await {
+        log::warn!("install: {chat}: could not clear the bot's removal: {error}");
+    }
+}
+
+async fn presence(ctx: &Ctx, chat_ref: PeerRef) -> Option<bool> {
+    if chat_ref.id.kind() == PeerKind::Channel {
+        return match standing(ctx, chat_ref).await {
+            Standing::Gone => Some(false),
+            Standing::Unknown => None,
+            _ => Some(true),
+        };
+    }
+    let id = chat_ref.id.bare_id()?;
+    let chats = match ctx
+        .client
+        .invoke(&tl::functions::messages::GetChats { id: vec![id] })
+        .await
+    {
+        Ok(tl::enums::messages::Chats::Chats(chats)) => chats.chats,
+        Ok(tl::enums::messages::Chats::Slice(chats)) => chats.chats,
+        Err(error) => {
+            eprintln!("install: cannot read basic group {id}: {error}");
+            return None;
+        }
+    };
+    chats.into_iter().find_map(|chat| match chat {
+        tl::enums::Chat::Forbidden(chat) if chat.id == id => Some(false),
+        tl::enums::Chat::Chat(chat) if chat.id == id => Some(!(chat.left || chat.deactivated)),
+        _ => None,
+    })
+}
+
+pub async fn forget_departed(ctx: &Ctx) {
+    let today = i64::try_from(super::stats::today()).unwrap_or(i64::MAX);
+    let horizon = today.saturating_sub(DEPARTED_DAYS);
+    match ctx
+        .settings
+        .chats_marked_before(LEFT_DAY, horizon, DEPARTED_PAGE)
+        .await
+    {
+        Ok(chats) => {
+            super::bounded(chats, super::FLEET_CAMPAIGNS, |chat| {
+                forget_if_gone(ctx, chat)
+            })
+            .await
+        }
+        Err(error) => log::warn!("install: departed groups unavailable: {error}"),
+    }
+
+    let admitted_before =
+        super::tempmedia::unix_now().saturating_sub(DEPARTED_DAYS.saturating_mul(86_400));
+    let mut quiet = Vec::new();
+    for batch in ctx.settings.chats().chunks(500) {
+        let room = DEPARTED_PAGE.saturating_sub(i64::try_from(quiet.len()).unwrap_or(i64::MAX));
+        if room <= 0 {
+            break;
+        }
+        match ctx
+            .settings
+            .quiet_unchecked(batch, horizon, admitted_before, (LEFT_DAY, CHECKED_DAY), room)
+            .await
+        {
+            Ok(found) => quiet.extend(found),
+            Err(error) => {
+                log::warn!("install: quiet groups unavailable: {error}");
+                break;
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    super::bounded(quiet, super::FLEET_CAMPAIGNS, |chat| {
+        look_at_quiet(ctx, chat, today)
+    })
+    .await;
+}
+
+async fn forget_if_gone(ctx: &Ctx, chat: i64) {
+    let Some(chat_ref) = ctx.chat_ref(chat) else {
+        return;
+    };
+    match presence(ctx, chat_ref).await {
+        Some(false) => match ctx.settings.forget_chat(chat, LEFT_DAY).await {
+            Ok(true) => {
+                ctx.forget_image_filters(chat);
+                log::info!("install: forgot {chat}, gone {DEPARTED_DAYS}+ days");
+            }
+            Ok(false) => {}
+            Err(error) => log::warn!("install: could not forget {chat}: {error}"),
+        },
+        Some(true) => present(ctx, chat).await,
+        None => {}
+    }
+}
+
+async fn look_at_quiet(ctx: &Ctx, chat: i64, today: i64) {
+    let key = match ctx.chat_ref(chat) {
+        None => CHECKED_DAY,
+        Some(chat_ref) => match presence(ctx, chat_ref).await {
+            Some(false) => LEFT_DAY,
+            Some(true) => CHECKED_DAY,
+            None => return,
+        },
+    };
+    if let Err(error) = ctx.settings.try_set_value(chat, key, &today.to_string()).await {
+        log::warn!("install: {chat}: could not record {key}: {error}");
+    }
+}
+
 pub const STATUS: &[&str] = &[
     "وضعیت نصب",
     "بررسی نصب",
