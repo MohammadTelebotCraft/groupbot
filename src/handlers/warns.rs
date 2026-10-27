@@ -404,11 +404,11 @@ pub async fn recover_pending(ctx: &Arc<Ctx>) {
     let before = unix_now().saturating_sub(PARKED_RETENTION_SECS);
     match ctx
         .settings
-        .purge_parked_warning_actions(before, PARKED_PURGE_PAGE)
+        .purge_stale_warning_actions(before, PARKED_PURGE_PAGE)
         .await
     {
         Ok(0) => {}
-        Ok(count) => log::warn!("warns: purged {count} penalties parked past retention"),
+        Ok(count) => log::warn!("warns: purged {count} penalties parked or failing past retention"),
         Err(error) => log::warn!("warns: parked-penalty purge failed: {error}"),
     }
 }

@@ -131,6 +131,7 @@ pub struct ChatState {
     logs: std::sync::Mutex<Vec<String>>,
     log_retry_at: AtomicU64,
     log_failures: AtomicUsize,
+    log_gone: AtomicBool,
     temp_media: std::sync::Mutex<VecDeque<(Instant, i32)>>,
     said: std::sync::Mutex<VecDeque<(i64, i32)>>,
     roots: std::sync::Mutex<HashMap<i32, (Instant, Root)>>,
@@ -1247,6 +1248,7 @@ fn log_retry_delay(failures: usize, flood: Option<u32>) -> Duration {
         backoff.max(Duration::from_secs(u64::from(seconds)))
     })
 }
+const LOG_GONE_PAUSE: Duration = Duration::from_secs(3600);
 const STATS_ROWS_PER_FLUSH: usize = 50_000;
 const LOG_ENTRIES_PER_FLUSH: usize = 50_000;
 const MEDIA_IDS_PER_FLUSH: usize = 50_000;
@@ -2479,6 +2481,11 @@ impl Ctx {
         let Some(state) = self.try_state(chat) else {
             return;
         };
+        if state.log_gone.load(Ordering::Relaxed)
+            && state.log_retry_at.load(Ordering::Relaxed) > self.uptime_millis()
+        {
+            return;
+        }
         let mut entries = state.logs.lock().unwrap();
         let was_empty = entries.is_empty();
         if entries.len() >= MAX_PER_CHAT {
@@ -2510,7 +2517,23 @@ impl Ctx {
         if let Some(state) = self.peek(chat) {
             state.log_failures.store(0, Ordering::Relaxed);
             state.log_retry_at.store(0, Ordering::Relaxed);
+            state.log_gone.store(false, Ordering::Relaxed);
         }
+    }
+
+    pub fn log_channel_gone(&self, chat: i64) {
+        let Some(state) = self.peek(chat) else {
+            return;
+        };
+        let dropped = std::mem::take(&mut *state.logs.lock().unwrap()).len();
+        state.log_gone.store(true, Ordering::Relaxed);
+        state.log_retry_at.store(
+            self.uptime_millis().saturating_add(LOG_GONE_PAUSE.as_millis() as u64),
+            Ordering::Relaxed,
+        );
+        ::log::warn!(
+            "log: the log channel of {chat} refuses the bot; dropped {dropped} more entries, trying again in an hour"
+        );
     }
 
     pub fn retry_logs(&self, chat: i64, mut retry: Vec<String>) {

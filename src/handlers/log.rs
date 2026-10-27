@@ -184,7 +184,7 @@ async fn deliver(ctx: &std::sync::Arc<Ctx>, honour_backoff: bool) -> bool {
             let header = format!("<b>لاگ · {}</b> · <code>{chat}</code>", esc(&title));
 
             let mut batch = String::new();
-            let mut delivered = Ok(());
+            let mut delivered: Result<(), Refused> = Ok(());
             for entry in entries {
                 if !batch.is_empty() && batch.chars().count() + entry.chars().count() > ROOM {
                     delivered = send(&ctx, target, &header, &batch).await;
@@ -206,7 +206,11 @@ async fn deliver(ctx: &std::sync::Arc<Ctx>, honour_backoff: bool) -> bool {
                     ctx.log_delivered(chat);
                     pending.complete();
                 }
-                Err(flood) => {
+                Err(Refused::Gone) => {
+                    ctx.log_channel_gone(chat);
+                    pending.complete();
+                }
+                Err(Refused::Later(flood)) => {
                     ctx.log_delivery_failed(chat, flood);
                     failed.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -226,7 +230,29 @@ pub async fn flush_all(ctx: &std::sync::Arc<Ctx>) -> bool {
     true
 }
 
-async fn send(ctx: &Ctx, target: PeerRef, header: &str, body: &str) -> Result<(), Option<u32>> {
+enum Refused {
+    Later(Option<u32>),
+    Gone,
+}
+
+fn refuses_the_bot(error: &grammers_client::InvocationError) -> bool {
+    matches!(
+        error,
+        grammers_client::InvocationError::Rpc(rpc) if matches!(
+            rpc.name.as_str(),
+            "CHANNEL_INVALID"
+                | "CHANNEL_PRIVATE"
+                | "CHAT_WRITE_FORBIDDEN"
+                | "CHAT_ADMIN_REQUIRED"
+                | "CHAT_FORBIDDEN"
+                | "CHAT_ID_INVALID"
+                | "PEER_ID_INVALID"
+                | "USER_BANNED_IN_CHANNEL"
+        )
+    )
+}
+
+async fn send(ctx: &Ctx, target: PeerRef, header: &str, body: &str) -> Result<(), Refused> {
     if let Err(e) = ctx
         .client
         .send_message(
@@ -240,9 +266,13 @@ async fn send(ctx: &Ctx, target: PeerRef, header: &str, body: &str) -> Result<()
         .await
     {
         eprintln!("log: could not write to the log channel: {e}");
-        Err(match e {
-            grammers_client::InvocationError::Rpc(rpc) if rpc.code == 420 => rpc.value,
-            _ => None,
+        Err(if refuses_the_bot(&e) {
+            Refused::Gone
+        } else {
+            Refused::Later(match e {
+                grammers_client::InvocationError::Rpc(rpc) if rpc.code == 420 => rpc.value,
+                _ => None,
+            })
         })
     } else {
         Ok(())
@@ -708,5 +738,53 @@ mod tests {
         ctx.queue_log(CHAT, "two".to_owned());
         ctx.log_delivered(CHAT);
         assert!(ctx.take_logs(true).iter().any(|(chat, _)| *chat == CHAT));
+    }
+
+    #[test]
+    fn only_a_channel_closed_to_the_bot_stops_its_log() {
+        use grammers_client::InvocationError;
+        let refused = |code: i32, name: &str| {
+            InvocationError::Rpc(grammers_client::sender::RpcError {
+                code,
+                name: name.into(),
+                value: None,
+                caused_by: None,
+            })
+        };
+        for name in [
+            "CHANNEL_PRIVATE",
+            "CHANNEL_INVALID",
+            "CHAT_WRITE_FORBIDDEN",
+            "CHAT_ADMIN_REQUIRED",
+        ] {
+            assert!(refuses_the_bot(&refused(400, name)), "{name}");
+        }
+        assert!(!refuses_the_bot(&refused(420, "FLOOD_WAIT")));
+        assert!(!refuses_the_bot(&refused(500, "INTERNAL_SERVER_ERROR")));
+        assert!(!refuses_the_bot(&refused(400, "MESSAGE_TOO_LONG")));
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]
+    async fn a_log_channel_that_refuses_the_bot_holds_nothing() {
+        use std::sync::atomic::Ordering;
+        const CHAT: i64 = -100_777_000_126;
+        let (ctx, _pool) = super::super::live_ctx().await;
+        ctx.queue_log(CHAT, "one".to_owned());
+        ctx.queue_log(CHAT, "two".to_owned());
+        ctx.log_channel_gone(CHAT);
+        let state = ctx.peek(CHAT).expect("the chat has state");
+        assert!(state.logs.lock().unwrap().is_empty(), "what was queued is dropped");
+
+        for _ in 0..300 {
+            ctx.queue_log(CHAT, "more".to_owned());
+        }
+        assert!(state.logs.lock().unwrap().is_empty());
+        assert!(!ctx.cursor_barrier_poisoned());
+        state.log_retry_at.store(0, Ordering::Relaxed);
+        ctx.queue_log(CHAT, "again".to_owned());
+        assert_eq!(*state.logs.lock().unwrap(), vec!["again".to_owned()]);
+        ctx.log_delivered(CHAT);
+        assert!(!state.log_gone.load(Ordering::Relaxed));
     }
 }

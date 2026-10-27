@@ -199,6 +199,11 @@ fn runtime() -> Result<&'static Runtime, nsfw::ModelError> {
         ] {
             publish(&directory.join(name), bytes)?;
         }
+        nsfw::remove_abandoned_partials(&directory, "");
+        nsfw::remove_abandoned_partials(&tessdata, "");
+        if let Some(parent) = directory.parent() {
+            nsfw::remove_superseded_copies(parent, "tesseract-", &directory);
+        }
         let executable = directory.join("tesseract");
         #[cfg(unix)]
         {

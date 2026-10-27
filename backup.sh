@@ -15,6 +15,9 @@ mkdir -p "$DEST"
 stamp=$(date +%Y%m%d-%H%M)
 file="$DEST/groupbot-$name-$stamp.sql.gz"
 
+trap 'rm -f "$file.part"' EXIT
+find "$DEST" -name 'groupbot-*.sql.gz.part' -mmin +60 -delete
+
 pg_dump --no-owner "$DATABASE_URL" | gzip -9 > "$file.part"
 mv "$file.part" "$file"
 

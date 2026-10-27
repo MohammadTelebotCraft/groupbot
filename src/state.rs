@@ -3121,14 +3121,18 @@ impl Settings {
         .await
     }
 
-    pub async fn purge_parked_warning_actions(&self, before: i64, limit: i64) -> Result<u64> {
+    pub async fn purge_stale_warning_actions(&self, before: i64, limit: i64) -> Result<u64> {
         let removed = sqlx::query(
             "DELETE FROM pending_warn_actions
-             WHERE awaiting_rejoin AND lease_token IS NULL AND claimed_until <= $1
+             WHERE lease_token IS NULL
+               AND ((awaiting_rejoin AND claimed_until <= $1)
+                    OR (NOT awaiting_rejoin AND attempts > 0 AND created_at <= $1))
                AND ctid IN (
                  SELECT ctid FROM pending_warn_actions
-                 WHERE awaiting_rejoin AND lease_token IS NULL AND claimed_until <= $1
-                 ORDER BY claimed_until, chat_id, user_id
+                 WHERE lease_token IS NULL
+                   AND ((awaiting_rejoin AND claimed_until <= $1)
+                        OR (NOT awaiting_rejoin AND attempts > 0 AND created_at <= $1))
+                 ORDER BY created_at, chat_id, user_id
                  FOR UPDATE SKIP LOCKED LIMIT $2
              )",
         )
@@ -3360,7 +3364,7 @@ impl Settings {
         Ok(rows)
     }
 
-    pub async fn forget_idle(&self, chats: &[i64], before: i64) -> Result<u64> {
+    pub async fn forget_idle(&self, chats: &[i64], before: i64, today: i64) -> Result<u64> {
         let mut stripe_ids: Vec<usize> = chats
             .iter()
             .map(|chat| self.write_slot_index(*chat))
@@ -3371,6 +3375,14 @@ impl Settings {
         for stripe in stripe_ids {
             _writing.push(self.write_slots[stripe].lock().await);
         }
+        sqlx::query(
+            "UPDATE counters SET day = $2
+             WHERE chat_id = ANY($1) AND seen = 0 AND day = 0",
+        )
+        .bind(chats)
+        .bind(today)
+        .execute(&self.pool)
+        .await?;
         let deleted = sqlx::query_scalar::<_, i64>(
             "WITH removed AS (
                  DELETE FROM counters
@@ -6445,7 +6457,7 @@ mod tests {
             }
         };
 
-        assert_eq!(settings.forget_idle(&[a], 150).await.unwrap(), 1);
+        assert_eq!(settings.forget_idle(&[a], 150, 240).await.unwrap(), 1);
         assert_eq!(left(a).await, 1, "the member still talking must stay");
         assert_eq!(
             left(b).await,
@@ -6453,7 +6465,7 @@ mod tests {
             "a chat that was not named must be untouched"
         );
 
-        assert_eq!(settings.forget_idle(&[b], 150).await.unwrap(), 1);
+        assert_eq!(settings.forget_idle(&[b], 150, 240).await.unwrap(), 1);
         assert_eq!(left(b).await, 0);
 
         sqlx::query(wipe)
@@ -6465,7 +6477,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "isolated PostgreSQL warning parking retention test"]
-    async fn parked_warning_penalties_are_forgotten_past_retention() {
+    async fn stale_warning_penalties_are_forgotten_past_retention() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let chat = -999_999_999_741;
         let settings = Settings::connect(&url).await.unwrap();
@@ -6487,8 +6499,19 @@ mod tests {
         .execute(&settings.pool)
         .await
         .unwrap();
+        sqlx::query(
+            "INSERT INTO pending_warn_actions
+             (chat_id, user_id, penalty, created_at, claimed_until, attempts, lease_token)
+             VALUES ($1, 4, 'ban', 100, 100, 30, NULL),
+                    ($1, 5, 'ban', 300, 300, 30, NULL),
+                    ($1, 6, 'mute', 100, 100, 30, 7)",
+        )
+        .bind(chat)
+        .execute(&settings.pool)
+        .await
+        .unwrap();
 
-        while settings.purge_parked_warning_actions(200, 64).await.unwrap() > 0 {}
+        while settings.purge_stale_warning_actions(200, 64).await.unwrap() > 0 {}
         let left: Vec<i64> = sqlx::query_scalar(
             "SELECT user_id FROM pending_warn_actions WHERE chat_id = $1 ORDER BY user_id",
         )
@@ -6496,7 +6519,7 @@ mod tests {
         .fetch_all(&settings.pool)
         .await
         .unwrap();
-        assert_eq!(left, [2, 3]);
+        assert_eq!(left, [2, 3, 5, 6]);
 
         sqlx::query(wipe)
             .bind(chat)
@@ -6747,15 +6770,16 @@ mod tests {
         settings.clear_seen(chat, 2).await.unwrap();
         settings.set_warns(chat, 3, 1).await.unwrap();
 
-        assert_eq!(settings.forget_idle(&[chat], 150).await.unwrap(), 1);
-        let kept: Vec<i64> = sqlx::query_scalar(
-            "SELECT user_id FROM counters WHERE chat_id = $1 ORDER BY user_id",
+        assert_eq!(settings.forget_idle(&[chat], 150, 240).await.unwrap(), 1);
+        let kept: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT user_id, day FROM counters WHERE chat_id = $1 ORDER BY user_id",
         )
         .bind(chat)
         .fetch_all(&settings.pool)
         .await
         .unwrap();
-        assert_eq!(kept, [2, 3]);
+        assert_eq!(kept, [(2, 200), (3, 240)], "the silent member is dated, not dropped");
+        assert_eq!(settings.forget_idle(&[chat], 240, 330).await.unwrap(), 2);
 
         sqlx::query(wipe)
             .bind(chat)
@@ -7814,7 +7838,7 @@ mod tests {
         assert!(settings.load_pending(0).await.is_err());
         assert!(settings.clear_seen(-1, 1).await.is_err());
         assert!(settings.drop_pending_rows(&[(-1, 1)]).await.is_err());
-        assert!(settings.forget_idle(&[-1], 0).await.is_err());
+        assert!(settings.forget_idle(&[-1], 0, 0).await.is_err());
         assert!(settings.durable_counts().await.is_err());
         assert!(settings.ping().await.is_err());
     }

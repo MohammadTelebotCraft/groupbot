@@ -1136,6 +1136,7 @@ async fn main() -> Result {
     }
     handlers::nsfw::configure_from_environment()
         .map_err(|error| format!("model configuration: {error}"))?;
+    handlers::nsfw::remove_abandoned_scratch(&env::temp_dir());
     if env::args().skip(1).any(|arg| arg == "--model-probe") {
         let classifier = handlers::nsfw::capacity_probe()?;
         let ocr = handlers::ocr::capacity_probe();

@@ -14445,10 +14445,30 @@ index 82b994e..c4681aa 100644
 +    }
 +}
 diff --git a/grammers-session/src/storages/sqlite.rs b/grammers-session/src/storages/sqlite.rs
-index f5b2c5a..4858b90 100644
+index f5b2c5a..827337b 100644
 --- a/grammers-session/src/storages/sqlite.rs
 +++ b/grammers-session/src/storages/sqlite.rs
-@@ -30,10 +30,64 @@ struct Cache {
+@@ -11,6 +11,7 @@ use std::fmt;
+ use std::net::AddrParseError;
+ use std::path::Path;
+ use std::sync::Mutex;
++use std::sync::atomic::{AtomicUsize, Ordering};
+ 
+ use libsql::{named_params, params};
+ use tokio::sync::Mutex as AsyncMutex;
+@@ -23,6 +24,11 @@ use crate::{BoxFuture, DEFAULT_DC, KNOWN_DC_OPTIONS, Session};
+ 
+ const VERSION: i64 = 1;
+ 
++/// New peer rows between two runs of `bound_peers` while the session is open: a tenth of the
++/// users it keeps, so a long run overshoots the bound by that much at most, and the whole-table
++/// sort happens at most once per that many new peers.
++const BOUND_EVERY: usize = 200_000;
++
+ struct Database(libsql::Connection);
+ 
+ struct Cache {
+@@ -30,10 +36,66 @@ struct Cache {
      pub dc_options: HashMap<i32, DcOption>,
  }
  
@@ -14510,34 +14530,76 @@ index f5b2c5a..4858b90 100644
      database: AsyncMutex<Database>,
      cache: Mutex<Cache>,
 +    peers: Mutex<PeerCache>,
++    /// Rows `cache_peer` added since the table was last bounded; see `BOUND_EVERY`.
++    added: AtomicUsize,
  }
  
  #[derive(Debug)]
-@@ -160,6 +214,74 @@ impl Database {
+@@ -160,6 +222,114 @@ impl Database {
          Ok(())
      }
  
-+    /// Keeps `peer_info` from growing without end, once per open.
++    /// Keeps `peer_info` from growing without end: at open, where nothing is waiting on this
++    /// connection, and again every `BOUND_EVERY` rows added while running — a process that is
++    /// not restarted for weeks grew the table past the bound for as long as it ran.
 +    ///
 +    /// The table gains a row for every peer the account has ever been handed, and an account
 +    /// in tens of thousands of groups is handed every member of every one of them. Nothing
 +    /// ever removed a row, so the file grew until it was measured in gigabytes — copied by
 +    /// every backup, and deepening the B-tree that the update task queries per message.
 +    ///
-+    /// **Only users are dropped.** `peer_id` is the bot-API dialog id, so groups and channels
-+    /// are the negative ones, and those must be kept: losing a channel's access hash is losing
-+    /// the ability to reach the chat at all, and there is no update that re-teaches it. They
-+    /// are bounded by how many groups the account is in, which is the bound the rest of the
-+    /// design already accepts. A dropped user is re-learned from the next update carrying them.
++    /// **Users are dropped by age.** `peer_id` is the bot-API dialog id, so groups and channels
++    /// are the negative ones, and those are kept: losing a channel's access hash is losing the
++    /// ability to reach the chat at all, and there is no update that re-teaches it. A dropped
++    /// user is re-learned from the next update carrying them.
 +    ///
-+    /// Done at open rather than on a timer: it is a whole-table sort, it is only ever needed
-+    /// after a long run, and startup is the one moment nothing is waiting on this connection.
++    /// Kept is not unbounded, though: a group the account left keeps its row, and so does every
++    /// channel it was ever handed — about ten a day on one bot. `KEEP_CHATS` is a ceiling against
++    /// that, not a working set: hundreds of years at that pace, and far past the groups a shard
++    /// admits.
 +    async fn bound_peers(&self) {
 +        /// Roughly a hundred megabytes of rows and index, which is far more than the working
 +        /// set of even a very large shard.
 +        const KEEP_USERS: i64 = 2_000_000;
++        const KEEP_CHATS: i64 = 1_000_000;
 +
-+        self.bound_peers_to(KEEP_USERS).await
++        self.bound_peers_to(KEEP_USERS).await;
++        self.bound_chats_to(KEEP_CHATS).await;
++    }
++
++    async fn bound_chats_to(&self, keep: i64) {
++        let count: Option<i64> = match self
++            .fetch_one(
++                "SELECT COUNT(*) FROM peer_info WHERE peer_id < 0",
++                params![],
++                |row| row.get(0),
++            )
++            .await
++        {
++            Ok(count) => count,
++            Err(e) => {
++                log::warn!("session: could not count chats: {e}");
++                return;
++            }
++        };
++        if count.unwrap_or(0) <= keep {
++            return;
++        }
++        match self
++            .0
++            .execute(
++                "DELETE FROM peer_info
++                  WHERE peer_id < 0
++                    AND peer_id NOT IN (
++                        SELECT peer_id FROM peer_info WHERE peer_id < 0
++                         ORDER BY seen DESC LIMIT :keep)",
++                named_params! {":keep": keep},
++            )
++            .await
++        {
++            Ok(dropped) => log::warn!("session: forgot {dropped} chats past the ceiling"),
++            Err(e) => log::warn!("session: could not bound chats: {e}"),
++        }
 +    }
 +
 +    async fn bound_peers_to(&self, keep: i64) {
@@ -14588,7 +14650,7 @@ index f5b2c5a..4858b90 100644
      async fn begin_transaction(&self) -> libsql::Result<libsql::Transaction> {
          self.0.transaction().await
      }
-@@ -209,11 +331,36 @@ impl SqliteSession {
+@@ -209,11 +379,36 @@ impl SqliteSession {
      pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self, SqliteSessionError> {
          let conn = libsql::Builder::new_local(path).build().await?.connect()?;
          let db = Database(conn);
@@ -14626,15 +14688,16 @@ index f5b2c5a..4858b90 100644
              })
              .await?
              .unwrap_or(DEFAULT_DC);
-@@ -243,6 +390,7 @@ impl SqliteSession {
+@@ -243,6 +438,8 @@ impl SqliteSession {
                  home_dc,
                  dc_options,
              }),
 +            peers: Mutex::new(PeerCache::default()),
++            added: AtomicUsize::new(0),
          })
      }
  }
-@@ -328,98 +476,63 @@ impl Session for SqliteSession {
+@@ -328,98 +525,67 @@ impl Session for SqliteSession {
  
      fn peer(&self, peer: PeerId) -> BoxFuture<'_, Result<Option<PeerInfo>, SqliteSessionError>> {
          Box::pin(async move {
@@ -14736,6 +14799,7 @@ index f5b2c5a..4858b90 100644
 +                // populates the cache too, so this happens once per peer per process.
 +                None => self.peer_from_db_cached(peer.id(), key).await?,
 +            };
++            let added = against.is_none();
 +            let merged = match against {
 +                Some(against) => {
 +                    let mut merged = against.clone();
@@ -14764,10 +14828,12 @@ index f5b2c5a..4858b90 100644
 -            let subtype = subtype.map(|s| s as i64);
 -            if subtype.is_some() {
 -                params.push((":subtype".to_owned(), subtype.unwrap()));
--            }
--            stmt.execute(params).await?;
 +
 +            self.write_peer(&merged).await?;
++            if added && self.bound_due(BOUND_EVERY) {
++                self.database.lock().await.bound_peers().await;
+             }
+-            stmt.execute(params).await?;
 +            // Forgotten rather than stored: the row is normalised on the way in and out — a
 +            // subtype of "bot" reads back as `is_self: Some(false)` where the merge left it
 +            // `None` — so the only value guaranteed to match a future read is the one the
@@ -14779,11 +14845,20 @@ index f5b2c5a..4858b90 100644
              Ok(())
          })
      }
-@@ -572,6 +685,132 @@ impl Session for SqliteSession {
+@@ -572,6 +738,141 @@ impl Session for SqliteSession {
      }
  }
  
 +impl SqliteSession {
++    /// Counts one added row; true on every `every`th, which is when the table is bounded again.
++    fn bound_due(&self, every: usize) -> bool {
++        if self.added.fetch_add(1, Ordering::Relaxed) + 1 < every {
++            return false;
++        }
++        self.added.store(0, Ordering::Relaxed);
++        true
++    }
++
 +    /// Reads a peer off disk and remembers it under `key`, in the form the database gives back.
 +    async fn peer_from_db_cached(
 +        &self,
@@ -14912,7 +14987,7 @@ index f5b2c5a..4858b90 100644
  #[cfg(test)]
  mod tests {
      use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
-@@ -698,4 +937,141 @@ mod tests {
+@@ -698,4 +999,186 @@ mod tests {
              }
          );
      }
@@ -15005,6 +15080,51 @@ index f5b2c5a..4858b90 100644
 +            .build()
 +            .unwrap()
 +            .block_on(do_peer_bound_keeps_chats_and_drops_only_the_oldest_users());
++    }
++
++    #[test]
++    fn chats_are_kept_up_to_a_ceiling_and_the_bound_reruns_while_open() {
++        tokio::runtime::Builder::new_current_thread()
++            .enable_all()
++            .build()
++            .unwrap()
++            .block_on(do_chats_are_kept_up_to_a_ceiling_and_the_bound_reruns_while_open());
++    }
++
++    /// A group the account left, and every channel it was handed, kept its row for good.
++    async fn do_chats_are_kept_up_to_a_ceiling_and_the_bound_reruns_while_open() {
++        let path = std::env::temp_dir().join("grammers-chat-ceiling-test.session");
++        let _ = std::fs::remove_file(&path);
++        let session = SqliteSession::open(&path).await.unwrap();
++
++        {
++            let db = session.database.lock().await;
++            for (id, seen) in [(-1001_i64, 1_i64), (-1002, 2), (-1003, 3), (-1004, 4), (10, 1)] {
++                db.0.execute(
++                    "INSERT OR REPLACE INTO peer_info (peer_id, hash, subtype, seen)                      VALUES (:peer_id, 7, NULL, :seen)",
++                    named_params! {":peer_id": id, ":seen": seen},
++                )
++                .await
++                .unwrap();
++            }
++
++            db.bound_chats_to(2).await;
++
++            let mut ids: Vec<i64> = db
++                .fetch_all("SELECT peer_id FROM peer_info", named_params![], |row| {
++                    Ok(row.get::<i64>(0)?)
++                })
++                .await
++                .unwrap();
++            ids.sort();
++            assert_eq!(ids, [-1004, -1003, 10], "the newest chats stay, users are not counted");
++        }
++
++        // Every third added row reruns the bound, then the count starts over.
++        let due: Vec<bool> = (0..6).map(|_| session.bound_due(3)).collect();
++        assert_eq!(due, [false, false, true, false, false, true]);
++
++        let _ = std::fs::remove_file(&path);
 +    }
 +
 +    /// Losing a channel's access hash loses the ability to reach the chat, and no update ever

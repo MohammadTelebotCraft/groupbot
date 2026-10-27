@@ -487,6 +487,75 @@ fn publish_embedded(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> 
     Ok(())
 }
 
+const ABANDONED_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+pub(super) fn remove_abandoned_partials(directory: &std::path::Path, prefix: &str) {
+    remove_abandoned(directory, |name| name.starts_with(prefix) && name.ends_with(".partial"));
+}
+
+const SCRATCH_PREFIXES: &[&str] = &["groupbot-anim-", "groupbot-voice-", "groupbot-tesseract-"];
+
+pub fn remove_abandoned_scratch(directory: &std::path::Path) {
+    remove_abandoned(directory, |name| {
+        SCRATCH_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+    });
+}
+
+fn remove_abandoned(directory: &std::path::Path, ours: impl Fn(&str) -> bool) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        if !ours(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let age = metadata.modified().ok().and_then(|at| now.duration_since(at).ok());
+        if !age.is_some_and(|age| age >= ABANDONED_AFTER) {
+            continue;
+        }
+        let _cleanup_result = if metadata.is_dir() {
+            std::fs::remove_dir_all(entry.path())
+        } else {
+            std::fs::remove_file(entry.path())
+        };
+    }
+}
+
+pub(super) fn remove_superseded_copies(
+    directory: &std::path::Path,
+    prefix: &str,
+    current: &std::path::Path,
+) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let mut others: Vec<(std::time::SystemTime, std::path::PathBuf, bool)> = entries
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(prefix) && !name.ends_with(".partial") && entry.path() != current
+        })
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            let at = metadata.modified().ok()?;
+            Some((at, entry.path(), metadata.is_dir()))
+        })
+        .collect();
+    others.sort_by_key(|(at, _, _)| std::cmp::Reverse(*at));
+    for (_, path, is_dir) in others.into_iter().skip(1) {
+        let _cleanup_result = if is_dir {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+    }
+}
+
 fn embedded_runtime_filename(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     format!("libonnxruntime.so.1.20.1-{digest:x}")
@@ -507,6 +576,10 @@ fn runtime_path() -> Result<std::path::PathBuf, String> {
     path.pop();
     path.push(embedded_runtime_filename(RUNTIME));
     publish_embedded(&path, RUNTIME)?;
+    if let Some(directory) = path.parent() {
+        remove_abandoned_partials(directory, "libonnxruntime.so.");
+        remove_superseded_copies(directory, "libonnxruntime.so.1.20.1", &path);
+    }
     Ok(path)
 }
 
@@ -6620,6 +6693,101 @@ mod tests {
         stage(&staging, |at| std::fs::write(at, b"whole")).unwrap();
         assert!(staging.exists(), "a finished one is left to be published");
         std::fs::remove_file(&staging).unwrap();
+    }
+
+    #[test]
+    fn abandoned_partials_and_superseded_copies_are_cleared() {
+        use std::time::{Duration, SystemTime};
+        let directory = std::env::temp_dir().join(format!(
+            "groupbot-publications-test-{}",
+            std::process::id()
+        ));
+        let _cleanup_result = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let aged = |name: &str, hours: u64| {
+            let path = directory.join(name);
+            if name.starts_with("tesseract-") {
+                std::fs::create_dir_all(path.join("tessdata")).unwrap();
+            } else {
+                std::fs::write(&path, b"bytes").unwrap();
+            }
+            std::fs::File::open(&path)
+                .unwrap()
+                .set_modified(SystemTime::now() - Duration::from_secs(hours * 3600))
+                .unwrap();
+        };
+        aged("libonnxruntime.so.1.20.1-cafe", 240);
+        aged("libonnxruntime.so.1.20.1-beef", 24);
+        aged("libonnxruntime.so.1.20.1-dead", 120);
+        aged("libonnxruntime.so.1.20.1", 1440);
+        aged("libonnxruntime.so.1.20.so.123.0.partial", 2);
+        aged("libonnxruntime.so.1.20.so.124.0.partial", 0);
+        aged("vision.onnx.partial", 2);
+        aged("tesseract-new", 240);
+        aged("tesseract-mid", 24);
+        aged("tesseract-old", 216);
+
+        remove_abandoned_partials(&directory, "libonnxruntime.so.");
+        remove_superseded_copies(
+            &directory,
+            "libonnxruntime.so.1.20.1",
+            &directory.join("libonnxruntime.so.1.20.1-cafe"),
+        );
+        remove_superseded_copies(&directory, "tesseract-", &directory.join("tesseract-new"));
+
+        let mut left: Vec<String> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "libonnxruntime.so.1.20.1-beef",
+                "libonnxruntime.so.1.20.1-cafe",
+                "libonnxruntime.so.1.20.so.124.0.partial",
+                "tesseract-mid",
+                "tesseract-new",
+                "vision.onnx.partial",
+            ]
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn only_media_scratch_left_by_an_earlier_run_is_swept() {
+        use std::time::{Duration, SystemTime};
+        let directory =
+            std::env::temp_dir().join(format!("groupbot-scratch-test-{}", std::process::id()));
+        let _cleanup_result = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let made = |name: &str, hours: u64| {
+            let path = directory.join(name);
+            if name.starts_with("groupbot-tesseract-") {
+                std::fs::create_dir_all(&path).unwrap();
+                std::fs::write(path.join("input.png"), b"png").unwrap();
+            } else {
+                std::fs::write(&path, b"bytes").unwrap();
+            }
+            std::fs::File::open(&path)
+                .unwrap()
+                .set_modified(SystemTime::now() - Duration::from_secs(hours * 3600))
+                .unwrap();
+        };
+        made("groupbot-anim-1-2-3.bin", 2);
+        made("groupbot-voice-1-2-3.ogg", 0);
+        made("groupbot-tesseract-1-2-3", 2);
+        made("unrelated.bin", 2);
+
+        remove_abandoned_scratch(&directory);
+
+        let mut left: Vec<String> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["groupbot-voice-1-2-3.ogg", "unrelated.bin"]);
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[tokio::test]
