@@ -771,7 +771,16 @@ class ShardMigrateTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
             "sys.argv", ["shard_migrate.py"]
         ):
+            self.assertEqual(parse_args().max_tally_rows, 50_000 * 64)
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
+            "sys.argv", ["shard_migrate.py", "--max-chats", "1000"]
+        ):
             self.assertEqual(parse_args().max_tally_rows, DEFAULT_MAX_TALLY_ROWS)
+            self.assertEqual(parse_args().max_counter_rows, 5_000_000)
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
+            "sys.argv", ["shard_migrate.py"]
+        ):
+            self.assertEqual(parse_args().max_counter_rows, 50_000 * 400)
         with mock.patch.dict(os.environ, {"MAX_SHARD_TALLY_ROWS": "20000"}, clear=True), mock.patch(
             "sys.argv", ["shard_migrate.py"]
         ):
@@ -780,7 +789,7 @@ class ShardMigrateTests(unittest.TestCase):
             "sys.argv", ["shard_migrate.py", "--max-tally-rows", "30000"]
         ):
             self.assertEqual(parse_args().max_tally_rows, 30_000)
-        for value in ("9999", "10000001", "not-a-number"):
+        for value in ("9999", "32000001", "not-a-number"):
             with self.subTest(value=value), mock.patch.dict(
                 os.environ, {"MAX_SHARD_TALLY_ROWS": value}, clear=True
             ), mock.patch("sys.argv", ["shard_migrate.py"]), contextlib.redirect_stderr(

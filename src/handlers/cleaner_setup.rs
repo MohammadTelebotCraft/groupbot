@@ -13,8 +13,26 @@ const CHECKED_SLOT: &str = "cln_checked_slot";
 const ACCESS_ALERT: &str = "برای افزودن کلینر، به ربات دسترسی کامل بدهید؛ به ویژه «افزودن کاربران» و «افزودن ادمین جدید». سپس همین دکمه را دوباره بزنید.";
 const UNKNOWN_ACCESS: &str = "دسترسی های ربات خوانده نشد. چند لحظه بعد دوباره دکمه را بزنید.";
 
+const FULL: &str = "cln_full";
+
 pub fn available(ctx: &Ctx) -> bool {
     ctx.cleaner_id().is_some() && ctx.user_client().is_some()
+}
+
+pub async fn note_full(ctx: &Ctx) {
+    if !ctx.settings.is_locked(0, FULL)
+        && let Err(error) = ctx.settings.try_set(0, FULL, true).await
+    {
+        log::warn!("cleaner recommendation: could not record a full cleaner: {error}");
+    }
+}
+
+pub async fn note_room(ctx: &Ctx) {
+    if ctx.settings.is_locked(0, FULL)
+        && let Err(error) = ctx.settings.try_set(0, FULL, false).await
+    {
+        log::warn!("cleaner recommendation: could not clear a full cleaner: {error}");
+    }
 }
 
 pub fn with_button(message: InputMessage, chat: i64, retry: bool) -> InputMessage {
@@ -96,7 +114,7 @@ fn scheduled_slot(now: u64, chat: i64) -> u64 {
 }
 
 pub async fn run_recommendations(ctx: &Arc<Ctx>) {
-    if !available(ctx) || ctx.cleaner_joins_paused() {
+    if !available(ctx) || ctx.cleaner_joins_paused() || ctx.settings.is_locked(0, FULL) {
         return;
     }
     let now = SystemTime::now()

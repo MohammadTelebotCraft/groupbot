@@ -441,7 +441,56 @@ impl Period {
     }
 }
 
-pub struct ChatSettings<'a>(pub(crate) Option<&'a HashMap<String, String>>);
+pub struct ChatSettings<'a>(pub(crate) Option<&'a ChatRows>);
+
+#[derive(Debug, Default)]
+pub(crate) struct ChatRows(Vec<(Box<str>, Box<str>)>);
+
+impl ChatRows {
+    fn find(&self, key: &str) -> std::result::Result<usize, usize> {
+        self.0.binary_search_by(|(held, _)| (**held).cmp(key))
+    }
+
+    pub(crate) fn get(&self, key: &str) -> Option<&str> {
+        self.find(key).ok().map(|at| &*self.0[at].1)
+    }
+
+    fn insert(&mut self, key: &str, value: &str) -> Option<Box<str>> {
+        match self.find(key) {
+            Ok(at) => Some(std::mem::replace(&mut self.0[at].1, value.into())),
+            Err(at) => {
+                self.0.insert(at, (key.into(), value.into()));
+                None
+            }
+        }
+    }
+
+    fn remove(&mut self, key: &str) -> Option<Box<str>> {
+        self.find(key).ok().map(|at| self.0.remove(at).1)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0.iter().map(|(key, value)| (&**key, &**value))
+    }
+}
+
+impl<K: AsRef<str>, V: AsRef<str>> FromIterator<(K, V)> for ChatRows {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(pairs: I) -> Self {
+        let mut row = ChatRows::default();
+        for (key, value) in pairs {
+            row.insert(key.as_ref(), value.as_ref());
+        }
+        row
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CorruptSetting {
@@ -484,13 +533,12 @@ impl ChatSettings<'_> {
     pub fn is_locked(&self, key: &str) -> bool {
         self.0
             .and_then(|map| map.get(key))
-            .is_some_and(|value| value.is_empty())
+            .is_some_and(str::is_empty)
     }
 
     pub fn value(&self, key: &str) -> Option<&str> {
         self.0
             .and_then(|map| map.get(key))
-            .map(String::as_str)
             .filter(|value| !value.is_empty())
     }
 
@@ -521,10 +569,7 @@ impl ChatSettings<'_> {
             return Ok(default);
         };
         if !(range.0..=range.1).contains(&number) {
-            let value = self
-                .0
-                .and_then(|map| map.get(key))
-                .map_or("", String::as_str);
+            let value = self.0.and_then(|map| map.get(key)).unwrap_or("");
             return Err(CorruptSetting::new(
                 key,
                 value,
@@ -551,7 +596,7 @@ pub struct Settings {
     ownership: ownership::Ownership,
     stats_directory: Option<std::path::PathBuf>,
 
-    cache: RwLock<HashMap<i64, HashMap<String, String>>>,
+    cache: RwLock<HashMap<i64, ChatRows>>,
 
     index: RwLock<HashMap<i64, ChatIndex>>,
 
@@ -938,9 +983,25 @@ const ABSOLUTE_MAX_SETTINGS_BYTES: usize = 8 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_COUNTER_ROWS: i64 = 5_000_000;
 const MIN_MAX_COUNTER_ROWS: i64 = 100_000;
 const ABSOLUTE_MAX_COUNTER_ROWS: i64 = 50_000_000;
+const COUNTER_ROWS_PER_CHAT: i64 = 400;
 const DEFAULT_MAX_TALLY_ROWS: i64 = 1_000_000;
 const MIN_MAX_TALLY_ROWS: i64 = 10_000;
-const ABSOLUTE_MAX_TALLY_ROWS: i64 = 10_000_000;
+const ABSOLUTE_MAX_TALLY_ROWS: i64 = 500_000 * MAX_TALLY_ROWS_PER_CHAT;
+
+fn created_index(statement: &str) -> Option<&str> {
+    statement
+        .trim_start()
+        .starts_with("CREATE")
+        .then(|| statement.split_once("IF NOT EXISTS ")?.1.split_whitespace().next())
+        .flatten()
+}
+
+fn per_chat_budget(chats: usize, per_chat: i64, floor: i64, ceiling: i64) -> i64 {
+    i64::try_from(chats)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(per_chat)
+        .clamp(floor, ceiling)
+}
 const DEFAULT_MAX_NOTE_ROWS: i64 = 5_000_000;
 const MIN_MAX_NOTE_ROWS: i64 = 100_000;
 const ABSOLUTE_MAX_NOTE_ROWS: i64 = 50_000_000;
@@ -1110,20 +1171,30 @@ impl Settings {
             })
             .transpose()?;
         let max_counter_rows = max_chats
-            .map(|_| {
+            .map(|chats| {
                 configured_i64(
                     "MAX_SHARD_COUNTER_ROWS",
-                    DEFAULT_MAX_COUNTER_ROWS,
+                    per_chat_budget(
+                        chats,
+                        COUNTER_ROWS_PER_CHAT,
+                        DEFAULT_MAX_COUNTER_ROWS,
+                        ABSOLUTE_MAX_COUNTER_ROWS,
+                    ),
                     MIN_MAX_COUNTER_ROWS,
                     ABSOLUTE_MAX_COUNTER_ROWS,
                 )
             })
             .transpose()?;
         let max_tally_rows = max_chats
-            .map(|_| {
+            .map(|chats| {
                 configured_i64(
                     "MAX_SHARD_TALLY_ROWS",
-                    DEFAULT_MAX_TALLY_ROWS,
+                    per_chat_budget(
+                        chats,
+                        MAX_TALLY_ROWS_PER_CHAT,
+                        DEFAULT_MAX_TALLY_ROWS,
+                        ABSOLUTE_MAX_TALLY_ROWS,
+                    ),
                     MIN_MAX_TALLY_ROWS,
                     ABSOLUTE_MAX_TALLY_ROWS,
                 )
@@ -1228,7 +1299,10 @@ impl Settings {
         )
         .execute(&mut *conn)
         .await?;
-        Self::validate_persisted_settings(&mut conn).await?;
+        let settled = Self::schema_settled(&mut conn).await?;
+        if !settled {
+            Self::validate_persisted_settings(&mut conn).await?;
+        }
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS durable_chats (
                 chat_id BIGINT PRIMARY KEY CHECK (
@@ -1326,6 +1400,7 @@ impl Settings {
         sqlx::query(
             "INSERT INTO started_users_meta (id, total)
              SELECT 0, count(*) FROM started_users
+             WHERE NOT EXISTS (SELECT 1 FROM started_users_meta WHERE id = 0)
              ON CONFLICT (id) DO NOTHING",
         )
         .execute(&mut *conn)
@@ -1429,9 +1504,11 @@ impl Settings {
         )
         .execute(&mut *conn)
         .await?;
-        sqlx::query("ALTER TABLE moderation_cases ADD COLUMN IF NOT EXISTS workflow_key TEXT")
-            .execute(&mut *conn)
-            .await?;
+        if !Self::has_column(&mut conn, "moderation_cases", "workflow_key").await? {
+            sqlx::query("ALTER TABLE moderation_cases ADD COLUMN IF NOT EXISTS workflow_key TEXT")
+                .execute(&mut *conn)
+                .await?;
+        }
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS moderation_case_events (
                 id         BIGSERIAL NOT NULL,
@@ -1554,6 +1631,9 @@ impl Settings {
             .execute(&mut *conn)
             .await?;
         for column in ["warns", "strikes", "struck"] {
+            if Self::has_column(&mut conn, "counters", column).await? {
+                continue;
+            }
             sqlx::query(&format!(
                 "ALTER TABLE counters ADD COLUMN IF NOT EXISTS {column} BIGINT NOT NULL DEFAULT 0"
             ))
@@ -1561,6 +1641,14 @@ impl Settings {
             .await?;
         }
         for index in INDEXES {
+            if let Some(name) = created_index(index)
+                && sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
+                    .bind(name)
+                    .fetch_one(&mut *conn)
+                    .await?
+            {
+                continue;
+            }
             sqlx::query(index).execute(&mut *conn).await?;
         }
         let started_total: i64 =
@@ -1591,17 +1679,21 @@ impl Settings {
             .execute(&mut *conn)
             .await?;
         }
-        Self::validate_counter_rows(&mut conn).await?;
-        Self::validate_tally_rows(&mut conn).await?;
-        Self::validate_projected_counter_capacity(&mut conn, max_counter_rows).await?;
-        Self::validate_projected_tally_capacity(&mut conn, max_tally_rows).await?;
+        if !settled {
+            Self::validate_counter_rows(&mut conn).await?;
+            Self::validate_tally_rows(&mut conn).await?;
+            Self::validate_projected_counter_capacity(&mut conn, max_counter_rows).await?;
+            Self::validate_projected_tally_capacity(&mut conn, max_tally_rows).await?;
+        }
         Self::migrate_counters(&mut conn).await?;
         Self::migrate_per_user(&mut conn).await?;
         Self::migrate_notes(&mut conn).await?;
         Self::migrate_tallies(&mut conn).await?;
         Self::migrate_wipe_split(&mut conn).await?;
-        Self::validate_counter_rows(&mut conn).await?;
-        Self::validate_tally_rows(&mut conn).await?;
+        if !settled {
+            Self::validate_counter_rows(&mut conn).await?;
+            Self::validate_tally_rows(&mut conn).await?;
+        }
         let (counter_rows, tally_rows, note_rows, captcha_rows): (i64, i64, i64, i64) =
             sqlx::query_as(
                 "SELECT (SELECT count(*) FROM counters),
@@ -1618,13 +1710,17 @@ impl Settings {
                 "database has {counter_rows} counter rows, above shard limit {max_counter_rows}"
             )));
         }
-        let largest_counter_chat: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(row_count), 0) FROM (
-                 SELECT count(*) AS row_count FROM counters GROUP BY chat_id
-             ) AS per_chat",
-        )
-        .fetch_one(&mut *conn)
-        .await?;
+        let largest_counter_chat: i64 = if settled {
+            0
+        } else {
+            sqlx::query_scalar(
+                "SELECT COALESCE(MAX(row_count), 0) FROM (
+                     SELECT count(*) AS row_count FROM counters GROUP BY chat_id
+                 ) AS per_chat",
+            )
+            .fetch_one(&mut *conn)
+            .await?
+        };
         if largest_counter_chat > MAX_COUNTER_ROWS_PER_CHAT {
             return Err(sqlx::Error::Protocol(format!(
                 "database has a chat with {largest_counter_chat} counter rows, above per-chat limit {MAX_COUNTER_ROWS_PER_CHAT}"
@@ -1701,7 +1797,9 @@ impl Settings {
         Self::init_durable(&mut conn).await?;
         Self::init_default_rights(&mut conn).await?;
         Self::init_strict(&mut conn).await?;
-        Self::validate_durable_chat_ids(&mut conn).await?;
+        if !settled {
+            Self::validate_durable_chat_ids(&mut conn).await?;
+        }
         sqlx::query(
             "DO $constraint$
              BEGIN
@@ -1718,7 +1816,13 @@ impl Settings {
         )
         .execute(&mut *conn)
         .await?;
-        sqlx::query(
+        let backfill = if settled {
+            "UPDATE durable_chats SET access_hash = hash.value::BIGINT
+             FROM settings AS hash
+             WHERE hash.key = 'hash' AND hash.chat_id = durable_chats.chat_id
+               AND CASE WHEN hash.value ~ '^[+-]?[0-9]+$' THEN hash.value::BIGINT ELSE 0 END
+                   NOT IN (0, durable_chats.access_hash)"
+        } else {
             "INSERT INTO durable_chats (chat_id, access_hash, admitted_at)
              SELECT chats.chat_id, COALESCE(hash.value::BIGINT, 0), 0
              FROM (
@@ -1741,10 +1845,9 @@ impl Settings {
              ON CONFLICT (chat_id) DO UPDATE SET
                  access_hash = CASE WHEN EXCLUDED.access_hash <> 0
                                     THEN EXCLUDED.access_hash
-                                    ELSE durable_chats.access_hash END",
-        )
-        .execute(&mut *conn)
-        .await?;
+                                    ELSE durable_chats.access_hash END"
+        };
+        sqlx::query(backfill).execute(&mut *conn).await?;
         if let Some(max_chats) = max_chats {
             let admitted: i64 = sqlx::query_scalar("SELECT count(*) FROM durable_chats")
                 .fetch_one(&mut *conn)
@@ -1797,20 +1900,22 @@ impl Settings {
         )
         .execute(&mut *conn)
         .await?;
-        sqlx::query("ALTER TABLE tallies DROP CONSTRAINT IF EXISTS tallies_values_valid")
+        if !Self::tally_bound_installed(&mut conn).await? {
+            sqlx::query("ALTER TABLE tallies DROP CONSTRAINT IF EXISTS tallies_values_valid")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(&format!(
+                "ALTER TABLE tallies ADD CONSTRAINT tallies_values_valid CHECK (
+                   (chat_id BETWEEN -999999999999 AND -1
+                    OR chat_id BETWEEN -1997852516352 AND -1000000000001
+                    OR chat_id BETWEEN -4000000000000 AND -2002147483649)
+                   AND octet_length(counter) BETWEEN 1 AND {MAX_TALLY_COUNTER_BYTES}
+                   AND position(':' in counter) = 0 AND day >= 0 AND count >= 0
+                 )"
+            ))
             .execute(&mut *conn)
             .await?;
-        sqlx::query(&format!(
-            "ALTER TABLE tallies ADD CONSTRAINT tallies_values_valid CHECK (
-               (chat_id BETWEEN -999999999999 AND -1
-                OR chat_id BETWEEN -1997852516352 AND -1000000000001
-                OR chat_id BETWEEN -4000000000000 AND -2002147483649)
-               AND octet_length(counter) BETWEEN 1 AND {MAX_TALLY_COUNTER_BYTES}
-               AND position(':' in counter) = 0 AND day >= 0 AND count >= 0
-             )"
-        ))
-        .execute(&mut *conn)
-        .await?;
+        }
         sqlx::query(
             "ALTER TABLE settings ADD COLUMN IF NOT EXISTS owner_chat_id BIGINT
                GENERATED ALWAYS AS (NULLIF(chat_id, 0)) STORED",
@@ -1955,7 +2060,7 @@ impl Settings {
 
         const PAGE: i64 = 50_000;
 
-        let mut cache: HashMap<i64, HashMap<String, String>> = HashMap::new();
+        let mut cache: HashMap<i64, ChatRows> = HashMap::new();
         let mut index: HashMap<i64, ChatIndex> = HashMap::new();
         let (mut at_chat, mut at_key) = (i64::MIN, String::new());
         loop {
@@ -1976,10 +2081,15 @@ impl Settings {
             (at_chat, at_key) = (*last_chat, last_key.clone());
 
             for (chat, key, value) in page {
+                validate_persisted_setting(&key, &value).map_err(|error| {
+                    sqlx::Error::Protocol(format!(
+                        "refusing to start with corrupt setting for chat {chat}: {error}"
+                    ))
+                })?;
                 if let Some((slot, rest)) = indexed_slot(&key) {
                     index.entry(chat).or_default()[slot].push(rest.into());
                 }
-                cache.entry(chat).or_default().insert(key, value);
+                cache.entry(chat).or_default().insert(&key, &value);
             }
         }
         let durable_chats = sqlx::query_as::<_, (i64, i64)>(
@@ -2017,6 +2127,74 @@ impl Settings {
                 .map(|_| std::sync::Arc::new(tokio::sync::Mutex::new(())))
                 .collect(),
         })
+    }
+
+    async fn schema_settled(conn: &mut sqlx::PgConnection) -> Result<bool> {
+        const CONSTRAINTS: &[&str] = &[
+            "counters_identity_valid",
+            "counters_values_valid",
+            "counters_warns_valid",
+            "counters_strikes_valid",
+            "durable_chats_chat_id_valid",
+            "settings_chat_owner",
+            "counters_chat_owner",
+            "notes_chat_owner",
+            "tallies_chat_owner",
+            "pending_deletes_chat_owner",
+            "default_rights_chat_owner",
+            "pending_captchas_chat_owner",
+            "moderation_cases_chat_owner",
+            "moderation_case_events_chat_owner",
+            "pending_warn_actions_chat_owner",
+            "pending_strict_actions_chat_owner",
+            "pending_rank_awards_chat_owner",
+            "image_filters_chat_owner",
+        ];
+        const MARKS: &[&str] = &[
+            "counters_migrated",
+            "per_user_migrated",
+            "notes_table_migrated",
+            "tallies_migrated",
+            "wipe_split_migrated",
+        ];
+        let installed: bool = sqlx::query_scalar(
+            "SELECT (SELECT count(DISTINCT conname) FROM pg_constraint
+                     WHERE contype IN ('c', 'f') AND convalidated
+                       AND connamespace = current_schema()::text::regnamespace
+                       AND conname = ANY($1))
+                    = cardinality($1)
+                AND (SELECT count(*) FROM settings WHERE chat_id = 0 AND key = ANY($2))
+                    = cardinality($2)",
+        )
+        .bind(CONSTRAINTS)
+        .bind(MARKS)
+        .fetch_one(&mut *conn)
+        .await?;
+        Ok(installed && Self::tally_bound_installed(conn).await?)
+    }
+
+    async fn has_column(conn: &mut sqlx::PgConnection, table: &str, column: &str) -> Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                            WHERE table_schema = current_schema()
+                              AND table_name = $1 AND column_name = $2)",
+        )
+        .bind(table)
+        .bind(column)
+        .fetch_one(&mut *conn)
+        .await
+    }
+
+    async fn tally_bound_installed(conn: &mut sqlx::PgConnection) -> Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_constraint
+                            WHERE conrelid = 'tallies'::regclass AND convalidated
+                              AND conname = 'tallies_values_valid'
+                              AND strpos(pg_get_constraintdef(oid), $1) > 0)",
+        )
+        .bind(format!("(octet_length(counter) <= {MAX_TALLY_COUNTER_BYTES})"))
+        .fetch_one(&mut *conn)
+        .await
     }
 
     async fn validate_durable_chat_ids(conn: &mut sqlx::PgConnection) -> Result<()> {
@@ -3364,10 +3542,53 @@ impl Settings {
         Ok(rows)
     }
 
-    pub async fn forget_idle(&self, chats: &[i64], before: i64, today: i64) -> Result<u64> {
-        let mut stripe_ids: Vec<usize> = chats
+    pub async fn date_uncounted(
+        &self,
+        scope: Option<&[i64]>,
+        today: i64,
+        limit: i64,
+    ) -> Result<u64> {
+        let dated = sqlx::query(
+            "UPDATE counters SET day = CASE WHEN seen > 0 THEN seen ELSE $1 END, today = 0
+             WHERE (chat_id, user_id) IN (
+                 SELECT chat_id, user_id FROM counters
+                 WHERE day = 0 AND ($3::BIGINT[] IS NULL OR chat_id = ANY($3))
+                 LIMIT $2
+             ) AND day = 0",
+        )
+        .bind(today)
+        .bind(limit)
+        .bind(scope)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(dated)
+    }
+
+    pub async fn forget_idle(
+        &self,
+        scope: Option<&[i64]>,
+        before: i64,
+        limit: i64,
+    ) -> Result<(u64, bool)> {
+        let quiet: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT chat_id, user_id FROM counters
+             WHERE day > 0 AND day <= $1 AND (seen = 0 OR seen <= $1)
+               AND ($3::BIGINT[] IS NULL OR chat_id = ANY($3))
+             ORDER BY day, chat_id LIMIT $2",
+        )
+        .bind(before)
+        .bind(limit)
+        .bind(scope)
+        .fetch_all(&self.pool)
+        .await?;
+        let full = i64::try_from(quiet.len()).map_or(true, |found| found >= limit);
+        if quiet.is_empty() {
+            return Ok((0, false));
+        }
+        let mut stripe_ids: Vec<usize> = quiet
             .iter()
-            .map(|chat| self.write_slot_index(*chat))
+            .map(|(chat, _)| self.write_slot_index(*chat))
             .collect();
         stripe_ids.sort_unstable();
         stripe_ids.dedup();
@@ -3375,19 +3596,14 @@ impl Settings {
         for stripe in stripe_ids {
             _writing.push(self.write_slots[stripe].lock().await);
         }
-        sqlx::query(
-            "UPDATE counters SET day = $2
-             WHERE chat_id = ANY($1) AND seen = 0 AND day = 0",
-        )
-        .bind(chats)
-        .bind(today)
-        .execute(&self.pool)
-        .await?;
+        let (chats, users): (Vec<i64>, Vec<i64>) = quiet.into_iter().unzip();
         let deleted = sqlx::query_scalar::<_, i64>(
             "WITH removed AS (
                  DELETE FROM counters
-                 WHERE chat_id = ANY($1)
-                   AND ((seen > 0 AND seen <= $2) OR (seen = 0 AND day > 0 AND day <= $2))
+                 WHERE (chat_id, user_id) IN (
+                         SELECT chat, member FROM UNNEST($1::BIGINT[], $2::BIGINT[])
+                             AS quiet(chat, member))
+                   AND day > 0 AND day <= $3 AND (seen = 0 OR seen <= $3)
                  RETURNING 1
              ), adjusted AS (
                  UPDATE durable_counts
@@ -3399,23 +3615,34 @@ impl Settings {
              )
              SELECT deleted FROM adjusted",
         )
-        .bind(chats)
+        .bind(&chats)
+        .bind(&users)
         .bind(before)
         .fetch_one(&self.pool)
         .await?;
-        nonnegative_counter("deleted idle member count", deleted)
+        Ok((
+            nonnegative_counter("deleted idle member count", deleted)?,
+            full,
+        ))
     }
 
-    pub async fn chats_marked_before(&self, key: &str, day: i64, limit: i64) -> Result<Vec<i64>> {
+    pub async fn chats_marked_before(
+        &self,
+        key: &str,
+        day: i64,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<i64>> {
         sqlx::query_scalar(
             "SELECT chat_id FROM settings
-             WHERE key = $1 AND chat_id <> 0
+             WHERE key = $1 AND chat_id <> 0 AND chat_id > $4
                AND CASE WHEN value ~ '^[0-9]{1,18}$' THEN value::bigint <= $2 ELSE FALSE END
              ORDER BY chat_id LIMIT $3",
         )
         .bind(key)
         .bind(day)
         .bind(limit)
+        .bind(after)
         .fetch_all(&self.pool)
         .await
     }
@@ -3800,7 +4027,7 @@ impl Settings {
         let (changes, old_rows, new_rows, old_bytes, new_bytes, requested_hash) = {
             let cache = self.cache.read().unwrap();
             let current = cache.get(&chat);
-            let old_rows = current.map_or(0, HashMap::len);
+            let old_rows = current.map_or(0, ChatRows::len);
             let mut changes = Vec::with_capacity(mutations.len());
             let mut removed_rows = 0usize;
             let mut added_rows = 0usize;
@@ -3809,7 +4036,7 @@ impl Settings {
 
             for mutation in mutations.iter().copied() {
                 let key = mutation.key();
-                let previous = current.and_then(|map| map.get(key)).cloned();
+                let previous = current.and_then(|map| map.get(key)).map(str::to_owned);
                 let next = match mutation {
                     SettingMutation::Put { value, .. } => Some(value.to_owned()),
                     SettingMutation::PutIfEmpty {
@@ -3818,7 +4045,7 @@ impl Settings {
                         ..
                     } if current
                         .and_then(|map| map.get(condition_key))
-                        .is_none_or(String::is_empty) =>
+                        .is_none_or(str::is_empty) =>
                     {
                         Some(value.to_owned())
                     }
@@ -3877,7 +4104,7 @@ impl Settings {
 
             let requested_hash = match changes.iter().find(|change| change.key == "hash") {
                 Some(change) => change.next.clone(),
-                None => current.and_then(|map| map.get("hash")).cloned(),
+                None => current.and_then(|map| map.get("hash")).map(str::to_owned),
             };
             (
                 changes,
@@ -3962,10 +4189,7 @@ impl Settings {
             for change in &changes {
                 match change.next.as_ref() {
                     Some(value) => {
-                        cache
-                            .entry(chat)
-                            .or_default()
-                            .insert(change.key.clone(), value.clone());
+                        cache.entry(chat).or_default().insert(&change.key, value);
                     }
                     None => {
                         if let Some(settings) = cache.get_mut(&chat) {
@@ -3974,7 +4198,7 @@ impl Settings {
                     }
                 }
             }
-            if chat != 0 && cache.get(&chat).is_some_and(HashMap::is_empty) {
+            if chat != 0 && cache.get(&chat).is_some_and(ChatRows::is_empty) {
                 cache.remove(&chat);
             }
         }
@@ -4065,12 +4289,12 @@ impl Settings {
             let cache = self.cache.read().unwrap();
             for chat in ids.iter().copied() {
                 let existing = cache.get(&chat).and_then(|map| map.get(key));
-                if existing.is_some_and(String::is_empty) {
+                if existing.is_some_and(str::is_empty) {
                     db_ids.push(chat);
                     continue;
                 }
                 if existing.is_none() {
-                    let map_len = cache.get(&chat).map_or(0, HashMap::len);
+                    let map_len = cache.get(&chat).map_or(0, ChatRows::len);
                     let chat_is_new = !self.chat_is_configured(&cache, chat);
                     let chat_limit_reached =
                         chat_is_new && self.max_chats.is_some_and(|max| projected_chats >= max);
@@ -4093,7 +4317,7 @@ impl Settings {
                     projected_bytes = projected_bytes.saturating_add(bytes);
                     projected_chats = projected_chats.saturating_add(usize::from(chat_is_new));
                 }
-                changes.push((chat, existing.cloned()));
+                changes.push((chat, existing.map(str::to_owned)));
                 db_ids.push(chat);
             }
         } else {
@@ -4101,7 +4325,7 @@ impl Settings {
             changes.extend(ids.iter().filter_map(|chat| {
                 cache
                     .get(chat)
-                    .and_then(|map| map.get(key).cloned())
+                    .and_then(|map| map.get(key).map(str::to_owned))
                     .map(|previous| (*chat, Some(previous)))
             }));
         }
@@ -4173,7 +4397,7 @@ impl Settings {
                 let chat = *chat;
                 let map = cache.entry(chat).or_default();
                 if on {
-                    let old = map.insert(key.to_owned(), String::new());
+                    let old = map.insert(key, "");
                     let old_bytes = old
                         .as_deref()
                         .map(|value| setting_size(key, value))
@@ -4526,10 +4750,9 @@ impl Settings {
         let (chats, configured, members, active, today, total): (i64, i64, i64, i64, i64, i64) =
             sqlx::query_as(
                 "SELECT
-               (SELECT count(*) FROM (SELECT chat_id FROM settings WHERE chat_id < 0
-                                      UNION SELECT chat_id FROM counters) t),
+               (SELECT count(*) FROM durable_chats),
                (SELECT count(*) FROM settings WHERE key = 'owner'),
-               (SELECT count(*) FROM counters),
+               (SELECT counter_rows FROM durable_counts WHERE id = 0),
                (SELECT count(DISTINCT chat_id) FROM counters WHERE day = $1 AND today > 0),
                -- `sum` over a bigint answers `numeric`, which does not decode as an i64.
                -- The cast is the fix and it cannot overflow: both sides are bigints already.
@@ -5145,13 +5368,13 @@ impl Settings {
         self.durable_chats.read().unwrap().len()
     }
 
-    fn configured_chat_count(&self, _cache: &HashMap<i64, HashMap<String, String>>) -> usize {
+    fn configured_chat_count(&self, _cache: &HashMap<i64, ChatRows>) -> usize {
         self.durable_chats.read().unwrap().len()
     }
 
     fn chat_is_configured(
         &self,
-        _cache: &HashMap<i64, HashMap<String, String>>,
+        _cache: &HashMap<i64, ChatRows>,
         chat: i64,
     ) -> bool {
         chat == 0 || self.durable_chats.read().unwrap().contains_key(&chat)
@@ -5176,7 +5399,7 @@ impl Settings {
         };
         map.iter()
             .filter(|(_, value)| !value.is_empty())
-            .filter_map(|(key, value)| Some((key.strip_prefix(prefix)?.to_owned(), value.clone())))
+            .filter_map(|(key, value)| Some((key.strip_prefix(prefix)?.to_owned(), value.to_owned())))
             .collect()
     }
 
@@ -5472,12 +5695,15 @@ mod tests {
 
     #[test]
     fn typed_settings_distinguish_absence_from_corruption() {
-        let mut map: HashMap<String, String> = HashMap::new();
-        map.insert("low".to_owned(), "1".to_owned());
-        map.insert("high".to_owned(), "999".to_owned());
-        map.insert("fine".to_owned(), "7".to_owned());
-        map.insert("empty".to_owned(), String::new());
-        map.insert("words".to_owned(), "زیاد".to_owned());
+        let map: ChatRows = [
+            ("low", "1"),
+            ("high", "999"),
+            ("fine", "7"),
+            ("empty", ""),
+            ("words", "زیاد"),
+        ]
+        .into_iter()
+        .collect();
         let settings = ChatSettings(Some(&map));
 
         assert_eq!(settings.number_checked("fine", 8, (2, 50)), Ok(7));
@@ -5487,6 +5713,26 @@ mod tests {
         assert!(settings.number_checked("empty", 8, (2, 50)).is_err());
         assert!(settings.number_checked("words", 8, (2, 50)).is_err());
         assert_eq!(ChatSettings(None).number_checked("fine", 8, (2, 50)), Ok(8));
+    }
+
+    #[test]
+    fn every_startup_index_is_known_by_name() {
+        for statement in INDEXES {
+            match created_index(statement) {
+                Some(name) => {
+                    assert!(statement.trim_start().starts_with("CREATE"), "{statement}");
+                    assert!(
+                        name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                        "{name}"
+                    );
+                }
+                None => assert!(statement.starts_with("DROP INDEX IF EXISTS"), "{statement}"),
+            }
+        }
+        assert_eq!(
+            created_index("CREATE INDEX IF NOT EXISTS a_b\n     ON t (x)"),
+            Some("a_b")
+        );
     }
 
     #[test]
@@ -5545,12 +5791,22 @@ mod tests {
 
     #[test]
     fn flags_and_values_share_the_map() {
-        let mut map: HashMap<String, String> = HashMap::new();
-        map.insert("links".to_owned(), String::new());
-        map.insert("owner".to_owned(), "42".to_owned());
-        assert!(map.get("links").is_some_and(|v| v.is_empty()));
-        assert!(!map.get("owner").is_some_and(|v| v.is_empty()));
-        assert_eq!(map.get("owner").map(String::as_str), Some("42"));
+        let mut map = ChatRows::default();
+        assert_eq!(map.insert("owner", "41"), None);
+        assert_eq!(map.insert("links", ""), None);
+        assert_eq!(map.insert("owner", "42").as_deref(), Some("41"));
+        assert!(map.get("links").is_some_and(str::is_empty));
+        assert!(!map.get("owner").is_some_and(str::is_empty));
+        assert_eq!(map.get("owner"), Some("42"));
+        assert_eq!(map.get("absent"), None);
+        assert_eq!(
+            map.iter().collect::<Vec<_>>(),
+            [("links", ""), ("owner", "42")],
+            "kept sorted by key"
+        );
+        assert_eq!(map.remove("links").as_deref(), Some(""));
+        assert_eq!(map.remove("links"), None);
+        assert_eq!(map.len(), 1);
     }
 
     #[tokio::test]
@@ -6457,7 +6713,10 @@ mod tests {
             }
         };
 
-        assert_eq!(settings.forget_idle(&[a], 150, 240).await.unwrap(), 1);
+        assert_eq!(
+            settings.forget_idle(Some(&[a][..]), 150, 64).await.unwrap(),
+            (1, false)
+        );
         assert_eq!(left(a).await, 1, "the member still talking must stay");
         assert_eq!(
             left(b).await,
@@ -6465,8 +6724,21 @@ mod tests {
             "a chat that was not named must be untouched"
         );
 
-        assert_eq!(settings.forget_idle(&[b], 150, 240).await.unwrap(), 1);
+        settings.bump(vec![spoke(b, 2)], 100, 14, 3).await.unwrap();
+        assert_eq!(
+            settings.forget_idle(Some(&both[..]), 150, 1).await.unwrap(),
+            (1, true)
+        );
+        assert_eq!(
+            settings.forget_idle(Some(&both[..]), 150, 1).await.unwrap(),
+            (1, true)
+        );
+        assert_eq!(
+            settings.forget_idle(Some(&both[..]), 150, 1).await.unwrap(),
+            (0, false)
+        );
         assert_eq!(left(b).await, 0);
+        assert_eq!(left(a).await, 1);
 
         sqlx::query(wipe)
             .bind(&both)
@@ -6678,9 +6950,16 @@ mod tests {
                 .is_empty()
         );
 
-        let before = |day| settings.chats_marked_before("left_day", day, 1_000);
+        let before = |day| settings.chats_marked_before("left_day", day, i64::MIN, 1_000);
         assert!(!before(299).await.unwrap().contains(&marked));
         assert!(before(300).await.unwrap().contains(&marked));
+        assert!(
+            !settings
+                .chats_marked_before("left_day", 300, marked, 1_000)
+                .await
+                .unwrap()
+                .contains(&marked)
+        );
         wipe_test_chats(&url, &all).await;
     }
 
@@ -6770,7 +7049,15 @@ mod tests {
         settings.clear_seen(chat, 2).await.unwrap();
         settings.set_warns(chat, 3, 1).await.unwrap();
 
-        assert_eq!(settings.forget_idle(&[chat], 150, 240).await.unwrap(), 1);
+        let scope: &[i64] = &[chat];
+        assert_eq!(
+            settings.date_uncounted(Some(scope), 240, 64).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            settings.forget_idle(Some(scope), 150, 64).await.unwrap(),
+            (1, false)
+        );
         let kept: Vec<(i64, i64)> = sqlx::query_as(
             "SELECT user_id, day FROM counters WHERE chat_id = $1 ORDER BY user_id",
         )
@@ -6779,7 +7066,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(kept, [(2, 200), (3, 240)], "the silent member is dated, not dropped");
-        assert_eq!(settings.forget_idle(&[chat], 240, 330).await.unwrap(), 2);
+        assert_eq!(
+            settings.date_uncounted(Some(scope), 330, 64).await.unwrap(),
+            0
+        );
+        assert_eq!(
+            settings.forget_idle(Some(scope), 240, 64).await.unwrap(),
+            (2, false)
+        );
 
         sqlx::query(wipe)
             .bind(chat)
@@ -7838,9 +8132,43 @@ mod tests {
         assert!(settings.load_pending(0).await.is_err());
         assert!(settings.clear_seen(-1, 1).await.is_err());
         assert!(settings.drop_pending_rows(&[(-1, 1)]).await.is_err());
-        assert!(settings.forget_idle(&[-1], 0, 0).await.is_err());
+        assert!(settings.forget_idle(Some(&[-1][..]), 0, 1).await.is_err());
+        assert!(settings.date_uncounted(Some(&[-1][..]), 0, 1).await.is_err());
         assert!(settings.durable_counts().await.is_err());
         assert!(settings.ping().await.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated PostgreSQL startup validation test"]
+    async fn a_corrupt_typed_setting_still_refuses_a_settled_start() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let settings = Settings::connect(&url).await.unwrap();
+        let chat = -999_999_997_702_i64;
+        admit_test_chats(&settings, &[chat]).await;
+        assert!(
+            Settings::schema_settled(&mut settings.pool.acquire().await.unwrap())
+                .await
+                .unwrap(),
+            "the start under test is a settled one"
+        );
+        sqlx::query(
+            "INSERT INTO settings (chat_id, key, value) VALUES ($1, 'warn_limit', 'many')
+             ON CONFLICT (chat_id, key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(chat)
+        .execute(&settings.pool)
+        .await
+        .unwrap();
+        let refused = Settings::connect(&url).await;
+        sqlx::query("DELETE FROM settings WHERE chat_id = $1 AND key = 'warn_limit'")
+            .bind(chat)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+        let Err(error) = refused else {
+            panic!("a corrupt typed setting was loaded into the mirror");
+        };
+        assert!(error.to_string().contains("corrupt setting"), "{error}");
     }
 
     #[tokio::test]

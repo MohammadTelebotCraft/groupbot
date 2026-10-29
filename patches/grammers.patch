@@ -4541,10 +4541,10 @@ index 73bb941..13982b8 100644
 +    }
 +}
 diff --git a/grammers-client/src/message/input_message.rs b/grammers-client/src/message/input_message.rs
-index 5ef23d4..598ccb7 100644
+index 5ef23d4..9d6a45c 100644
 --- a/grammers-client/src/message/input_message.rs
 +++ b/grammers-client/src/message/input_message.rs
-@@ -147,6 +147,33 @@ impl InputMessage {
+@@ -147,6 +147,47 @@ impl InputMessage {
          self
      }
  
@@ -4575,18 +4575,90 @@ index 5ef23d4..598ccb7 100644
 +        self
 +    }
 +
++    /// Puts `prefix` in front of the text, moving every formatting entity along with the text
++    /// it covers. The prefix itself is left unformatted.
++    pub fn prepend_text(mut self, prefix: &str) -> Self {
++        let shift = prefix.encode_utf16().count() as i32;
++        if shift == 0 {
++            return self;
++        }
++        self.text.insert_str(0, prefix);
++        for entity in &mut self.entities {
++            shift_entity(entity, shift);
++        }
++        self
++    }
++
      /// The message identifier to which this message should reply to, if any.
      ///
      /// Otherwise, this message will not be a reply to any other.
-@@ -425,3 +452,51 @@ impl From<super::Message> for InputMessage {
+@@ -425,3 +466,109 @@ impl From<super::Message> for InputMessage {
          }
      }
  }
++
++/// Moves one entity `by` UTF-16 units. The match is exhaustive on purpose: a constructor added
++/// to the schema fails the build here instead of keeping a stale offset.
++fn shift_entity(entity: &mut tl::enums::MessageEntity, by: i32) {
++    use tl::enums::MessageEntity as E;
++    macro_rules! shift {
++        ($($variant:ident),* $(,)?) => {
++            match entity {
++                $(E::$variant(e) => e.offset += by,)*
++            }
++        };
++    }
++    shift!(
++        Unknown,
++        Mention,
++        Hashtag,
++        BotCommand,
++        Url,
++        Email,
++        Bold,
++        Italic,
++        Code,
++        Pre,
++        TextUrl,
++        MentionName,
++        InputMessageEntityMentionName,
++        Phone,
++        Cashtag,
++        Underline,
++        Strike,
++        BankCard,
++        Spoiler,
++        CustomEmoji,
++        Blockquote,
++        FormattedDate,
++        DiffInsert,
++        DiffReplace,
++        DiffDelete,
++    );
++}
 +
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
 +    use crate::message::Button;
++
++    #[test]
++    fn prepended_text_carries_the_entities_along() {
++        let bold = tl::enums::MessageEntity::Bold(tl::types::MessageEntityBold {
++            offset: 2,
++            length: 3,
++        });
++        let message = InputMessage::new()
++            .text("a b😀c")
++            .fmt_entities([bold])
++            .prepend_text("😀، ");
++        assert_eq!(message.text, "😀، a b😀c");
++        assert_eq!(message.entities[0].offset(), 6);
++        assert_eq!(message.entities[0].length(), 3);
++
++        let untouched = InputMessage::new().text("x").prepend_text("");
++        assert_eq!(untouched.text, "x");
++    }
 +
 +    #[test]
 +    fn callback_prefix_rewrite_is_exact_and_keeps_payload_length() {
@@ -9152,10 +9224,10 @@ index 165e5a0..add8d19 100644
 +    }
 +}
 diff --git a/grammers-mtsender/src/configuration.rs b/grammers-mtsender/src/configuration.rs
-index e27c257..1588c06 100644
+index e27c257..418512f 100644
 --- a/grammers-mtsender/src/configuration.rs
 +++ b/grammers-mtsender/src/configuration.rs
-@@ -59,19 +59,64 @@ pub struct ConnectionParams {
+@@ -59,19 +59,82 @@ pub struct ConnectionParams {
      /// Maximum number of updates that can be buffered in the internal channel
      /// between the network senders and the updates receiver.
      ///
@@ -9218,10 +9290,28 @@ index e27c257..1588c06 100644
 +    ///
 +    /// `usize::MAX` by default, which keeps every checkpoint.
 +    pub max_dormant_channels: usize,
++
++    /// How many channel differences may be in flight at once, at most, while socket updates
++    /// keep being received. The receiver opens up to it gradually and backs off on flood waits,
++    /// so this is a ceiling, not a rate to hold.
++    ///
++    /// By default (`1`) a channel's difference is fetched one at a time, awaited inline, and no
++    /// socket update is read until every pending difference has ended. An account in tens of
++    /// thousands of busy channels finds a gap in thousands of them after a restart, so it then
++    /// delivers nothing live for that many round trips, while its socket buffer fills and every
++    /// update it drops is one more channel to recover.
++    ///
++    /// Past `1`, up to this many differences run at once — starting at four, one more after each
++    /// window of successes, half as many after a flood wait — and the socket is read while they do.
++    /// An update for a channel whose difference is running is postponed until it ends and then
++    /// processed by its `pts`, so the difference's own copy is never delivered twice (see
++    /// `MessageBoxes::set_concurrent_channel_differences`). Account-wide differences are still
++    /// fetched one at a time with the socket held, as before.
++    pub concurrent_channel_differences: usize,
  }
  
  /// This trait controls how the [`SenderPoolRunner`] should behave when
-@@ -147,16 +192,22 @@ impl Default for ConnectionParams {
+@@ -147,16 +210,23 @@ impl Default for ConnectionParams {
              #[cfg(feature = "proxy")]
              proxy_url: None,
              retry_policy: Box::new(super::AutoSleep::default()),
@@ -9243,6 +9333,7 @@ index e27c257..1588c06 100644
 +            catch_up: false,
 +            drop_idle_channels: false,
 +            max_dormant_channels: usize::MAX,
++            concurrent_channel_differences: 1,
 +        }
      }
  }
@@ -9944,7 +10035,7 @@ index 619eda2..d9fccb5 100644
 +    }
  }
 diff --git a/grammers-mtsender/src/sender_pool.rs b/grammers-mtsender/src/sender_pool.rs
-index 2d90b8d..ce1a704 100644
+index 2d90b8d..7e71463 100644
 --- a/grammers-mtsender/src/sender_pool.rs
 +++ b/grammers-mtsender/src/sender_pool.rs
 @@ -6,18 +6,20 @@
@@ -10536,7 +10627,7 @@ index 2d90b8d..ce1a704 100644
                  .debug_struct("Invoke")
                  .field("dc_id", dc_id)
                  .field(
-@@ -603,3 +898,287 @@ impl fmt::Debug for Request {
+@@ -603,3 +898,456 @@ impl fmt::Debug for Request {
          }
      }
  }
@@ -10823,24 +10914,194 @@ index 2d90b8d..ce1a704 100644
 +            ForwardUpdate::Closed
 +        );
 +    }
++
++    fn channel_socket_update(channel_id: i64, pts: i32) -> UpdatesLike {
++        UpdatesLike::Updates(
++            tl::types::Updates {
++                updates: vec![channel_delete(channel_id, pts)],
++                users: Vec::new(),
++                chats: Vec::new(),
++                date: 1,
++                seq: 0,
++            }
++            .into(),
++        )
++    }
++
++    fn channel_delete(channel_id: i64, pts: i32) -> tl::enums::Update {
++        tl::types::UpdateDeleteChannelMessages {
++            channel_id,
++            messages: Vec::new(),
++            pts,
++            pts_count: 1,
++        }
++        .into()
++    }
++
++    /// The channel a serialized `updates.getChannelDifference` asks about: constructor, flags,
++    /// then the `inputChannel` constructor and its id.
++    fn requested_channel(body: &[u8]) -> i64 {
++        i64::from_le_bytes(body[12..20].try_into().unwrap())
++    }
++
++    /// End to end through the receiver: after a restart two channels gap; both differences are
++    /// on the wire before either answers, a third channel's update is delivered while they are,
++    /// and a socket update for a channel being fetched comes out once, after its difference —
++    /// where the serial loop delivered nothing live until every difference had ended.
++    #[tokio::test]
++    async fn concurrent_channel_differences_overlap_and_the_socket_keeps_flowing() {
++        use grammers_session::Session;
++        use grammers_session::types::{ChannelState, PeerAuth, PeerInfo, UpdateState, UpdatesState};
++        use grammers_tl_types::Serializable;
++
++        let session = Arc::new(MemorySession::default());
++        for id in [1, 2] {
++            session
++                .cache_peer(&PeerInfo::Channel {
++                    id,
++                    auth: Some(PeerAuth::from_hash(7)),
++                    kind: None,
++                })
++                .await
++                .unwrap();
++        }
++        session
++            .set_update_state(UpdateState::All(UpdatesState {
++                pts: 34,
++                qts: 34,
++                date: 1,
++                seq: 1,
++                channels: vec![ChannelState { id: 1, pts: 10 }, ChannelState { id: 2, pts: 20 }],
++            }))
++            .await
++            .unwrap();
++        let mut pool = SenderPool::new(Arc::clone(&session), 1);
++        let (socket, updates) = mpsc::channel(16);
++        let mut receiver = crate::UpdatesReceiver::create(
++            pool.handle.thin.clone(),
++            grammers_session::storages::erase(Arc::clone(&session)),
++            updates,
++            crate::UpdatesConfiguration {
++                catch_up: true,
++                drop_idle_channels: true,
++                max_dormant_channels: usize::MAX,
++                concurrent_channel_differences: 8,
++            },
++        )
++        .await
++        .unwrap();
++        let (delivered, mut out) = mpsc::unbounded_channel();
++        let receiving = tokio::spawn(async move {
++            while let Ok((updates, _, _)) = receiver.next().await {
++                if !updates.is_empty() {
++                    let _ = delivered.send(
++                        updates.into_iter().map(|(update, _)| update).collect::<Vec<_>>(),
++                    );
++                }
++            }
++        });
++        let within = Duration::from_secs(5);
++
++        // The account-wide catch-up first, as before.
++        let Request::Invoke { tx, .. } = tokio::time::timeout(within, pool.runner.request_rx.recv())
++            .await
++            .unwrap()
++            .unwrap()
++        else {
++            panic!()
++        };
++        tx.send(Ok(tl::enums::updates::Difference::Empty(
++            tl::types::updates::DifferenceEmpty { date: 1, seq: 1 },
++        )
++        .to_bytes()))
++        .unwrap();
++
++        socket.send(channel_socket_update(1, 13)).await.unwrap();
++        socket.send(channel_socket_update(2, 25)).await.unwrap();
++        let mut asked = HashMap::new();
++        for _ in 0..2 {
++            let Request::Invoke { tx, body, .. } =
++                tokio::time::timeout(within, pool.runner.request_rx.recv())
++                    .await
++                    .expect("both differences are in flight before either is answered")
++                    .unwrap()
++            else {
++                panic!()
++            };
++            asked.insert(requested_channel(&body), tx);
++        }
++        assert_eq!(asked.len(), 2);
++
++        socket.send(channel_socket_update(1, 14)).await.unwrap();
++        socket.send(channel_socket_update(3, 5)).await.unwrap();
++        assert_eq!(
++            tokio::time::timeout(within, out.recv()).await.unwrap().unwrap(),
++            vec![channel_delete(3, 5)],
++            "a channel nobody is fetching is not held behind the others"
++        );
++
++        asked
++            .remove(&2)
++            .unwrap()
++            .send(Ok(tl::enums::updates::ChannelDifference::Empty(
++                tl::types::updates::ChannelDifferenceEmpty {
++                    r#final: true,
++                    pts: 25,
++                    timeout: None,
++                },
++            )
++            .to_bytes()))
++            .unwrap();
++        asked
++            .remove(&1)
++            .unwrap()
++            .send(Ok(tl::enums::updates::ChannelDifference::Difference(
++                tl::types::updates::ChannelDifference {
++                    r#final: true,
++                    pts: 13,
++                    timeout: None,
++                    new_messages: Vec::new(),
++                    other_updates: vec![
++                        channel_delete(1, 11),
++                        channel_delete(1, 12),
++                        channel_delete(1, 13),
++                    ],
++                    chats: Vec::new(),
++                    users: Vec::new(),
++                },
++            )
++            .to_bytes()))
++            .unwrap();
++        assert_eq!(
++            tokio::time::timeout(within, out.recv()).await.unwrap().unwrap(),
++            vec![
++                channel_delete(1, 11),
++                channel_delete(1, 12),
++                channel_delete(1, 13),
++                channel_delete(1, 14),
++            ]
++        );
++        receiving.abort();
++    }
 +}
 diff --git a/grammers-mtsender/src/updates_receiver.rs b/grammers-mtsender/src/updates_receiver.rs
-index eaa5315..c67a55d 100644
+index eaa5315..3a684b6 100644
 --- a/grammers-mtsender/src/updates_receiver.rs
 +++ b/grammers-mtsender/src/updates_receiver.rs
-@@ -6,48 +6,114 @@
+@@ -6,48 +6,171 @@
  // option. This file may not be copied, modified, or distributed
  // except according to those terms.
  
 -use std::collections::VecDeque;
-+use std::collections::{HashSet, VecDeque};
++use std::collections::{HashMap, HashSet, VecDeque};
  use std::sync::Arc;
  
  use grammers_session::storages::ErasedSession;
  use grammers_session::types::{PeerId, PeerInfo, UpdateState, UpdatesState};
 -use grammers_session::updates::{MessageBoxes, PrematureEndReason, State, UpdatesLike};
+-use grammers_tl_types::{self as tl, Deserializable};
 +use grammers_session::updates::{MessageBox, MessageBoxes, PrematureEndReason, State, UpdatesLike};
- use grammers_tl_types::{self as tl, Deserializable};
++use grammers_tl_types::{self as tl, Deserializable, Serializable};
  use log::{trace, warn};
  use tokio::sync::mpsc;
  use tokio::time::timeout_at;
@@ -10941,6 +11202,63 @@ index eaa5315..c67a55d 100644
 +    /// An invalid raw channel ID must permanently fence cursor persistence for this receiver.
 +    invalid_channel_id: Option<i64>,
      should_get_state: bool,
++    /// [`UpdatesConfiguration::concurrent_channel_differences`]; `1` keeps the serial loop.
++    concurrency: usize,
++    /// How many of those may be in flight right now; see [`DifferenceWindow`].
++    window: DifferenceWindow,
++    /// The channel differences in flight, owned here so that a cancelled [`Self::next`] does
++    /// not lose them: the next call collects their responses.
++    in_flight: tokio::task::JoinSet<(i64, Result<Vec<u8>, InvocationError>)>,
++    in_flight_channels: HashSet<i64>,
++    in_flight_tasks: HashMap<tokio::task::Id, i64>,
++}
++
++/// How many channel differences are sent at once, found rather than configured: it starts small,
++/// grows by one after as many differences succeed as it allows, and halves on a flood wait —
++/// additive increase, multiplicative decrease, the way a TCP window finds a link's capacity.
++/// Telegram documents no limit on differences in flight, so a fixed number is either a guess too
++/// low for a large shard's restart or one that draws flood waits; this settles near what the
++/// account is actually allowed, never above `ceiling` and never below one.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++struct DifferenceWindow {
++    ceiling: usize,
++    current: usize,
++    successes: usize,
++}
++
++impl DifferenceWindow {
++    /// Where a window starts, short of the ceiling: a restart's first burst should not be the
++    /// one that finds out where the limit is.
++    const START: usize = 4;
++
++    fn new(ceiling: usize) -> Self {
++        let ceiling = ceiling.max(1);
++        Self {
++            ceiling,
++            current: Self::START.min(ceiling),
++            successes: 0,
++        }
++    }
++
++    fn succeeded(&mut self) {
++        self.successes += 1;
++        if self.successes >= self.current {
++            self.successes = 0;
++            self.current = (self.current + 1).min(self.ceiling);
++        }
++    }
++
++    fn flooded(&mut self) {
++        self.successes = 0;
++        self.current = (self.current / 2).max(1);
++    }
++}
++
++fn raw_channel_id(channel: &tl::enums::InputChannel) -> Option<i64> {
++    match channel {
++        tl::enums::InputChannel::Channel(channel) => Some(channel.channel_id),
++        _ => None,
++    }
  }
  
  async fn prepare_channel_difference(
@@ -10961,7 +11279,7 @@ index eaa5315..c67a55d 100644
  
      if let Some(PeerInfo::Channel {
          id,
-@@ -79,8 +145,10 @@ async fn prepare_channel_difference(
+@@ -79,8 +202,10 @@ async fn prepare_channel_difference(
              "cannot getChannelDifference for {:?} as we're missing its hash",
              id
          );
@@ -10974,7 +11292,7 @@ index eaa5315..c67a55d 100644
      }
  }
  
-@@ -91,13 +159,15 @@ impl UpdatesReceiver {
+@@ -91,13 +216,17 @@ impl UpdatesReceiver {
          updates: mpsc::Receiver<UpdatesLike>,
          configuration: UpdatesConfiguration,
      ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -10988,19 +11306,27 @@ index eaa5315..c67a55d 100644
          };
 +        message_box.set_max_dormant_channels(configuration.max_dormant_channels);
 +        message_box.set_drop_idle_channels(configuration.drop_idle_channels);
++        let concurrency = configuration.concurrent_channel_differences.max(1);
++        message_box.set_concurrent_channel_differences(concurrency > 1);
          // Don't bother getting pristine update state if we're not logged in.
          let should_get_state =
              message_box.is_empty() && session.peer(PeerId::self_user()).await?.is_some();
-@@ -108,6 +178,8 @@ impl UpdatesReceiver {
+@@ -108,7 +237,14 @@ impl UpdatesReceiver {
              message_box,
              updates,
              buffer: VecDeque::new(),
 +            pending_channel_auth: HashSet::new(),
 +            invalid_channel_id: None,
              should_get_state,
++            concurrency,
++            window: DifferenceWindow::new(concurrency),
++            in_flight: tokio::task::JoinSet::new(),
++            in_flight_channels: HashSet::new(),
++            in_flight_tasks: HashMap::new(),
          })
      }
-@@ -126,8 +198,7 @@ impl UpdatesReceiver {
+ 
+@@ -126,8 +262,7 @@ impl UpdatesReceiver {
          let session = self.session.clone();
  
          if self.should_get_state {
@@ -11010,7 +11336,7 @@ index eaa5315..c67a55d 100644
                  Ok(tl::enums::updates::State::State(state)) => {
                      session
                          .clone()
-@@ -140,12 +211,14 @@ impl UpdatesReceiver {
+@@ -140,12 +275,18 @@ impl UpdatesReceiver {
                          }))
                          .await?;
                      self.message_box.set_state(state);
@@ -11027,10 +11353,14 @@ index eaa5315..c67a55d 100644
 +            // or cancellation retains the flag so the same receiver retries initialization and
 +            // never starts from an unproved pristine checkpoint.
 +            complete_initial_state_attempt(&mut self.should_get_state, result)?;
++        }
++
++        if self.concurrency > 1 {
++            return self.next_concurrent().await;
          }
  
          loop {
-@@ -158,8 +231,12 @@ impl UpdatesReceiver {
+@@ -158,8 +299,12 @@ impl UpdatesReceiver {
                      self.message_box.get_difference(),
                      match self.message_box.get_channel_difference() {
                          Some(gd) => {
@@ -11045,7 +11375,7 @@ index eaa5315..c67a55d 100644
                          }
                          None => None,
                      },
-@@ -168,7 +245,13 @@ impl UpdatesReceiver {
+@@ -168,7 +313,13 @@ impl UpdatesReceiver {
  
              if let Some(request) = get_diff {
                  let response = self.invoke(&request).await?;
@@ -11060,7 +11390,7 @@ index eaa5315..c67a55d 100644
                  self.extend_update_queue(updates, users, chats);
                  continue;
              }
-@@ -181,21 +264,18 @@ impl UpdatesReceiver {
+@@ -181,21 +332,18 @@ impl UpdatesReceiver {
                      Err(e) if e.is("PERSISTENT_TIMESTAMP_OUTDATED") => {
                          // According to Telegram's docs:
                          // "Channel internal replication issues, try again later (treat this like an RPC_CALL_FAIL)."
@@ -11089,7 +11419,7 @@ index eaa5315..c67a55d 100644
                          }
                          continue;
                      }
-@@ -206,7 +286,8 @@ impl UpdatesReceiver {
+@@ -206,7 +354,8 @@ impl UpdatesReceiver {
                          );
                          {
                              self.message_box
@@ -11099,7 +11429,7 @@ index eaa5315..c67a55d 100644
                          }
                          continue;
                      }
-@@ -214,14 +295,20 @@ impl UpdatesReceiver {
+@@ -214,14 +363,20 @@ impl UpdatesReceiver {
                          log::warn!("Telegram is having internal issues: {:#?}", rpc_error);
                          {
                              self.message_box
@@ -11122,7 +11452,141 @@ index eaa5315..c67a55d 100644
                  self.extend_update_queue(updates, users, chats);
                  continue;
              }
-@@ -237,14 +324,39 @@ impl UpdatesReceiver {
+@@ -234,17 +389,173 @@ impl UpdatesReceiver {
+         }
+     }
+ 
++    /// [`Self::next`] with up to `window` channel differences in flight while socket updates
++    /// keep being received (see [`UpdatesConfiguration::concurrent_channel_differences`]).
++    async fn next_concurrent(&mut self) -> Result<UpdateBatch, InvocationError> {
++        let session = self.session.clone();
++        loop {
++            if let Some(update) = self.buffer.pop_front() {
++                return Ok(update);
++            }
++            let deadline = self.message_box.check_deadlines();
++
++            // Account-wide differences keep their shape: one at a time, the socket held.
++            if let Some(request) = self.message_box.get_difference() {
++                let response = self.invoke(&request).await?;
++                let (updates, users, chats) = self
++                    .message_box
++                    .try_apply_difference(response)
++                    .map_err(|_| InvocationError::UnexpectedResponse {
++                        expected: "internally consistent updates difference",
++                        got: "updates difference containing a gap",
++                    })?;
++                self.extend_update_queue(updates, users, chats);
++                continue;
++            }
++
++            while self.in_flight_channels.len() < self.window.current {
++                let Some(request) = self
++                    .message_box
++                    .next_channel_difference(&self.in_flight_channels)
++                else {
++                    break;
++                };
++                let Some(channel_id) = raw_channel_id(&request.channel) else {
++                    return Err(inconsistent_channel_difference());
++                };
++                let Some(request) = prepare_channel_difference(
++                    request,
++                    session.clone(),
++                    &mut self.pending_channel_auth,
++                )
++                .await?
++                else {
++                    break;
++                };
++                let dc_id = session.clone().home_dc_id()?;
++                let handle = self.handle.clone();
++                let body = request.to_bytes();
++                let task = self.in_flight.spawn(async move {
++                    (channel_id, handle.do_invoke_in_dc(dc_id, body).await)
++                });
++                self.in_flight_channels.insert(channel_id);
++                self.in_flight_tasks.insert(task.id(), channel_id);
++            }
++
++            tokio::select! {
++                biased;
++                joined = self.in_flight.join_next_with_id(), if !self.in_flight.is_empty() => {
++                    match joined {
++                        Some(Ok((task, (channel_id, result)))) => {
++                            self.in_flight_tasks.remove(&task);
++                            self.in_flight_channels.remove(&channel_id);
++                            self.finish_channel_difference(channel_id, result)?;
++                        }
++                        Some(Err(error)) => {
++                            // The request task itself failed (it does not, short of a panic).
++                            // Its channel is still queued, so it is simply asked again.
++                            if let Some(channel_id) = self.in_flight_tasks.remove(&error.id()) {
++                                self.in_flight_channels.remove(&channel_id);
++                            }
++                            warn!("a channel difference request task failed: {error}");
++                        }
++                        None => {}
++                    }
++                }
++                received = timeout_at(deadline.into(), self.updates.recv()) => match received {
++                    Ok(Some(updates)) => self.process_socket_updates(updates).await,
++                    Ok(None) => return Err(InvocationError::Dropped),
++                    Err(_) => {}
++                },
++            }
++        }
++    }
++
++    /// Applies one in-flight channel difference's response, or ends it for the reason Telegram
++    /// gave. As in the serial loop, except that a flood wait is a temporary failure of this one
++    /// channel — retried with its own backoff — rather than an error for the whole stream, which
++    /// would stop the socket for every other channel.
++    fn finish_channel_difference(
++        &mut self,
++        channel_id: i64,
++        result: Result<Vec<u8>, InvocationError>,
++    ) -> Result<(), InvocationError> {
++        let response = result.and_then(|body| {
++            tl::enums::updates::ChannelDifference::from_bytes(&body).map_err(Into::into)
++        });
++        let reason = match response {
++            Ok(response) => {
++                let (updates, users, chats) = self
++                    .message_box
++                    .try_apply_channel_difference_for(channel_id, response)
++                    .map_err(|_| inconsistent_channel_difference())?;
++                self.extend_update_queue(updates, users, chats);
++                self.window.succeeded();
++                return Ok(());
++            }
++            Err(e) if e.is("PERSISTENT_TIMESTAMP_OUTDATED") => {
++                warn!("channel {channel_id} difference: PersistentTimestampOutdated; retrying later");
++                PrematureEndReason::TemporaryServerIssues
++            }
++            Err(e) if e.is("CHANNEL_PRIVATE") => {
++                log::info!("channel {channel_id}: no longer allowed to fetch its updates");
++                PrematureEndReason::Banned
++            }
++            Err(InvocationError::Rpc(rpc)) if rpc.code == 420 => {
++                self.window.flooded();
++                warn!(
++                    "channel {channel_id} difference: {rpc}; retrying later, {} in flight at most",
++                    self.window.current
++                );
++                PrematureEndReason::TemporaryServerIssues
++            }
++            Err(InvocationError::Rpc(rpc)) if rpc.code == 500 => {
++                warn!("channel {channel_id} difference: {rpc}; retrying later");
++                PrematureEndReason::TemporaryServerIssues
++            }
++            Err(e) => return Err(e),
++        };
++        self.message_box
++            .try_end_channel_difference_for(channel_id, reason)
++            .map_err(|_| inconsistent_channel_difference())
++    }
++
      /// Synchronize the updates state to the session.
      ///
      /// This is **not** automatically done on drop.
@@ -11163,7 +11627,7 @@ index eaa5315..c67a55d 100644
      async fn invoke<R: tl::RemoteCall>(&self, request: &R) -> Result<R::Return, InvocationError> {
          let dc_id = self.session.clone().home_dc_id()?;
          self.handle
-@@ -254,11 +366,8 @@ impl UpdatesReceiver {
+@@ -254,11 +565,8 @@ impl UpdatesReceiver {
      }
  
      async fn process_socket_updates(&mut self, updates: UpdatesLike) {
@@ -11177,7 +11641,7 @@ index eaa5315..c67a55d 100644
          }
      }
  
-@@ -268,6 +377,123 @@ impl UpdatesReceiver {
+@@ -268,6 +576,146 @@ impl UpdatesReceiver {
          users: Vec<tl::enums::User>,
          chats: Vec<tl::enums::Chat>,
      ) {
@@ -11204,6 +11668,29 @@ index eaa5315..c67a55d 100644
 +    use grammers_session::Session;
 +    use grammers_session::storages::{MemorySession, erase};
 +    use grammers_session::types::{ChannelState, PeerAuth};
++
++    /// The window starts short of its ceiling, opens by one per window of successes up to it,
++    /// halves on a flood wait and never closes entirely.
++    #[test]
++    fn the_difference_window_grows_on_success_and_halves_on_a_flood_wait() {
++        let mut window = DifferenceWindow::new(16);
++        assert_eq!(window.current, DifferenceWindow::START);
++        for _ in 0..DifferenceWindow::START {
++            window.succeeded();
++        }
++        assert_eq!(window.current, DifferenceWindow::START + 1);
++        for _ in 0..1_000 {
++            window.succeeded();
++        }
++        assert_eq!(window.current, 16, "never past the ceiling");
++        window.flooded();
++        assert_eq!(window.current, 8);
++        for _ in 0..10 {
++            window.flooded();
++        }
++        assert_eq!(window.current, 1, "never shut");
++        assert_eq!(DifferenceWindow::new(2).current, 2, "a low ceiling starts at itself");
++    }
 +
 +    #[test]
 +    fn nonconcrete_and_out_of_range_channel_differences_are_typed_errors() {
@@ -11713,14 +12200,14 @@ index 383c28a..26659fc 100644
                  key: Key::Channel(u.channel_id),
                  pts: u.pts,
 diff --git a/grammers-session/src/message_box/defs.rs b/grammers-session/src/message_box/defs.rs
-index eeeaf43..fd3749a 100644
+index eeeaf43..6e8c275 100644
 --- a/grammers-session/src/message_box/defs.rs
 +++ b/grammers-session/src/message_box/defs.rs
 @@ -6,6 +6,9 @@
  // option. This file may not be copied, modified, or distributed
  // except according to those terms.
  
-+use std::collections::BTreeSet;
++use std::collections::{BTreeMap, BTreeSet};
 +use std::sync::Mutex;
 +use std::sync::atomic::{AtomicBool, Ordering};
  use std::time::Duration;
@@ -11771,7 +12258,7 @@ index eeeaf43..fd3749a 100644
  pub struct MessageBoxes {
      /// Live entries, sorted by key.
      pub(super) entries: Vec<LiveEntry>,
-@@ -85,10 +103,21 @@ pub struct MessageBoxes {
+@@ -85,12 +103,55 @@ pub struct MessageBoxes {
      pub(super) seq: i32,
  
      /// Optimization field to quickly query all entries that are currently being fetched.
@@ -11791,10 +12278,44 @@ index eeeaf43..fd3749a 100644
 +
 +    /// Whether `getting_diff_for` still represents the eager channel scan created by `load`.
 +    pub(super) initial_catch_up_pending: bool,
++
++    /// Whether channel differences may be fetched while socket updates are still processed.
++    /// See [`crate::updates::MessageBoxes::set_concurrent_channel_differences`].
++    pub(super) concurrent_channel_differences: bool,
++
++    /// Socket updates for a channel whose difference is being fetched, held until it ends and
++    /// then processed like any other update, so whatever the difference already returned is
++    /// skipped by its `pts` rather than delivered twice. Only used with
++    /// `concurrent_channel_differences`.
++    pub(super) postponed: BTreeMap<Key, Postponed>,
++
++    /// Updates held across every entry of `postponed`, against `POSTPONED_TOTAL_MAX`.
++    pub(super) postponed_total: usize,
++}
++
++/// One channel's postponed socket updates and the peers that came with them.
++#[derive(Clone, Debug, Default)]
++pub(super) struct Postponed {
++    pub(super) updates: Vec<tl::enums::Update>,
++    pub(super) users: Vec<tl::enums::User>,
++    pub(super) chats: Vec<tl::enums::Chat>,
++    /// Something did not fit, so the channel's difference must run again once this one ends:
++    /// a dropped update is still on the server, past the `pts` this difference ends at.
++    pub(super) overflowed: bool,
  }
  
++/// Postponed updates kept for one channel, and for every channel together. Past either an
++/// update is not kept and its channel fetches its difference again instead, so the bound costs
++/// a round trip, never an update.
++pub(super) const POSTPONED_PER_CHANNEL_MAX: usize = 512;
++pub(super) const POSTPONED_TOTAL_MAX: usize = 32_768;
++/// Peers kept beside one channel's postponed updates.
++pub(super) const POSTPONED_PEERS_PER_CHANNEL_MAX: usize = 4 * POSTPONED_PER_CHANNEL_MAX;
++
  /// Represents the information needed to correctly handle a specific `tl::enums::Update`.
-@@ -107,7 +136,7 @@ pub(super) struct PtsInfo {
+ #[derive(Debug)]
+ pub(super) struct PtsInfo {
+@@ -107,7 +168,7 @@ pub(super) struct PtsInfo {
  //
  // This is really easy to trigger by spamming messages in a channel (with as little as 3 members works), because
  // the updates produced by the RPC request take a while to arrive (whereas the read update comes faster alone).
@@ -11803,7 +12324,7 @@ index eeeaf43..fd3749a 100644
  pub(super) struct PossibleGap {
      pub(super) deadline: Instant,
      /// Pending updates (those with a larger PTS, producing the gap which may later be filled).
-@@ -118,6 +147,14 @@ pub(super) struct PossibleGap {
+@@ -118,6 +179,14 @@ pub(super) struct PossibleGap {
  #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
  pub struct Gap;
  
@@ -11818,7 +12339,7 @@ index eeeaf43..fd3749a 100644
  /// Alias for the commonly-referenced three-tuple of update and related peers.
  pub(super) type UpdateAndPeers = (
      Vec<(tl::enums::Update, State)>,
-@@ -129,7 +166,7 @@ pub(super) type UpdateAndPeers = (
+@@ -129,7 +198,7 @@ pub(super) type UpdateAndPeers = (
  ///
  /// Telegram unfortunately also includes update state in types
  /// that are not part of the usual [`tl::enums::Updates`].
@@ -11827,7 +12348,7 @@ index eeeaf43..fd3749a 100644
  pub enum UpdatesLike {
      /// The usual variant, received passively from Telegram.
      Updates(tl::enums::Updates),
-@@ -163,6 +200,80 @@ pub enum UpdatesLike {
+@@ -163,6 +232,80 @@ pub enum UpdatesLike {
      /// update) or the updates were cut short during deserialization (very unlikely).
      /// This should be treated as a gap.
      MalformedUpdates,
@@ -11909,16 +12430,16 @@ index eeeaf43..fd3749a 100644
  
  // Public interface around the more tightly-packed internal state.
 diff --git a/grammers-session/src/message_box/mod.rs b/grammers-session/src/message_box/mod.rs
-index f7a1278..b06a265 100644
+index f7a1278..f7b7033 100644
 --- a/grammers-session/src/message_box/mod.rs
 +++ b/grammers-session/src/message_box/mod.rs
-@@ -37,16 +37,21 @@ mod defs;
+@@ -37,16 +37,22 @@ mod defs;
  #[cfg(test)]
  mod tests;
  
 -use std::cmp::Ordering;
 +use std::cmp::{Ordering, Reverse};
-+use std::collections::BTreeSet;
++use std::collections::{BTreeMap, BTreeSet, HashSet};
  use std::time::Duration;
  #[cfg(not(test))]
  use std::time::Instant;
@@ -11929,7 +12450,8 @@ index f7a1278..b06a265 100644
 +use defs::PendingRecovery;
 +use defs::{
 +    CHANNEL_DIFFERENCE_RETRY_BASE, CHANNEL_DIFFERENCE_RETRY_MAX, LiveEntry, NO_DATE, NO_PTS,
-+    NO_SEQ, POSSIBLE_GAP_TIMEOUT, PossibleGap, PtsInfo,
++    NO_SEQ, POSSIBLE_GAP_TIMEOUT, POSTPONED_PEERS_PER_CHANNEL_MAX, POSTPONED_PER_CHANNEL_MAX,
++    POSTPONED_TOTAL_MAX, PossibleGap, PtsInfo,
 +};
 +pub use defs::{Gap, MessageBox, MessageBoxes, RecoveryScope, State, UpdatesLike};
  use grammers_tl_types as tl;
@@ -11938,7 +12460,7 @@ index f7a1278..b06a265 100644
  #[cfg(test)]
  use tests::Instant;
  
-@@ -58,11 +63,151 @@ fn next_updates_deadline() -> Instant {
+@@ -58,11 +64,151 @@ fn next_updates_deadline() -> Instant {
  
  fn update_sort_key(update: &tl::enums::Update) -> i32 {
      match PtsInfo::from_update(update) {
@@ -12091,7 +12613,7 @@ index f7a1278..b06a265 100644
  impl MessageBox {
      pub fn pts(&self) -> i32 {
          match self {
-@@ -88,14 +233,15 @@ impl From<PtsInfo> for MessageBox {
+@@ -88,14 +234,15 @@ impl From<PtsInfo> for MessageBox {
  
  impl LiveEntry {
      fn effective_deadline(&self) -> Instant {
@@ -12111,7 +12633,7 @@ index f7a1278..b06a265 100644
  /// Creation, querying, and setting base state.
  impl MessageBoxes {
      /// Create a new, empty [`MessageBoxes`].
-@@ -105,8 +251,11 @@ impl MessageBoxes {
+@@ -105,8 +252,14 @@ impl MessageBoxes {
              entries: Vec::new(),
              date: NO_DATE,
              seq: NO_SEQ,
@@ -12121,10 +12643,13 @@ index f7a1278..b06a265 100644
 +            drop_idle_channels: false,
 +            max_dormant: usize::MAX,
 +            initial_catch_up_pending: false,
++            concurrent_channel_differences: false,
++            postponed: BTreeMap::new(),
++            postponed_total: 0,
          }
      }
  
-@@ -114,7 +263,7 @@ impl MessageBoxes {
+@@ -114,7 +267,7 @@ impl MessageBoxes {
      pub fn load(state: UpdatesState) -> Self {
          trace!("created new message box with state: {:?}", state);
          let mut entries = Vec::with_capacity(2 + state.channels.len());
@@ -12133,7 +12658,7 @@ index f7a1278..b06a265 100644
          let deadline = next_updates_deadline();
  
          if state.pts != NO_PTS {
-@@ -123,6 +272,9 @@ impl MessageBoxes {
+@@ -123,6 +276,9 @@ impl MessageBoxes {
                  pts: state.pts,
                  deadline,
                  possible_gap: None,
@@ -12143,7 +12668,7 @@ index f7a1278..b06a265 100644
              });
          }
          if state.qts != NO_PTS {
-@@ -131,6 +283,9 @@ impl MessageBoxes {
+@@ -131,6 +287,9 @@ impl MessageBoxes {
                  pts: state.qts,
                  deadline,
                  possible_gap: None,
@@ -12153,7 +12678,7 @@ index f7a1278..b06a265 100644
              });
          }
          entries.extend(state.channels.iter().map(|c| LiveEntry {
-@@ -138,6 +293,9 @@ impl MessageBoxes {
+@@ -138,6 +297,9 @@ impl MessageBoxes {
              pts: c.pts,
              deadline,
              possible_gap: None,
@@ -12163,13 +12688,16 @@ index f7a1278..b06a265 100644
          }));
          entries.sort_by_key(|entry| entry.key);
  
-@@ -149,7 +307,88 @@ impl MessageBoxes {
+@@ -149,7 +311,104 @@ impl MessageBoxes {
              seq: state.seq,
              getting_diff_for,
              next_deadline: deadline,
 +            drop_idle_channels: false,
 +            max_dormant: usize::MAX,
 +            initial_catch_up_pending: true,
++            concurrent_channel_differences: false,
++            postponed: BTreeMap::new(),
++            postponed_total: 0,
 +        }
 +    }
 +
@@ -12224,6 +12752,19 @@ index f7a1278..b06a265 100644
 +        }
 +    }
 +
++    /// Let channel differences be fetched while socket updates keep being processed. See
++    /// [`grammers_mtsender::UpdatesConfiguration::concurrent_channel_differences`].
++    ///
++    /// With it on, a socket update for a channel whose difference is pending is postponed and
++    /// processed by its `pts` once the difference ends — whatever the difference returned is
++    /// skipped, whatever came after it applies — where it would otherwise be force-applied and
++    /// then returned a second time by the difference. And [`Self::check_deadlines`] keeps
++    /// promoting gaps while channel differences run, rather than only once they all end.
++    /// Account-wide differences (common, secondary) are unchanged.
++    pub fn set_concurrent_channel_differences(&mut self, on: bool) {
++        self.concurrent_channel_differences = on;
++    }
++
 +    /// Forgets the dormant entries idle longest once there are more than `max_dormant`, down to
 +    /// nine tenths of it so that the sort runs once per many new dormant channels, not per one.
 +    ///
@@ -12252,7 +12793,7 @@ index f7a1278..b06a265 100644
      }
  
      fn entry(&self, key: Key) -> Option<&LiveEntry> {
-@@ -195,10 +434,13 @@ impl MessageBoxes {
+@@ -195,10 +454,13 @@ impl MessageBoxes {
      fn set_pts(&mut self, key: Key, pts: i32) {
          if !self.update_entry(key, |entry| entry.pts = pts) {
              self.set_entry(LiveEntry {
@@ -12268,7 +12809,7 @@ index f7a1278..b06a265 100644
              });
          }
      }
-@@ -223,7 +465,7 @@ impl MessageBoxes {
+@@ -223,7 +485,7 @@ impl MessageBoxes {
                  .entries
                  .iter()
                  .filter_map(|entry| match entry.key {
@@ -12277,10 +12818,27 @@ index f7a1278..b06a265 100644
                      _ => None,
                  })
                  .collect(),
-@@ -247,9 +489,34 @@ impl MessageBoxes {
+@@ -242,32 +504,84 @@ impl MessageBoxes {
+     pub fn check_deadlines(&mut self) -> Instant {
+         let now = Instant::now();
+ 
+-        if !self.getting_diff_for.is_empty() {
++        // While differences run nothing else is due — unless channel differences run alongside
++        // socket updates, which keep exposing gaps that must join the queue, not wait for it.
++        if !self.getting_diff_for.is_empty()
++            && (!self.concurrent_channel_differences
++                || self
++                    .getting_diff_for
++                    .iter()
++                    .any(|key| !matches!(key, Key::Channel(_))))
++        {
+             return self.next_deadline;
          }
  
          if now >= self.next_deadline {
+-            self.getting_diff_for
+-                .extend(self.entries.iter().filter_map(|entry| {
+-                    if now >= entry.effective_deadline() {
 +            if self.drop_idle_channels {
 +                // A channel that has been silent this long becomes dormant rather than being
 +                // queued for its difference. Its checkpoint remains persisted (up to the cap of
@@ -12294,49 +12852,68 @@ index f7a1278..b06a265 100644
 +                // moments after it gapped, strand the messages it was holding, and skip the
 +                // difference that would have recovered the ones behind them. Idle means idle:
 +                // no pending gap, and the plain deadline passed.
++                // Never one whose difference is running: forgotten as idle, its response would
++                // find no checkpoint to apply to.
++                let getting_diff_for = &self.getting_diff_for;
 +                for entry in &mut self.entries {
 +                    if !entry.dormant
 +                        && matches!(entry.key, Key::Channel(_))
 +                        && entry.possible_gap.is_none()
 +                        && entry.difference_retry_at.is_none()
 +                        && now >= entry.deadline
++                        && !getting_diff_for.contains(&entry.key)
 +                    {
 +                        entry.dormant = true;
 +                    }
 +                }
 +                self.forget_idlest_dormant();
 +            }
-             self.getting_diff_for
-                 .extend(self.entries.iter().filter_map(|entry| {
--                    if now >= entry.effective_deadline() {
-+                    if !entry.dormant && now >= entry.effective_deadline() {
++            // Only the newly due: with channel differences running alongside, the set can already
++            // hold thousands, and this runs once per received batch.
++            let getting_diff_for = &self.getting_diff_for;
++            let due = self
++                .entries
++                .iter()
++                .filter_map(|entry| {
++                    if !entry.dormant
++                        && now >= entry.effective_deadline()
++                        && !getting_diff_for.contains(&entry.key)
++                    {
                          debug!("deadline for forcibly fetching updates met for {:?}", entry);
                          Some(entry.key)
                      } else {
-@@ -259,15 +526,19 @@ impl MessageBoxes {
+                         None
+                     }
+-                }));
++                })
++                .collect::<Vec<_>>();
  
              // When extending `getting_diff_for`, it's important to have the moral equivalent of
              // `begin_get_diff` (that is, clear possible gaps if we're now getting difference).
 -            for i in 0..self.getting_diff_for.len() {
 -                self.update_entry(self.getting_diff_for[i], |entry| entry.possible_gap = None);
-+            let due = self.getting_diff_for.iter().copied().collect::<Vec<_>>();
 +            for key in due {
 +                self.update_entry(key, |entry| {
 +                    entry.possible_gap = None;
 +                    entry.difference_retry_at = None;
 +                });
++                self.getting_diff_for.insert(key);
              }
  
              // To avoid hogging up all CPU by sleeping for no duration,
              // if the deadline was met but there's no state to fetch,
-             // advance the deadline.
-             if self.getting_diff_for.is_empty() {
+-            // advance the deadline.
+-            if self.getting_diff_for.is_empty() {
 -                self.next_deadline = next_updates_deadline();
++            // advance the deadline. Running alongside socket updates, the caller waits on this
++            // while channel differences are in flight, so it has to name the next deadline of
++            // what is not being fetched rather than one already met.
++            if self.getting_diff_for.is_empty() || self.concurrent_channel_differences {
 +                self.next_deadline = self.next_active_deadline();
              }
          }
  
-@@ -284,20 +555,29 @@ impl MessageBoxes {
+@@ -284,20 +598,32 @@ impl MessageBoxes {
          self.update_entry(key, |entry| {
              old_deadline = entry.deadline;
              entry.deadline = deadline;
@@ -12352,10 +12929,13 @@ index f7a1278..b06a265 100644
          }
      }
  
++    /// The closest deadline of an entry that is neither dormant nor having its difference
++    /// fetched — the latter's deadline is reset when its difference ends, and until then a past
++    /// one would only make the caller spin.
 +    fn next_active_deadline(&self) -> Instant {
 +        self.entries
 +            .iter()
-+            .filter(|entry| !entry.dormant)
++            .filter(|entry| !entry.dormant && !self.getting_diff_for.contains(&entry.key))
 +            .map(LiveEntry::effective_deadline)
 +            .min()
 +            .unwrap_or_else(next_updates_deadline)
@@ -12371,7 +12951,7 @@ index f7a1278..b06a265 100644
                  .unwrap_or_else(next_updates_deadline),
          );
      }
-@@ -317,12 +597,18 @@ impl MessageBoxes {
+@@ -317,12 +643,18 @@ impl MessageBoxes {
              pts: state.pts,
              deadline,
              possible_gap: None,
@@ -12390,7 +12970,7 @@ index f7a1278..b06a265 100644
          });
          self.date = state.date;
          self.seq = state.seq;
-@@ -337,9 +623,12 @@ impl MessageBoxes {
+@@ -337,9 +669,12 @@ impl MessageBoxes {
          if self.entry(Key::Channel(id)).is_none() {
              self.set_entry(LiveEntry {
                  key: Key::Channel(id),
@@ -12404,7 +12984,7 @@ index f7a1278..b06a265 100644
              });
          }
      }
-@@ -350,23 +639,34 @@ impl MessageBoxes {
+@@ -350,23 +685,34 @@ impl MessageBoxes {
      /// Clears any previous gaps.
      fn try_begin_get_diff(&mut self, key: Key) {
          if !self.getting_diff_for.contains(&key) {
@@ -12446,7 +13026,7 @@ index f7a1278..b06a265 100644
  
          debug_assert!(
              self.entry(key)
-@@ -374,6 +674,33 @@ impl MessageBoxes {
+@@ -374,6 +720,33 @@ impl MessageBoxes {
              "gaps shouldn't be created while getting difference"
          );
      }
@@ -12480,7 +13060,7 @@ index f7a1278..b06a265 100644
  }
  
  // "Normal" updates flow (processing and detection of gaps).
-@@ -392,7 +719,29 @@ impl MessageBoxes {
+@@ -392,7 +765,29 @@ impl MessageBoxes {
      /// [updates' documentation]: https://core.telegram.org/api/updates
      pub fn process_updates(&mut self, updates: UpdatesLike) -> Result<defs::UpdateAndPeers, Gap> {
          trace!("processing updates: {:?}", updates);
@@ -12511,7 +13091,7 @@ index f7a1278..b06a265 100644
  
          // Top level, when handling received `updates` and `updatesCombined`.
          // `updatesCombined` groups all the fields we care about, which is why we use it.
-@@ -400,14 +749,7 @@ impl MessageBoxes {
+@@ -400,14 +795,7 @@ impl MessageBoxes {
          // This assumes all access hashes are already known to the client (socket updates are
          // expected to use `ensure_known_peer_hashes`, and the result from getting difference
          // has to deal with the peers in a different way).
@@ -12527,7 +13107,7 @@ index f7a1278..b06a265 100644
              Ok(combined) => combined,
              Err(Gap) => {
                  self.try_begin_get_diff(Key::Common);
-@@ -415,18 +757,21 @@ impl MessageBoxes {
+@@ -415,18 +803,21 @@ impl MessageBoxes {
              }
          };
  
@@ -12558,7 +13138,7 @@ index f7a1278..b06a265 100644
                  // Apply
                  Ordering::Equal => {}
                  // Ignore
-@@ -435,12 +780,12 @@ impl MessageBoxes {
+@@ -435,12 +826,12 @@ impl MessageBoxes {
                          "skipping updates that were already handled at seq = {}",
                          self.seq
                      );
@@ -12573,11 +13153,11 @@ index f7a1278..b06a265 100644
                      );
                      self.try_begin_get_diff(Key::Common);
                      return Err(Gap);
-@@ -448,6 +793,34 @@ impl MessageBoxes {
+@@ -448,6 +839,39 @@ impl MessageBoxes {
              }
          }
  
-+        Ok(self.process_updates_combined(combined))
++        Ok(self.process_updates_combined(combined, true))
 +    }
 +
 +    /// Apply an already-adapted combined update envelope.
@@ -12585,6 +13165,10 @@ index f7a1278..b06a265 100644
 +    /// The caller must have performed the fallible envelope adaptation and sequence checks.
 +    /// Difference responses construct an envelope with `NO_SEQ`, so after their own active-request
 +    /// and shape validation this core cannot reject the response after mutating checkpoints.
++    ///
++    /// `postpone` is whether an update for a channel whose difference is running is held back
++    /// (`concurrent_channel_differences`): true for everything but that channel's own difference,
++    /// whose updates are what it is fetching and are applied as they always were.
 +    fn process_updates_combined(
 +        &mut self,
 +        tl::types::UpdatesCombined {
@@ -12595,6 +13179,7 @@ index f7a1278..b06a265 100644
 +            users,
 +            chats,
 +        }: tl::types::UpdatesCombined,
++        postpone: bool,
 +    ) -> defs::UpdateAndPeers {
 +        let deadline = next_updates_deadline();
 +        let new_date = if date == NO_DATE { self.date } else { date };
@@ -12608,7 +13193,16 @@ index f7a1278..b06a265 100644
          // Telegram can send updates out of order (e.g. `ReadChannelInbox` first
          // and then `NewChannelMessage`, both with the same `pts`, but the `count`
          // is `0` and `1` respectively), so we sort them first.
-@@ -472,6 +845,9 @@ impl MessageBoxes {
+@@ -455,6 +879,8 @@ impl MessageBoxes {
+ 
+         let mut result = Vec::with_capacity(updates.len());
+         let mut have_unresolved_gaps = false;
++        // Channels that had an update of this envelope postponed, to keep its peers beside it.
++        let mut postponed_keys: Vec<Key> = Vec::new();
+ 
+         // This loop does a lot at once to reduce the amount of times we need to iterate over
+         // the updates as an optimization.
+@@ -472,6 +898,9 @@ impl MessageBoxes {
                          pts,
                          deadline,
                          possible_gap: None,
@@ -12618,7 +13212,29 @@ index f7a1278..b06a265 100644
                      });
                  }
                  self.try_begin_get_diff(key);
-@@ -502,12 +878,19 @@ impl MessageBoxes {
+@@ -487,6 +916,21 @@ impl MessageBoxes {
+                 }
+             };
+ 
++            if postpone
++                && self.concurrent_channel_differences
++                && matches!(info.key, Key::Channel(_))
++                && (self.getting_diff_for.contains(&info.key)
++                    || self.postponed.contains_key(&info.key))
++            {
++                // Held until the difference ends, behind anything already held for it, so
++                // order within the channel is kept (see `set_concurrent_channel_differences`).
++                self.postpone(info.key, update);
++                if !postponed_keys.contains(&info.key) {
++                    postponed_keys.push(info.key);
++                }
++                continue;
++            }
++
+             if self.getting_diff_for.contains(&info.key) {
+                 debug!(
+                     "forcing update to apply {:?} (getting difference, count {:?}, remote {:?})",
+@@ -502,12 +946,19 @@ impl MessageBoxes {
              self.force_update_entry(
                  LiveEntry {
                      key: info.key,
@@ -12640,7 +13256,7 @@ index f7a1278..b06a265 100644
                          // Apply
                          Ordering::Equal => {
                              entry.pts = info.pts;
-@@ -540,12 +923,16 @@ impl MessageBoxes {
+@@ -540,12 +991,16 @@ impl MessageBoxes {
                      };
  
                      if let Some(mut gap) = entry.possible_gap.take() {
@@ -12661,16 +13277,96 @@ index f7a1278..b06a265 100644
                                  Ordering::Equal => {
                                      entry.pts = gap_info.pts;
                                      // possible gap can only be resolve if new update closed
-@@ -578,7 +965,7 @@ impl MessageBoxes {
+@@ -571,14 +1026,86 @@ impl MessageBoxes {
+             self.next_deadline = self.next_deadline.min(gap_deadline.unwrap_or(deadline));
+         }
+ 
+-        if !result.is_empty() && !have_unresolved_gaps {
++        for key in &postponed_keys {
++            self.postpone_peers(*key, &users, &chats);
++        }
++
++        // A postponed update was accepted, only not delivered yet; leaving `seq` behind for it
++        // would read the next envelope as a gap in the account's sequence.
++        if (!result.is_empty() || !postponed_keys.is_empty()) && !have_unresolved_gaps {
+             // > If the updates were applied, local *Updates* state must be updated
+             // > with `seq` (unless it's 0) and `date` from the constructor.
+             self.date = new_date;
              self.seq = new_seq;
          }
  
 -        Ok((result, users, chats))
 +        (result, users, chats)
++    }
++
++    /// Holds `update` for `key` until its difference ends; see `postponed`.
++    fn postpone(&mut self, key: Key, update: tl::enums::Update) {
++        let held = self.postponed.entry(key).or_default();
++        if held.updates.len() >= POSTPONED_PER_CHANNEL_MAX
++            || self.postponed_total >= POSTPONED_TOTAL_MAX
++        {
++            held.overflowed = true;
++            return;
++        }
++        held.updates.push(update);
++        self.postponed_total += 1;
++    }
++
++    fn postpone_peers(&mut self, key: Key, users: &[tl::enums::User], chats: &[tl::enums::Chat]) {
++        let Some(held) = self.postponed.get_mut(&key) else {
++            return;
++        };
++        if held.users.len() + held.chats.len() + users.len() + chats.len()
++            > POSTPONED_PEERS_PER_CHANNEL_MAX
++        {
++            // Without its peers an update may not be deliverable; the difference fetches it
++            // again with them.
++            held.overflowed = true;
++            return;
++        }
++        held.users.extend_from_slice(users);
++        held.chats.extend_from_slice(chats);
++    }
++
++    /// The updates held for `key` while its difference ran, processed now that it has ended:
++    /// what the difference already returned is skipped by its `pts`, the rest applies. If any
++    /// were not kept, the difference runs again to fetch them.
++    fn replay_postponed(&mut self, key: Key) -> defs::UpdateAndPeers {
++        let Some(held) = self.postponed.remove(&key) else {
++            return (Vec::new(), Vec::new(), Vec::new());
++        };
++        self.postponed_total = self.postponed_total.saturating_sub(held.updates.len());
++        let replayed = self.process_updates_combined(
++            tl::types::UpdatesCombined {
++                updates: held.updates,
++                users: held.users,
++                chats: held.chats,
++                date: NO_DATE,
++                seq_start: NO_SEQ,
++                seq: NO_SEQ,
++            },
++            true,
++        );
++        if held.overflowed {
++            self.try_begin_get_diff(key);
++        }
++        replayed
++    }
++
++    /// Forgets what was held for `key`, whose checkpoint is gone.
++    fn drop_postponed(&mut self, key: Key) {
++        if let Some(held) = self.postponed.remove(&key) {
++            self.postponed_total = self.postponed_total.saturating_sub(held.updates.len());
++        }
++    }
++
++    /// How many socket updates are held for channels whose difference is running.
++    pub fn postponed_updates(&self) -> usize {
++        self.postponed_total
      }
  }
  
-@@ -591,7 +978,7 @@ impl MessageBoxes {
+@@ -591,7 +1118,7 @@ impl MessageBoxes {
                  let pts = self
                      .entry(Key::Common)
                      .map(|entry| entry.pts)
@@ -12679,7 +13375,7 @@ index f7a1278..b06a265 100644
  
                  let gd = tl::functions::updates::GetDifference {
                      pts,
-@@ -611,16 +998,23 @@ impl MessageBoxes {
+@@ -611,16 +1138,23 @@ impl MessageBoxes {
          None
      }
  
@@ -12710,7 +13406,7 @@ index f7a1278..b06a265 100644
          let finish: bool;
          let result = match difference {
              tl::enums::updates::Difference::Empty(diff) => {
-@@ -677,7 +1071,19 @@ impl MessageBoxes {
+@@ -677,7 +1211,19 @@ impl MessageBoxes {
              self.try_end_get_diff(Key::Secondary);
          }
  
@@ -12731,7 +13427,7 @@ index f7a1278..b06a265 100644
      }
  
      fn apply_difference_type(
-@@ -703,19 +1109,18 @@ impl MessageBoxes {
+@@ -703,19 +1249,18 @@ impl MessageBoxes {
  
          // other_updates can contain things like UpdateChannelTooLong and UpdateNewChannelMessage.
          // We need to process those as if they were socket updates to discard any we have already handled.
@@ -12751,11 +13447,11 @@ index f7a1278..b06a265 100644
 -        let (mut result_updates, users, chats) = self
 -            .process_updates(us)
 -            .expect("gap is detected while applying difference");
-+        let (mut result_updates, users, chats) = self.process_updates_combined(combined);
++        let (mut result_updates, users, chats) = self.process_updates_combined(combined, true);
  
          result_updates.extend(
              new_messages
-@@ -757,6 +1162,63 @@ impl MessageBoxes {
+@@ -757,13 +1302,94 @@ impl MessageBoxes {
          })
      }
  
@@ -12819,7 +13515,38 @@ index f7a1278..b06a265 100644
      /// Return the request that needs to be made to get a channel's difference, if any.
      ///
      /// Note that this only returns the skeleton of a request.
-@@ -779,26 +1241,30 @@ impl MessageBoxes {
+     /// Both the channel hash and limit will be their default value.
+     pub fn get_channel_difference(&self) -> Option<tl::functions::updates::GetChannelDifference> {
+         let (key, channel_id) = self.channel_in_diff()?;
++        self.channel_difference_request(key, channel_id)
++    }
+ 
++    /// The request for the next channel whose difference is wanted and is not `in_flight`, so
++    /// that several can be fetched at once (see [`Self::set_concurrent_channel_differences`]).
++    ///
++    /// The channels in flight are the first ones of the queue, so this looks past at most as
++    /// many entries as there are requests in flight.
++    pub fn next_channel_difference(
++        &self,
++        in_flight: &HashSet<i64>,
++    ) -> Option<tl::functions::updates::GetChannelDifference> {
++        self.getting_diff_for.iter().find_map(|&key| match key {
++            Key::Channel(id) if !in_flight.contains(&id) => {
++                self.channel_difference_request(key, id)
++            }
++            _ => None,
++        })
++    }
++
++    fn channel_difference_request(
++        &self,
++        key: Key,
++        channel_id: i64,
++    ) -> Option<tl::functions::updates::GetChannelDifference> {
+         if let Some(pts) = self.entry(key).map(|entry| entry.pts) {
+             let gd = tl::functions::updates::GetChannelDifference {
+                 force: false,
+@@ -779,26 +1405,46 @@ impl MessageBoxes {
              trace!("requesting {:?}", gd);
              Some(gd)
          } else {
@@ -12844,10 +13571,26 @@ index f7a1278..b06a265 100644
 -            .channel_in_diff()
 -            .expect("applying channel difference to have a channel in getting_diff_for");
 +    ) -> Result<defs::UpdateAndPeers, Gap> {
-+        let Some((key, channel_id)) = self.channel_in_diff() else {
++        let Some((_, channel_id)) = self.channel_in_diff() else {
 +            warn!("rejecting channel difference without an active channel request");
 +            return Err(Gap);
 +        };
++        self.try_apply_channel_difference_for(channel_id, difference)
++    }
++
++    /// [`Self::try_apply_channel_difference`] for the difference of `channel_id`, one of several
++    /// that may be in flight. Once the difference is final, the socket updates postponed while
++    /// it ran follow its own in the result.
++    pub fn try_apply_channel_difference_for(
++        &mut self,
++        channel_id: i64,
++        difference: tl::enums::updates::ChannelDifference,
++    ) -> Result<defs::UpdateAndPeers, Gap> {
++        let key = Key::Channel(channel_id);
++        if !self.getting_diff_for.contains(&key) {
++            warn!("rejecting channel difference for {channel_id} without an active request");
++            return Err(Gap);
++        }
  
          trace!(
              "applying channel difference for {}: {:?}",
@@ -12859,7 +13602,7 @@ index f7a1278..b06a265 100644
          let tl::types::updates::ChannelDifference {
              r#final,
              pts,
-@@ -807,29 +1273,30 @@ impl MessageBoxes {
+@@ -807,29 +1453,30 @@ impl MessageBoxes {
              other_updates: updates,
              chats,
              users,
@@ -12900,34 +13643,37 @@ index f7a1278..b06a265 100644
 -            .process_updates(us)
 -            .expect("gap is detected while applying channel difference");
 +        };
-+        let (mut result_updates, users, chats) = self.process_updates_combined(combined);
++        let (mut result_updates, users, chats) = self.process_updates_combined(combined, false);
 +        self.set_pts(key, pts);
  
          result_updates.extend(new_messages.into_iter().map(|message| {
              (
-@@ -847,15 +1314,40 @@ impl MessageBoxes {
+@@ -847,15 +1494,62 @@ impl MessageBoxes {
              )
          }));
  
+-        self.reset_timeout(key, timeout);
++        let (mut users, mut chats) = (users, chats);
 +        if r#final {
 +            debug!(
 +                "handling channel {} difference; no longer getting diff",
 +                channel_id
 +            );
 +            self.try_end_get_diff(key);
++            self.reset_timeout(key, timeout);
++            let (replayed, replayed_users, replayed_chats) = self.replay_postponed(key);
++            result_updates.extend(replayed);
++            users.extend(replayed_users);
++            chats.extend(replayed_chats);
 +        } else {
 +            debug!("handling channel {} difference", channel_id);
++            self.reset_timeout(key, timeout);
 +        }
-         self.reset_timeout(key, timeout);
++
++        Ok((result_updates, users, chats))
++    }
  
 -        (result_updates, users, chats)
-+        Ok((result_updates, users, chats))
-     }
- 
--    pub fn end_channel_difference(&mut self, reason: PrematureEndReason) {
--        let (key, channel_id) = self
--            .channel_in_diff()
--            .expect("ending channel difference to have a channel in getting_diff_for");
 +    /// Deprecated naming alias for [`Self::try_apply_channel_difference`].
 +    ///
 +    /// This intentionally returns `Result` instead of preserving the old infallible return type:
@@ -12944,14 +13690,34 @@ index f7a1278..b06a265 100644
 +    ///
 +    /// Returns [`Gap`] if there was no active channel request to end.
 +    pub fn try_end_channel_difference(&mut self, reason: PrematureEndReason) -> Result<(), Gap> {
-+        let Some((key, channel_id)) = self.channel_in_diff() else {
++        let Some((_, channel_id)) = self.channel_in_diff() else {
 +            warn!("rejecting end-channel-difference without an active channel request");
 +            return Err(Gap);
 +        };
++        self.try_end_channel_difference_for(channel_id, reason)
+     }
+ 
+-    pub fn end_channel_difference(&mut self, reason: PrematureEndReason) {
+-        let (key, channel_id) = self
+-            .channel_in_diff()
+-            .expect("ending channel difference to have a channel in getting_diff_for");
++    /// [`Self::try_end_channel_difference`] for the difference of `channel_id`. A temporary
++    /// failure keeps what was postponed for it until the retry ends; a ban forgets it with the
++    /// checkpoint.
++    pub fn try_end_channel_difference_for(
++        &mut self,
++        channel_id: i64,
++        reason: PrematureEndReason,
++    ) -> Result<(), Gap> {
++        let key = Key::Channel(channel_id);
++        if !self.getting_diff_for.contains(&key) {
++            warn!("rejecting end-channel-difference for {channel_id} without an active request");
++            return Err(Gap);
++        }
  
          trace!(
              "ending channel difference for {} because {:?}",
-@@ -863,8 +1355,7 @@ impl MessageBoxes {
+@@ -863,19 +1557,29 @@ impl MessageBoxes {
          );
          match reason {
              PrematureEndReason::TemporaryServerIssues => {
@@ -12961,8 +13727,9 @@ index f7a1278..b06a265 100644
              }
              PrematureEndReason::Banned => {
                  self.update_entry(key, |entry| entry.possible_gap = None);
-@@ -872,10 +1363,20 @@ impl MessageBoxes {
+                 self.try_end_get_diff(key);
                  self.pop_entry(key);
++                self.drop_postponed(key);
              }
          }
 +        Ok(())
@@ -12984,14 +13751,14 @@ index f7a1278..b06a265 100644
  pub enum PrematureEndReason {
      /// The channel difference failed to be fetched for a temporary reasons.
 diff --git a/grammers-session/src/message_box/tests.rs b/grammers-session/src/message_box/tests.rs
-index 68bb840..af135c2 100644
+index 68bb840..4010c48 100644
 --- a/grammers-session/src/message_box/tests.rs
 +++ b/grammers-session/src/message_box/tests.rs
-@@ -7,14 +7,15 @@
+@@ -7,13 +7,15 @@
  // except according to those terms.
  
  use std::cell::RefCell;
-+use std::collections::BTreeSet;
++use std::collections::{BTreeSet, HashSet};
  use std::ops::Add;
  use std::time::Duration;
  
@@ -12999,13 +13766,12 @@ index 68bb840..af135c2 100644
  
  use super::defs::{
 -    Gap, MessageBox, MessageBoxes, NO_DATE, NO_PTS, NO_SEQ, NO_UPDATES_TIMEOUT, State,
--    UpdateAndPeers,
 +    CHANNEL_DIFFERENCE_RETRY_BASE, Gap, Key, MessageBox, MessageBoxes, NO_DATE, NO_PTS, NO_SEQ,
-+    NO_UPDATES_TIMEOUT, PendingRecovery, RecoveryScope, State, UpdateAndPeers,
++    NO_UPDATES_TIMEOUT, POSTPONED_PER_CHANNEL_MAX, PendingRecovery, RecoveryScope, State,
+     UpdateAndPeers,
  };
  use super::{PrematureEndReason, next_updates_deadline};
- use crate::message_box::POSSIBLE_GAP_TIMEOUT;
-@@ -22,7 +23,7 @@ use crate::message_box::defs::UpdatesLike;
+@@ -22,7 +24,7 @@ use crate::message_box::defs::UpdatesLike;
  use crate::types::{ChannelState, UpdatesState};
  
  thread_local! {
@@ -13014,7 +13780,7 @@ index 68bb840..af135c2 100644
  }
  
  #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-@@ -194,6 +195,266 @@ fn test_connect_flow_with_data() {
+@@ -194,6 +196,266 @@ fn test_connect_flow_with_data() {
      assert_eq!(message_boxes.session_state(), state)
  }
  
@@ -13281,7 +14047,7 @@ index 68bb840..af135c2 100644
  #[test]
  fn test_complete_login_flow() {
      reset_time();
-@@ -230,8 +491,8 @@ fn test_iter_dialogs_flow() {
+@@ -230,8 +492,8 @@ fn test_iter_dialogs_flow() {
          UpdatesState {
              channels: vec![
                  // Notably: sorted, and only the first set is kept.
@@ -13292,7 +14058,7 @@ index 68bb840..af135c2 100644
              ],
              ..message_boxes.session_state()
          }
-@@ -247,6 +508,10 @@ fn test_next_raw_update_flow_empty() {
+@@ -247,6 +509,10 @@ fn test_next_raw_update_flow_empty() {
      assert_eq!(message_boxes.check_deadlines(), deadline);
      assert_eq!(message_boxes.get_difference(), None);
      assert_eq!(message_boxes.get_channel_difference(), None);
@@ -13303,7 +14069,7 @@ index 68bb840..af135c2 100644
  
      advance_time_by(NO_UPDATES_TIMEOUT / 2); // assert unchanged since previous deadline was not met yet
      assert_eq!(message_boxes.check_deadlines(), deadline);
-@@ -279,8 +544,11 @@ fn test_next_raw_update_flow_common_timeout() {
+@@ -279,8 +545,11 @@ fn test_next_raw_update_flow_common_timeout() {
          Some(get_difference(56, 12, 34))
      );
  
@@ -13317,7 +14083,7 @@ index 68bb840..af135c2 100644
  
      assert_eq!(message_boxes.get_difference(), None);
      assert_eq!(message_boxes.check_deadlines(), next_updates_deadline());
-@@ -311,13 +579,17 @@ fn test_next_raw_update_flow_channel_timeout() {
+@@ -311,13 +580,17 @@ fn test_next_raw_update_flow_channel_timeout() {
          Some(get_channel_difference(12, 34))
      );
  
@@ -13342,7 +14108,7 @@ index 68bb840..af135c2 100644
      );
  
      assert_eq!(message_boxes.get_difference(), None);
-@@ -325,12 +597,168 @@ fn test_next_raw_update_flow_channel_timeout() {
+@@ -325,12 +598,168 @@ fn test_next_raw_update_flow_channel_timeout() {
      assert_eq!(
          message_boxes.session_state(),
          UpdatesState {
@@ -13512,7 +14278,7 @@ index 68bb840..af135c2 100644
  #[test]
  fn test_next_raw_update_flow_channel_issues() {
      reset_time();
-@@ -341,17 +769,55 @@ fn test_next_raw_update_flow_channel_issues() {
+@@ -341,17 +770,55 @@ fn test_next_raw_update_flow_channel_issues() {
      assert_eq!(message_boxes.check_deadlines(), Instant::now());
      assert!(message_boxes.get_channel_difference().is_some());
  
@@ -13522,10 +14288,10 @@ index 68bb840..af135c2 100644
 +            .try_end_channel_difference(PrematureEndReason::TemporaryServerIssues)
 +            .is_ok()
 +    );
-     assert!(message_boxes.get_channel_difference().is_none());
++    assert!(message_boxes.get_channel_difference().is_none());
 +    advance_time_by(CHANNEL_DIFFERENCE_RETRY_BASE - Duration::from_millis(1));
 +    message_boxes.check_deadlines();
-+    assert!(message_boxes.get_channel_difference().is_none());
+     assert!(message_boxes.get_channel_difference().is_none());
 +    advance_time_by(Duration::from_millis(1));
 +    message_boxes.check_deadlines();
 +    assert_eq!(
@@ -13570,7 +14336,7 @@ index 68bb840..af135c2 100644
  #[test]
  fn test_next_raw_update_flow_channel_ban() {
      reset_time();
-@@ -362,7 +828,11 @@ fn test_next_raw_update_flow_channel_ban() {
+@@ -362,7 +829,11 @@ fn test_next_raw_update_flow_channel_ban() {
      assert_eq!(message_boxes.check_deadlines(), Instant::now());
      assert!(message_boxes.get_channel_difference().is_some());
  
@@ -13583,7 +14349,7 @@ index 68bb840..af135c2 100644
      assert!(message_boxes.get_channel_difference().is_none());
      assert_eq!(
          message_boxes.session_state(),
-@@ -398,7 +868,11 @@ fn test_next_raw_update_flow_no_new_get_diff_if_already_fetching() {
+@@ -398,7 +869,11 @@ fn test_next_raw_update_flow_no_new_get_diff_if_already_fetching() {
  
      // t(6) = second and third channel should have timed out by now, but didn't yet
      advance_time_by(2 * (NO_UPDATES_TIMEOUT / 3));
@@ -13596,7 +14362,7 @@ index 68bb840..af135c2 100644
      assert_eq!(message_boxes.get_channel_difference(), None);
  
      // t(6) = checking deadlines now triggers difference for second and third
-@@ -407,12 +881,20 @@ fn test_next_raw_update_flow_no_new_get_diff_if_already_fetching() {
+@@ -407,12 +882,20 @@ fn test_next_raw_update_flow_no_new_get_diff_if_already_fetching() {
          message_boxes.get_channel_difference(),
          Some(get_channel_difference(21, 22))
      );
@@ -13619,7 +14385,7 @@ index 68bb840..af135c2 100644
      assert_eq!(message_boxes.get_channel_difference(), None);
  }
  
-@@ -432,7 +914,7 @@ fn test_process_socket_updates_flow_already_processed() {
+@@ -432,7 +915,7 @@ fn test_process_socket_updates_flow_already_processed() {
          (NO_PTS, 56), // seq ok (0), pts already applied (=)
      ] {
          assert_eq!(
@@ -13628,7 +14394,7 @@ index 68bb840..af135c2 100644
              Ok((Vec::new(), Vec::new(), Vec::new()))
          );
      }
-@@ -454,7 +936,7 @@ fn test_process_socket_updates_flow_common_already_applied() {
+@@ -454,7 +937,7 @@ fn test_process_socket_updates_flow_common_already_applied() {
          (NO_PTS, 56), // seq ok (0), pts already applied (=)
      ] {
          assert_eq!(
@@ -13637,7 +14403,7 @@ index 68bb840..af135c2 100644
              Ok((Vec::new(), Vec::new(), Vec::new()))
          );
      }
-@@ -517,6 +999,57 @@ fn test_process_socket_updates_flow_common_seq_gap() {
+@@ -517,6 +1000,57 @@ fn test_process_socket_updates_flow_common_seq_gap() {
      );
  }
  
@@ -13695,7 +14461,7 @@ index 68bb840..af135c2 100644
  #[test]
  fn test_process_socket_updates_flow_common_pts_possible_gap_resolves() {
      reset_time();
-@@ -629,3 +1162,177 @@ fn test_process_socket_update_for_new_channel_dispatches_first_update() {
+@@ -629,3 +1163,434 @@ fn test_process_socket_update_for_new_channel_dispatches_first_update() {
          ))
      );
  }
@@ -13872,6 +14638,263 @@ index 68bb840..af135c2 100644
 +        None,
 +        "what is kept stays dormant"
 +    );
++}
++
++/// Two channels gapped together: with concurrent differences both are asked for at once, either
++/// may answer first, socket updates for a channel being fetched are held — the one its difference
++/// already returned is not delivered twice, the one after it is delivered once it ends — and a
++/// channel with no difference running is not held behind them.
++#[test]
++fn concurrent_channel_differences_postpone_and_replay_by_pts() {
++    reset_time();
++    let mut message_boxes = MessageBoxes::new();
++    message_boxes.set_concurrent_channel_differences(true);
++    message_boxes.set_state(state(1, 1, 34, 34));
++    message_boxes.try_set_channel_state(1, 10);
++    message_boxes.try_set_channel_state(2, 20);
++
++    for (channel_id, pts) in [(1, 13), (2, 25)] {
++        assert_eq!(
++            message_boxes.process_updates(channel_updates(channel_id, NO_DATE, NO_SEQ, pts)),
++            Ok((Vec::new(), Vec::new(), Vec::new()))
++        );
++    }
++    advance_time_by(POSSIBLE_GAP_TIMEOUT * 2);
++    message_boxes.check_deadlines();
++    let mut in_flight = HashSet::new();
++    assert_eq!(
++        message_boxes.next_channel_difference(&in_flight),
++        Some(get_channel_difference(1, 10))
++    );
++    in_flight.insert(1);
++    assert_eq!(
++        message_boxes.next_channel_difference(&in_flight),
++        Some(get_channel_difference(2, 20))
++    );
++    in_flight.insert(2);
++    assert_eq!(message_boxes.next_channel_difference(&in_flight), None);
++
++    // Arriving while channel 1 is fetched: 13 its difference will return, 14 it will not.
++    for pts in [13, 14] {
++        assert_eq!(
++            message_boxes.process_updates(channel_updates(1, NO_DATE, NO_SEQ, pts)),
++            Ok((Vec::new(), Vec::new(), Vec::new()))
++        );
++    }
++    assert_eq!(message_boxes.postponed_updates(), 2);
++    // A channel nobody is fetching is delivered at once.
++    assert_eq!(
++        message_boxes
++            .process_updates(channel_updates(3, NO_DATE, NO_SEQ, 5))
++            .unwrap()
++            .0
++            .len(),
++        1
++    );
++
++    // The second channel's answer lands first.
++    assert!(
++        message_boxes
++            .try_apply_channel_difference_for(
++                2,
++                tl::types::updates::ChannelDifferenceEmpty {
++                    r#final: true,
++                    pts: 25,
++                    timeout: None,
++                }
++                .into(),
++            )
++            .unwrap()
++            .0
++            .is_empty()
++    );
++
++    let (delivered, _, _) = message_boxes
++        .try_apply_channel_difference_for(
++            1,
++            tl::types::updates::ChannelDifference {
++                r#final: true,
++                pts: 13,
++                timeout: None,
++                new_messages: Vec::new(),
++                other_updates: vec![
++                    channel_update(1, 11),
++                    channel_update(1, 12),
++                    channel_update(1, 13),
++                ],
++                chats: Vec::new(),
++                users: Vec::new(),
++            }
++            .into(),
++        )
++        .unwrap();
++    assert_eq!(
++        delivered
++            .into_iter()
++            .map(|(update, _)| update)
++            .collect::<Vec<_>>(),
++        vec![
++            channel_update(1, 11),
++            channel_update(1, 12),
++            channel_update(1, 13),
++            channel_update(1, 14),
++        ],
++        "each once, in order"
++    );
++    assert_eq!(message_boxes.postponed_updates(), 0);
++    assert_eq!(message_boxes.get_channel_difference(), None);
++    assert!(
++        message_boxes
++            .session_state()
++            .channels
++            .contains(&ChannelState { id: 1, pts: 14 })
++    );
++}
++
++/// Serially, an update for a channel being fetched is still applied at once — the behaviour
++/// every other client of this crate relies on.
++#[test]
++fn serial_channel_differences_still_force_apply_socket_updates() {
++    reset_time();
++    let mut message_boxes = MessageBoxes::new();
++    message_boxes.set_state(state(1, 1, 34, 34));
++    message_boxes.try_set_channel_state(1, 10);
++    message_boxes
++        .process_updates(channel_updates(1, NO_DATE, NO_SEQ, 13))
++        .unwrap();
++    advance_time_by(POSSIBLE_GAP_TIMEOUT * 2);
++    message_boxes.check_deadlines();
++    assert!(message_boxes.get_channel_difference().is_some());
++    assert_eq!(
++        message_boxes
++            .process_updates(channel_updates(1, NO_DATE, NO_SEQ, 14))
++            .unwrap()
++            .0
++            .len(),
++        1
++    );
++    assert_eq!(message_boxes.postponed_updates(), 0);
++}
++
++/// Running alongside socket updates, a gap found while other differences are in flight joins
++/// the queue at its own deadline instead of waiting for them all to end; the deadline handed
++/// back is never one already met, which would have the caller spin; and an entry whose
++/// difference is running is not made dormant (and so never forgotten) as idle.
++#[test]
++fn concurrent_channel_differences_keep_promoting_gaps_and_never_spin() {
++    reset_time();
++    let mut message_boxes = MessageBoxes::new();
++    message_boxes.set_concurrent_channel_differences(true);
++    message_boxes.set_drop_idle_channels(true);
++    message_boxes.set_state(state(1, 1, 34, 34));
++    message_boxes.try_set_channel_state(1, 10);
++    message_boxes.try_set_channel_state(2, 20);
++
++    message_boxes
++        .process_updates(channel_updates(1, NO_DATE, NO_SEQ, 13))
++        .unwrap();
++    advance_time_by(POSSIBLE_GAP_TIMEOUT * 2);
++    message_boxes.check_deadlines();
++    let first = HashSet::from([1]);
++    assert_eq!(message_boxes.next_channel_difference(&first), None);
++
++    // Channel 2 gaps while channel 1's difference is in flight.
++    message_boxes
++        .process_updates(channel_updates(2, NO_DATE, NO_SEQ, 25))
++        .unwrap();
++    advance_time_by(POSSIBLE_GAP_TIMEOUT * 2);
++    let deadline = message_boxes.check_deadlines();
++    assert_eq!(
++        message_boxes.next_channel_difference(&first),
++        Some(get_channel_difference(2, 20)),
++        "promoted while another difference runs"
++    );
++    assert!(deadline > Instant::now(), "the caller would spin on a met deadline");
++
++    // Fifteen idle minutes with both in flight: neither goes dormant or is forgotten.
++    advance_time_by(NO_UPDATES_TIMEOUT * 2);
++    let deadline = message_boxes.check_deadlines();
++    assert!(deadline > Instant::now());
++    let both = HashSet::from([1, 2]);
++    assert_eq!(message_boxes.next_channel_difference(&both), None);
++    assert!(
++        message_boxes
++            .try_apply_channel_difference_for(
++                1,
++                tl::types::updates::ChannelDifferenceEmpty {
++                    r#final: true,
++                    pts: 13,
++                    timeout: None,
++                }
++                .into(),
++            )
++            .is_ok(),
++        "the checkpoint is still there to apply to"
++    );
++}
++
++/// What does not fit is not kept, and its channel's difference runs again once this one ends;
++/// a temporary failure keeps what was held until the retry ends; a ban forgets it.
++#[test]
++fn postponed_overflow_and_premature_ends() {
++    reset_time();
++    let mut message_boxes = MessageBoxes::new();
++    message_boxes.set_concurrent_channel_differences(true);
++    message_boxes.set_state(state(1, 1, 34, 34));
++    message_boxes.try_set_channel_state(1, 10);
++    message_boxes.try_set_channel_state(2, 20);
++    for (channel_id, pts) in [(1, 13), (2, 23)] {
++        message_boxes
++            .process_updates(channel_updates(channel_id, NO_DATE, NO_SEQ, pts))
++            .unwrap();
++    }
++    advance_time_by(POSSIBLE_GAP_TIMEOUT * 2);
++    message_boxes.check_deadlines();
++
++    let per_channel = POSTPONED_PER_CHANNEL_MAX as i32;
++    for pts in 14..14 + per_channel + 1 {
++        message_boxes
++            .process_updates(channel_updates(1, NO_DATE, NO_SEQ, pts))
++            .unwrap();
++    }
++    assert_eq!(message_boxes.postponed_updates(), per_channel as usize);
++    message_boxes
++        .try_apply_channel_difference_for(
++            1,
++            tl::types::updates::ChannelDifferenceEmpty {
++                r#final: true,
++                pts: 13,
++                timeout: None,
++            }
++            .into(),
++        )
++        .unwrap();
++    assert_eq!(message_boxes.postponed_updates(), 0);
++    assert!(
++        message_boxes
++            .next_channel_difference(&HashSet::new())
++            .is_some_and(|request| request.channel == get_channel_difference(1, 0).channel),
++        "the one not kept is fetched again"
++    );
++
++    // Channel 2: held through a temporary failure, forgotten with a ban.
++    message_boxes
++        .process_updates(channel_updates(2, NO_DATE, NO_SEQ, 24))
++        .unwrap();
++    assert_eq!(message_boxes.postponed_updates(), 1);
++    message_boxes
++        .try_end_channel_difference_for(2, PrematureEndReason::TemporaryServerIssues)
++        .unwrap();
++    message_boxes
++        .process_updates(channel_updates(2, NO_DATE, NO_SEQ, 25))
++        .unwrap();
++    assert_eq!(message_boxes.postponed_updates(), 2, "still held, behind the first");
++    advance_time_by(CHANNEL_DIFFERENCE_RETRY_BASE * 2);
++    message_boxes.check_deadlines();
++    message_boxes
++        .try_end_channel_difference_for(2, PrematureEndReason::Banned)
++        .unwrap();
++    assert_eq!(message_boxes.postponed_updates(), 0);
 +}
 diff --git a/grammers-session/src/peer.rs b/grammers-session/src/peer.rs
 index 82b994e..c4681aa 100644
@@ -14445,10 +15468,16 @@ index 82b994e..c4681aa 100644
 +    }
 +}
 diff --git a/grammers-session/src/storages/sqlite.rs b/grammers-session/src/storages/sqlite.rs
-index f5b2c5a..827337b 100644
+index f5b2c5a..a0e618a 100644
 --- a/grammers-session/src/storages/sqlite.rs
 +++ b/grammers-session/src/storages/sqlite.rs
-@@ -11,6 +11,7 @@ use std::fmt;
+@@ -6,11 +6,12 @@
+ // option. This file may not be copied, modified, or distributed
+ // except according to those terms.
+ 
+-use std::collections::HashMap;
++use std::collections::{HashMap, HashSet};
+ use std::fmt;
  use std::net::AddrParseError;
  use std::path::Path;
  use std::sync::Mutex;
@@ -14456,7 +15485,7 @@ index f5b2c5a..827337b 100644
  
  use libsql::{named_params, params};
  use tokio::sync::Mutex as AsyncMutex;
-@@ -23,6 +24,11 @@ use crate::{BoxFuture, DEFAULT_DC, KNOWN_DC_OPTIONS, Session};
+@@ -23,6 +24,15 @@ use crate::{BoxFuture, DEFAULT_DC, KNOWN_DC_OPTIONS, Session};
  
  const VERSION: i64 = 1;
  
@@ -14465,10 +15494,14 @@ index f5b2c5a..827337b 100644
 +/// sort happens at most once per that many new peers.
 +const BOUND_EVERY: usize = 200_000;
 +
++/// The `:excess` least recently written users, read off `peer_info_seen`.
++const OLDEST_USERS: &str = "SELECT peer_id FROM peer_info INDEXED BY peer_info_seen
++     WHERE peer_id > 0 ORDER BY seen ASC LIMIT :excess";
++
  struct Database(libsql::Connection);
  
  struct Cache {
-@@ -30,10 +36,66 @@ struct Cache {
+@@ -30,10 +40,70 @@ struct Cache {
      pub dc_options: HashMap<i32, DcOption>,
  }
  
@@ -14532,10 +15565,14 @@ index f5b2c5a..827337b 100644
 +    peers: Mutex<PeerCache>,
 +    /// Rows `cache_peer` added since the table was last bounded; see `BOUND_EVERY`.
 +    added: AtomicUsize,
++    /// `channel_state` as last read or committed, while that is known; written to only under
++    /// `database`. A full update state rewrites just what differs from it — see
++    /// `set_update_state`.
++    channels: Mutex<Option<HashMap<i64, i32>>>,
  }
  
  #[derive(Debug)]
-@@ -160,6 +222,114 @@ impl Database {
+@@ -160,6 +230,127 @@ impl Database {
          Ok(())
      }
  
@@ -14582,18 +15619,18 @@ index f5b2c5a..827337b 100644
 +                return;
 +            }
 +        };
-+        if count.unwrap_or(0) <= keep {
++        let excess = count.unwrap_or(0) - keep;
++        if excess <= 0 {
 +            return;
 +        }
 +        match self
 +            .0
 +            .execute(
 +                "DELETE FROM peer_info
-+                  WHERE peer_id < 0
-+                    AND peer_id NOT IN (
++                  WHERE peer_id IN (
 +                        SELECT peer_id FROM peer_info WHERE peer_id < 0
-+                         ORDER BY seen DESC LIMIT :keep)",
-+                named_params! {":keep": keep},
++                         ORDER BY seen ASC LIMIT :excess)",
++                named_params! {":excess": excess},
 +            )
 +            .await
 +        {
@@ -14609,6 +15646,21 @@ index f5b2c5a..827337b 100644
 +            .0
 +            .execute("ALTER TABLE peer_info ADD COLUMN seen INTEGER", params![])
 +            .await;
++        // The oldest go first, read off this index. Without it every bound sorted the whole
++        // table to keep its newest two million — and a table at its bound is past it again by
++        // the next open, so that was seconds of sort at every start, and again every
++        // `BOUND_EVERY` peers on the update task's database lock. A write touches it only when
++        // a peer is new or changed (`write_peer`), which is when `seen` is stamped anyway.
++        if let Err(e) = self
++            .0
++            .execute(
++                "CREATE INDEX IF NOT EXISTS peer_info_seen ON peer_info (seen)",
++                params![],
++            )
++            .await
++        {
++            log::warn!("session: could not index peers by age: {e}");
++        }
 +
 +        let over: Option<i64> = match self
 +            .fetch_one(
@@ -14624,21 +15676,19 @@ index f5b2c5a..827337b 100644
 +                return;
 +            }
 +        };
-+        if over.unwrap_or(0) <= keep {
++        let excess = over.unwrap_or(0) - keep;
++        if excess <= 0 {
 +            return;
 +        }
 +
 +        // Rows written before the column existed sort first and go first, which is right:
-+        // they are the oldest.
++        // they are the oldest. `INDEXED BY` because, left to itself, the planner takes the
++        // primary-key range `peer_id > 0` — which is nearly every row — and sorts it.
 +        match self
 +            .0
 +            .execute(
-+                "DELETE FROM peer_info
-+                  WHERE peer_id > 0
-+                    AND peer_id NOT IN (
-+                        SELECT peer_id FROM peer_info WHERE peer_id > 0
-+                         ORDER BY seen DESC LIMIT :keep)",
-+                named_params! {":keep": keep},
++                &format!("DELETE FROM peer_info WHERE peer_id IN ({OLDEST_USERS})"),
++                named_params! {":excess": excess},
 +            )
 +            .await
 +        {
@@ -14650,7 +15700,7 @@ index f5b2c5a..827337b 100644
      async fn begin_transaction(&self) -> libsql::Result<libsql::Transaction> {
          self.0.transaction().await
      }
-@@ -209,11 +379,36 @@ impl SqliteSession {
+@@ -209,11 +400,36 @@ impl SqliteSession {
      pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self, SqliteSessionError> {
          let conn = libsql::Builder::new_local(path).build().await?.connect()?;
          let db = Database(conn);
@@ -14688,16 +15738,17 @@ index f5b2c5a..827337b 100644
              })
              .await?
              .unwrap_or(DEFAULT_DC);
-@@ -243,6 +438,8 @@ impl SqliteSession {
+@@ -243,6 +459,9 @@ impl SqliteSession {
                  home_dc,
                  dc_options,
              }),
 +            peers: Mutex::new(PeerCache::default()),
 +            added: AtomicUsize::new(0),
++            channels: Mutex::new(None),
          })
      }
  }
-@@ -328,98 +525,67 @@ impl Session for SqliteSession {
+@@ -328,98 +547,67 @@ impl Session for SqliteSession {
  
      fn peer(&self, peer: PeerId) -> BoxFuture<'_, Result<Option<PeerInfo>, SqliteSessionError>> {
          Box::pin(async move {
@@ -14845,10 +15896,130 @@ index f5b2c5a..827337b 100644
              Ok(())
          })
      }
-@@ -572,6 +738,141 @@ impl Session for SqliteSession {
+@@ -451,6 +639,13 @@ impl Session for SqliteSession {
+                     })
+                 })
+                 .await?;
++            *self.channels.lock().map_err(|_| SqliteSessionError::Poisoned)? = Some(
++                state
++                    .channels
++                    .iter()
++                    .map(|channel| (channel.id, channel.pts))
++                    .collect(),
++            );
+             Ok(state)
+         })
      }
- }
+@@ -462,6 +657,8 @@ impl Session for SqliteSession {
+         Box::pin(async move {
+             let db = self.database.lock().await;
+             let transaction = db.begin_transaction().await?;
++            // What `channels` becomes once this commits; `None` leaves it as it is.
++            let mut committed: Option<HashMap<i64, i32>> = None;
  
+             match update {
+                 UpdateState::All(updates_state) => {
+@@ -480,20 +677,60 @@ impl Session for SqliteSession {
+                         )
+                         .await?;
+ 
+-                    transaction
+-                        .execute("DELETE FROM channel_state", params![])
++                    // Only what differs from the table as last read or committed, through one
++                    // prepared statement. Rewriting every checkpoint — a delete and up to a
++                    // hundred thousand inserts each — held this lock, which the update task
++                    // needs for every new peer, at every checkpoint and every shutdown; most of
++                    // those channels are dormant and their `pts` never moved. Not known (never
++                    // read, or a write that did not commit): rewritten whole, as before.
++                    let previous = self
++                        .channels
++                        .lock()
++                        .map_err(|_| SqliteSessionError::Poisoned)?
++                        .take();
++                    let upsert = transaction
++                        .prepare("INSERT OR REPLACE INTO channel_state VALUES (:peer_id, :pts)")
+                         .await?;
+-                    for channel in updates_state.channels {
+-                        transaction
+-                            .execute(
+-                                "INSERT INTO channel_state VALUES (:peer_id, :pts)",
+-                                named_params! {
+-                                    ":peer_id": channel.id,
+-                                    ":pts": channel.pts,
+-                                },
+-                            )
++                    match &previous {
++                        Some(previous) => {
++                            let kept: HashSet<i64> =
++                                updates_state.channels.iter().map(|c| c.id).collect();
++                            let delete = transaction
++                                .prepare("DELETE FROM channel_state WHERE peer_id = :peer_id")
++                                .await?;
++                            for id in previous.keys().filter(|id| !kept.contains(id)) {
++                                delete.execute(named_params! {":peer_id": *id}).await?;
++                                delete.reset();
++                            }
++                        }
++                        None => {
++                            transaction
++                                .execute("DELETE FROM channel_state", params![])
++                                .await?;
++                        }
++                    }
++                    for channel in &updates_state.channels {
++                        if previous
++                            .as_ref()
++                            .is_some_and(|previous| previous.get(&channel.id) == Some(&channel.pts))
++                        {
++                            continue;
++                        }
++                        upsert
++                            .execute(named_params! {
++                                ":peer_id": channel.id,
++                                ":pts": channel.pts,
++                            })
+                             .await?;
++                        upsert.reset();
+                     }
++                    committed = Some(
++                        updates_state
++                            .channels
++                            .iter()
++                            .map(|channel| (channel.id, channel.pts))
++                            .collect(),
++                    );
+                 }
+                 UpdateState::Primary { pts, date, seq } => {
+                     let previous = db
+@@ -563,10 +800,161 @@ impl Session for SqliteSession {
+                             },
+                         )
+                         .await?;
++                    transaction.commit().await?;
++                    if let Some(channels) = self
++                        .channels
++                        .lock()
++                        .map_err(|_| SqliteSessionError::Poisoned)?
++                        .as_mut()
++                    {
++                        channels.insert(id, pts);
++                    }
++                    return Ok(());
+                 }
+             }
+ 
+             transaction.commit().await?;
++            if let Some(committed) = committed {
++                *self
++                    .channels
++                    .lock()
++                    .map_err(|_| SqliteSessionError::Poisoned)? = Some(committed);
++            }
++            Ok(())
++        })
++    }
++}
++
 +impl SqliteSession {
 +    /// Counts one added row; true on every `every`th, which is when the table is bounded again.
 +    fn bound_due(&self, every: usize) -> bool {
@@ -14979,15 +16150,10 @@ index f5b2c5a..827337b 100644
 +                params.push((":subtype".to_owned(), subtype));
 +            }
 +            stmt.execute(params).await?;
-+            Ok(())
-+        })
-+    }
-+}
-+
- #[cfg(test)]
- mod tests {
-     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
-@@ -698,4 +999,186 @@ mod tests {
+             Ok(())
+         })
+     }
+@@ -698,4 +1086,258 @@ mod tests {
              }
          );
      }
@@ -15071,6 +16237,63 @@ index f5b2c5a..827337b 100644
 +            known,
 +            "and it comes back off disk"
 +        );
++    }
++
++    #[test]
++    fn a_full_update_state_writes_only_what_differs() {
++        tokio::runtime::Builder::new_current_thread()
++            .enable_all()
++            .build()
++            .unwrap()
++            .block_on(do_a_full_update_state_writes_only_what_differs());
++    }
++
++    /// A checkpoint used to delete every channel cursor and insert them all again. It now writes
++    /// what moved, drops what is gone, and keeps what did not change — and what is on disk is
++    /// exactly what it was handed, including after a single channel's write in between and
++    /// after a reopen, when nothing is known yet and it rewrites the table whole.
++    async fn do_a_full_update_state_writes_only_what_differs() {
++        let path = std::env::temp_dir().join("grammers-channel-state-diff-test.session");
++        let _ = std::fs::remove_file(&path);
++        let channels = |pairs: &[(i64, i32)]| {
++            pairs
++                .iter()
++                .map(|&(id, pts)| ChannelState { id, pts })
++                .collect::<Vec<_>>()
++        };
++        let all = |pairs: &[(i64, i32)]| {
++            UpdateState::All(UpdatesState {
++                pts: 1,
++                qts: 1,
++                date: 1,
++                seq: 1,
++                channels: channels(pairs),
++            })
++        };
++        async fn stored(session: &SqliteSession) -> Vec<ChannelState> {
++            let mut state = session.updates_state().await.unwrap().channels;
++            state.sort_by_key(|channel| channel.id);
++            state
++        }
++
++        let session = SqliteSession::open(&path).await.unwrap();
++        session.set_update_state(all(&[(1, 10), (2, 20), (3, 30)])).await.unwrap();
++        assert_eq!(stored(&session).await, channels(&[(1, 10), (2, 20), (3, 30)]));
++        session
++            .set_update_state(UpdateState::Channel { id: 2, pts: 21 })
++            .await
++            .unwrap();
++        session.set_update_state(all(&[(2, 21), (3, 31), (4, 40)])).await.unwrap();
++        assert_eq!(stored(&session).await, channels(&[(2, 21), (3, 31), (4, 40)]));
++        drop(session);
++
++        let session = SqliteSession::open(&path).await.unwrap();
++        session.set_update_state(all(&[(4, 41), (5, 50)])).await.unwrap();
++        assert_eq!(stored(&session).await, channels(&[(4, 41), (5, 50)]));
++        session.set_update_state(all(&[(5, 50)])).await.unwrap();
++        assert_eq!(stored(&session).await, channels(&[(5, 50)]));
++        drop(session);
++        let _ = std::fs::remove_file(&path);
 +    }
 +
 +    #[test]
@@ -15169,6 +16392,21 @@ index f5b2c5a..827337b 100644
 +            assert!(ids.contains(&12), "the second newest user stays");
 +            assert!(!ids.contains(&11), "an older user goes");
 +            assert!(!ids.contains(&10), "the oldest user goes");
++
++            // The oldest are read off an index, not found by sorting the whole table.
++            let plan: Vec<String> = db
++                .fetch_all(
++                    &format!("EXPLAIN QUERY PLAN {OLDEST_USERS}"),
++                    named_params! {":excess": 1},
++                    |row| Ok(row.get::<String>(3)?),
++                )
++                .await
++                .unwrap();
++            assert!(
++                plan.iter().any(|step| step.contains("peer_info_seen"))
++                    && !plan.iter().any(|step| step.contains("TEMP B-TREE")),
++                "{plan:?}"
++            );
 +        }
 +
 +        let _ = std::fs::remove_file(&path);

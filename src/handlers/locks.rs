@@ -816,7 +816,7 @@ pub async fn service(ctx: &Ctx, message: &Message) {
     if message.action().is_none() || !ctx.settings.is_locked(chat, SERVICE) {
         return;
     }
-    if let Err(e) = message.delete_critical().await {
+    if let Err(e) = ctx.delete_moderated(chat, message).await {
         eprintln!("service lock: could not delete in {chat}: {e}");
     }
 }
@@ -892,7 +892,7 @@ async fn enforce(
         return Acted::No;
     }
 
-    let deleted = match message.delete_critical().await {
+    let deleted = match ctx.delete_moderated(chat, message).await {
         Ok(()) => true,
         Err(e) => {
             eprintln!("could not delete message in {chat}: {e}");

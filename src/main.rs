@@ -7,7 +7,7 @@ mod miniapp;
 mod response;
 mod state;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::num::NonZeroI64;
 use std::sync::Arc;
@@ -438,6 +438,15 @@ async fn periodic_update_checkpoint(
     }
     drop(running);
 
+    let Ok(_background_epoch) = tokio::time::timeout_at(deadline, ctx.checkpoint_epoch()).await
+    else {
+        return Ok(PeriodicCheckpointOutcome::Deferred {
+            reason: "a background iteration exceeded the checkpoint budget; intake was not paused and no cursor was advanced"
+                .to_owned(),
+        });
+    };
+    let _ = tokio::time::timeout_at(deadline, handlers::stats::flush(ctx)).await;
+
     let bot = request_update_checkpoint("bot", bot_commands)?;
     let cleaner = match request_update_checkpoint("cleaner", cleaner_commands) {
         Ok(checkpoint) => checkpoint,
@@ -479,29 +488,6 @@ async fn periodic_update_checkpoint(
             phase: "barrier",
         });
     }
-
-    let _background_epoch = match tokio::time::timeout_at(deadline, ctx.checkpoint_epoch()).await {
-        Ok(epoch) => epoch,
-        Err(_) => {
-            bot_decision
-                .send(CheckpointDecision::ResumeWithoutCommit)
-                .map_err(|_| PeriodicCheckpointError::WorkerStopped {
-                    label: bot_label,
-                    phase: "background-barrier resume",
-                })?;
-            cleaner_decision
-                .send(CheckpointDecision::ResumeWithoutCommit)
-                .map_err(|_| PeriodicCheckpointError::WorkerStopped {
-                    label: cleaner_label,
-                    phase: "background-barrier resume",
-                })?;
-            return Ok(PeriodicCheckpointOutcome::Deferred {
-                reason:
-                    "a background iteration exceeded the checkpoint budget; no cursor was advanced"
-                        .to_owned(),
-            });
-        }
-    };
 
     if ctx.background_task_panicked() {
         return Err(PeriodicCheckpointError::BackgroundTaskFailed(
@@ -636,6 +622,13 @@ fn dormant_channel_cap(ctx: &Ctx) -> usize {
     ctx.max_runtime_chats().saturating_mul(2)
 }
 
+static CHANNEL_DIFFERENCES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+const DEFAULT_CHANNEL_DIFFERENCES: usize = 32;
+
+fn channel_differences() -> usize {
+    *CHANNEL_DIFFERENCES.get().unwrap_or(&DEFAULT_CHANNEL_DIFFERENCES)
+}
+
 async fn run_bot_updates(
     ctx: Arc<Ctx>,
     client: Client,
@@ -652,6 +645,7 @@ async fn run_bot_updates(
                 catch_up: true,
                 drop_idle_channels: true,
                 max_dormant_channels: dormant_channel_cap(&ctx),
+                concurrent_channel_differences: channel_differences(),
             },
         )
         .await
@@ -1191,9 +1185,16 @@ async fn main() -> Result {
         configured_cap("UPDATE_CONCURRENCY", DEFAULT_UPDATE_CONCURRENCY, 32, 4096)?;
     let cleaner_concurrency =
         configured_cap("CLEANER_CONCURRENCY", DEFAULT_CLEANER_CONCURRENCY, 16, 1024)?;
+    let _ = CHANNEL_DIFFERENCES.set(configured_cap(
+        "CHANNEL_DIFFERENCES",
+        DEFAULT_CHANNEL_DIFFERENCES,
+        1,
+        64,
+    )?);
     log::info!(
-        "runtime admission: updates={update_concurrency}, cleaner={cleaner_concurrency}, update_queue={}",
-        UPDATES_CHANNEL_CAPACITY
+        "runtime admission: updates={update_concurrency}, cleaner={cleaner_concurrency}, update_queue={}, channel_differences={}",
+        UPDATES_CHANNEL_CAPACITY,
+        channel_differences()
     );
 
     let api_id = parse_api_id(&required_nonempty_env("TG_ID")?)?;
@@ -1260,6 +1261,7 @@ async fn main() -> Result {
     let relearn_all = migrating || !settings.is_locked(0, &learner_flag);
     let phrase_filters = settings.try_phrase_image_filters().await?;
     let mut refreshed = 0usize;
+    let mut learned: HashMap<String, (Vec<f32>, f32, Option<&'static str>)> = HashMap::new();
     for (chat, row) in phrase_filters {
         let name = row.name.clone();
         if !relearn_all
@@ -1271,31 +1273,39 @@ async fn main() -> Result {
             continue;
         }
         let phrase = name.clone();
-        let outcome = tokio::task::spawn_blocking(move || handlers::imgfilter::refresh(&phrase))
-            .await
-            .map_err(|error| {
-                std::io::Error::other(format!("vision embedding worker failed: {error}"))
-            })?;
-        let (vector, cut, live) = match outcome {
-            handlers::imgfilter::Refresh::Learned(learned) => {
-                (learned.vector, learned.cut, row.live)
-            }
-            handlers::imgfilter::Refresh::Inert(why) => {
-                println!("image filters: «{name}» in {chat} kept but inert: {why}");
-                (
+        if !learned.contains_key(&name) {
+            let outcome =
+                tokio::task::spawn_blocking(move || handlers::imgfilter::refresh(&phrase))
+                    .await
+                    .map_err(|error| {
+                        std::io::Error::other(format!("vision embedding worker failed: {error}"))
+                    })?;
+            let outcome = match outcome {
+                handlers::imgfilter::Refresh::Learned(fitted) => (fitted.vector, fitted.cut, None),
+                handlers::imgfilter::Refresh::Inert(why) => (
                     handlers::imgfilter::inert_vector(),
                     handlers::imgfilter::NEVER,
-                    false,
-                )
-            }
-            handlers::imgfilter::Refresh::Unavailable => {
-                return Err(std::io::Error::other(format!(
-                    "vision embedding unavailable while migrating {chat}/{name}"
-                ))
-                .into());
+                    Some(why),
+                ),
+                handlers::imgfilter::Refresh::Unavailable => {
+                    return Err(std::io::Error::other(format!(
+                        "vision embedding unavailable while migrating {chat}/{name}"
+                    ))
+                    .into());
+                }
+            };
+            learned.insert(name.clone(), outcome);
+        }
+        let (vector, cut, inert) = &learned[&name];
+        let live = match inert {
+            None => row.live,
+            Some(why) => {
+                println!("image filters: «{name}» in {chat} kept but inert: {why}");
+                false
             }
         };
-        let (bytes, scale) = handlers::imgfilter::quantize(&vector);
+        let (vector, cut) = (vector.as_slice(), *cut);
+        let (bytes, scale) = handlers::imgfilter::quantize(vector);
         let saved = settings
             .try_save_image_filter(
                 chat,
@@ -1432,7 +1442,11 @@ async fn main() -> Result {
         bot_stopping,
         bot_checkpoints,
     ));
-    handlers::stats::recover_awards(&ctx).await;
+    let awards_ctx = Arc::clone(&ctx);
+    background_tasks.spawn(async move {
+        let _epoch = awards_ctx.background_epoch().await;
+        handlers::stats::recover_awards(&awards_ctx).await;
+    });
 
     let user_session = Arc::new(SqliteSession::open(USER_SESSION_FILE).await?);
     let SenderPool {
@@ -1481,6 +1495,7 @@ async fn main() -> Result {
                     catch_up: true,
                     drop_idle_channels: true,
                     max_dormant_channels: dormant_channel_cap(&cleaner_ctx),
+                    concurrent_channel_differences: channel_differences(),
                 },
             )
             .await

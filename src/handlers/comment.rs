@@ -127,12 +127,8 @@ async fn act(ctx: &Arc<Ctx>, chat: i64, chat_ref: PeerRef, entry: Queued) {
     if !ctx.claim_moderation(chat, entry.message) {
         return;
     }
-    match ctx
-        .client
-        .delete_messages_critical(chat_ref, &[entry.message])
-        .await
-    {
-        Ok(0) => {
+    match ctx.delete_proven(chat, chat_ref, entry.message).await {
+        Ok(false) => {
             eprintln!(
                 "comment: delete affected nothing in {chat} msg {}",
                 entry.message

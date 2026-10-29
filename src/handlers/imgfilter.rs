@@ -1014,12 +1014,8 @@ pub async fn act_detached(ctx: &Arc<Ctx>, detached: Detached<'_>) {
     let Some((filter, _)) = worst(filters, margins, true) else {
         return;
     };
-    match ctx
-        .client
-        .delete_messages_critical(chat_ref, &[message_id])
-        .await
-    {
-        Ok(0) => {
+    match ctx.delete_proven(chat, chat_ref, message_id).await {
+        Ok(false) => {
             eprintln!("imgfilter: delete returned zero events in {chat} msg {message_id}");
             return;
         }

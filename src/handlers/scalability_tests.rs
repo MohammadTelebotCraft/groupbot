@@ -617,6 +617,143 @@ fn counter_lock_contention() {
 }
 
 #[test]
+fn per_chat_maps_drop_expired_entries_before_growing() {
+    let old = Instant::now() - MEMBER_TRUST - Duration::from_secs(1);
+    let live = |_: &i64, at: &mut Instant| at.elapsed() < MEMBER_TRUST;
+
+    let mut map: HashMap<i64, Instant> = HashMap::new();
+    for key in 0..100_000 {
+        prune_before_growth(&mut map, live);
+        map.insert(key, if key >= 99_990 { Instant::now() } else { old });
+    }
+    assert!(map.capacity() < 1_024, "capacity {}", map.capacity());
+    assert!((99_990..100_000).all(|key| map.contains_key(&key)));
+
+    let mut map: HashMap<i64, Instant> = HashMap::new();
+    for key in 0..10_000 {
+        prune_before_growth(&mut map, live);
+        map.insert(key, Instant::now());
+    }
+    assert_eq!(map.len(), 10_000);
+}
+
+type Sent = Arc<Mutex<Vec<Vec<i32>>>>;
+type DeleteCall = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<usize, Arc<grammers_client::InvocationError>>> + Send>,
+>;
+
+fn held_send(
+    sent: Sent,
+    mut released: tokio::sync::watch::Receiver<bool>,
+    already_gone: usize,
+) -> impl FnOnce(Vec<i32>) -> DeleteCall {
+    move |ids| {
+        Box::pin(async move {
+            let carried = ids.len();
+            sent.lock().unwrap().push(ids);
+            let _ = released.wait_for(|go| *go).await;
+            Ok(carried.saturating_sub(already_gone))
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_batch_proves_each_deletion_only_when_it_deleted_them_all() {
+    for (already_gone, proven) in [(0, true), (1, false)] {
+        let state = Arc::new(ChatState::default());
+        let sent: Sent = Arc::default();
+        let (release, released) = tokio::sync::watch::channel(false);
+        let first = tokio::spawn({
+            let state = Arc::clone(&state);
+            let send = held_send(Arc::clone(&sent), released.clone(), 0);
+            async move { delete_in_turn(&state, 1, send).await }
+        });
+        while sent.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        let mut batch = tokio::task::JoinSet::new();
+        for id in 2..=4 {
+            let state = Arc::clone(&state);
+            let send = held_send(Arc::clone(&sent), released.clone(), already_gone);
+            batch.spawn(async move { delete_in_turn(&state, id, send).await });
+        }
+        while state.deletes.lock().unwrap().waiting.len() < 3 {
+            tokio::task::yield_now().await;
+        }
+        release.send(true).unwrap();
+        assert!(first.await.unwrap().unwrap(), "a lone deletion that went is proof");
+        while let Some(done) = batch.join_next().await {
+            assert_eq!(done.unwrap().unwrap(), proven, "{already_gone} already gone");
+        }
+    }
+}
+
+#[tokio::test]
+async fn moderation_deletions_in_one_chat_share_a_call() {
+    let state = Arc::new(ChatState::default());
+    let sent: Sent = Arc::default();
+    let (release, released) = tokio::sync::watch::channel(false);
+    let mut tasks = tokio::task::JoinSet::new();
+    let spawn = |tasks: &mut tokio::task::JoinSet<_>, id: i32| {
+        let state = Arc::clone(&state);
+        let send = held_send(Arc::clone(&sent), released.clone(), 0);
+        tasks.spawn(async move { delete_in_turn(&state, id, send).await });
+    };
+    spawn(&mut tasks, 1);
+    while sent.lock().unwrap().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    for id in 2..=11 {
+        spawn(&mut tasks, id);
+    }
+    while state.deletes.lock().unwrap().waiting.len() < 10 {
+        tokio::task::yield_now().await;
+    }
+    release.send(true).unwrap();
+    while let Some(done) = tasks.join_next().await {
+        assert!(done.unwrap().unwrap(), "all ten were deleted, so each is proven");
+    }
+    let mut calls = sent.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    calls[1].sort_unstable();
+    assert_eq!(calls, vec![vec![1], (2..=11).collect::<Vec<_>>()]);
+    assert!(!state.deletes.lock().unwrap().sending, "the chat is idle again");
+}
+
+#[tokio::test]
+async fn a_cancelled_delete_hands_the_turn_on() {
+    let state = Arc::new(ChatState::default());
+    let stuck = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            delete_in_turn(&state, 1, |_| {
+                std::future::pending::<Result<usize, Arc<grammers_client::InvocationError>>>()
+            })
+            .await
+        }
+    });
+    while !state.deletes.lock().unwrap().sending {
+        tokio::task::yield_now().await;
+    }
+    let follower = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            delete_in_turn(&state, 2, |ids: Vec<i32>| async move {
+                assert_eq!(ids, vec![2]);
+                Ok(1)
+            })
+            .await
+        }
+    });
+    while state.deletes.lock().unwrap().waiting.is_empty() {
+        tokio::task::yield_now().await;
+    }
+    stuck.abort();
+    assert!(follower.await.unwrap().is_ok(), "the turn passed on");
+    assert!(!state.deletes.lock().unwrap().sending);
+}
+
+#[test]
 fn flood_expiration_keeps_the_live_suffix_and_supports_shorter_windows() {
     let now = Instant::now();
     let mut times = VecDeque::from([
@@ -703,6 +840,23 @@ async fn admitted_work_owns_chat_state_until_it_finishes() {
 
     drop(admitted);
     assert_eq!(ctx.evict_idle(Duration::ZERO), 1);
+}
+
+#[tokio::test]
+#[ignore = "chat eviction against isolated PostgreSQL"]
+async fn a_swept_chat_is_evicted_and_stays_swept() {
+    let (ctx, _, _, _, _) = fixture(2, 0).await;
+    ctx.settings.try_set(-1, bots::LOCK, true).await.unwrap();
+    ctx.settings.try_set(-2, bots::LOCK, true).await.unwrap();
+    let swept = ctx.state(-1);
+    assert!(!swept.swept_bots.swap(true, Ordering::Relaxed));
+    ctx.remember_swept(-1);
+    drop(swept);
+    drop(ctx.state(-2));
+
+    assert_eq!(ctx.evict_idle(Duration::ZERO), 2, "the bot lock no longer pins a chat");
+    assert!(ctx.state(-1).swept_bots.load(Ordering::Relaxed));
+    assert!(!ctx.state(-2).swept_bots.load(Ordering::Relaxed));
 }
 
 #[tokio::test]
@@ -898,4 +1052,227 @@ async fn future_sizes() {
         "imgfilter":size!(imgfilter::handle(&ctx, message)),
         "join":size!(join::enforce(&ctx, message))})
     );
+}
+
+async fn top_statements(db: &sqlx::PgPool) -> serde_json::Value {
+    let rows: Vec<(i64, i64, f64, String)> = sqlx::query_as(
+        "SELECT calls, rows, total_exec_time, left(regexp_replace(query, '\\s+', ' ', 'g'), 160)
+         FROM pg_stat_statements WHERE query NOT LIKE '%pg_stat_statements%'
+         ORDER BY total_exec_time DESC LIMIT 4",
+    )
+    .fetch_all(db)
+    .await
+    .unwrap();
+    rows.into_iter()
+        .map(|(calls, rows, ms, sql)| serde_json::json!({"calls":calls,"rows":rows,"ms":ms.round(),"sql":sql}))
+        .collect()
+}
+
+async fn statement_totals(db: &sqlx::PgPool) -> (i64, f64) {
+    sqlx::query_as(
+        "SELECT coalesce(sum(calls),0)::bigint, coalesce(sum(total_exec_time),0)::float8
+         FROM pg_stat_statements WHERE query NOT LIKE '%pg_stat_statements%'",
+    )
+    .fetch_one(db)
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "shard-sized fleet fixture; run tools/scalability_pg.sh first"]
+async fn fleet_jobs() {
+    const ADMIN: &str = "postgresql://moh@127.0.0.1:55432/postgres";
+    const URL: &str = "postgresql://moh@127.0.0.1:55432/groupbot_fleet";
+    let env = |name: &str, default: i64| {
+        std::env::var(name).map_or(default, |value| value.parse().unwrap())
+    };
+    let groups = env("PERF_GROUPS", 50_000);
+    let members = env("PERF_MEMBERS", 200);
+    let admin = sqlx::PgPool::connect(ADMIN).await.unwrap();
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'groupbot_fleet')",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    if !exists {
+        sqlx::query("CREATE DATABASE groupbot_fleet")
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
+    let db = sqlx::PgPool::connect(URL).await.unwrap();
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
+        .execute(&db)
+        .await
+        .unwrap();
+    let today = stats::today() as i64;
+    let have: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM durable_chats), (SELECT count(*) FROM counters)",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap_or((-1, -1));
+    if have != (groups, groups * members) || std::env::var("PERF_REBUILD").is_ok() {
+        drop(Settings::connect(URL).await.unwrap());
+        let started = Instant::now();
+        for statement in [
+            "TRUNCATE durable_chats, settings, counters, tallies, applied_stats_batches, moderation_cases CASCADE",
+            "INSERT INTO durable_chats (chat_id, access_hash, admitted_at)
+             SELECT -(1000000000000 + g), g, 0 FROM generate_series(1, $1::bigint) g",
+            "INSERT INTO settings (chat_id, key, value)
+             SELECT -(1000000000000 + g), s.key,
+                    CASE s.key WHEN 'hash' THEN g::text
+                               WHEN 'owner' THEN (5000000 + g)::text
+                               WHEN 'title' THEN 'group ' || g
+                               WHEN 'left_day' THEN ($3::bigint - g % 120)::text
+                               WHEN 'cln_checked_slot' THEN ($3::bigint - g % 30)::text
+                               WHEN 'report_at' THEN (g * 7 % 1440)::text
+                               WHEN 'auto_purge_at' THEN (g * 11 % 1440)::text
+                               WHEN 'join_channel' THEN 'channel' || g
+                               ELSE s.value END
+             FROM generate_series(1, $1::bigint) g
+             CROSS JOIN (VALUES ('hash', 100, ''), ('title', 78, ''), ('cln_checked_slot', 74, ''),
+                 ('owner', 63, ''), ('bot_kick_adder', 59, ''), ('welcome_text', 57, 'خوش اومدی'),
+                 ('cln_added', 55, ''), ('links', 55, ''), ('bot', 54, ''), ('file', 54, ''),
+                 ('service', 54, ''), ('welcome_ttl', 46, '9'), ('left_day', 39, ''),
+                 ('nsfw', 22, ''), ('cmt_group', 15, ''), ('advert', 12, ''), ('hyperlink', 12, ''),
+                 ('voice_monitor', 12, ''), ('strict_time', 12, '30'), ('strict', 7, ''),
+                 ('gate_on', 11, ''), ('join_channel', 11, ''), ('flood', 7, ''),
+                 ('report_at', 5, ''), ('auto_purge_at', 1, '')) s(key, share, value)
+             WHERE g % 100 < s.share AND $2::bigint > 0",
+            "INSERT INTO counters (chat_id, user_id, name, total, today, day, week, week_at,
+                                   month, month_at, seen)
+             SELECT -(1000000000000 + g), 1000 + m, 'member ' || m, 50 + m, 3, $3::bigint, 10,
+                    $3::bigint, 30, $3::bigint, $3::bigint - m % 60
+             FROM generate_series(1, $1::bigint) g, generate_series(1, $2::bigint) m",
+            "INSERT INTO tallies (chat_id, counter, day, count)
+             SELECT -(1000000000000 + g), 'h' || h, $3::bigint, 7
+             FROM generate_series(1, $1::bigint) g, generate_series(0, 16) h
+             WHERE $2::bigint > 0",
+            "INSERT INTO moderation_cases (chat_id, subject_user_id, source, rule_key, reason,
+                                           primary_action, status, created_at, updated_at)
+             SELECT -(1000000000000 + g), 1000 + c, 'lock', 'links', 'fixture', 'delete',
+                    'resolved', extract(epoch FROM now())::bigint - c * 86400,
+                    extract(epoch FROM now())::bigint
+             FROM generate_series(1, $1::bigint) g, generate_series(1, 20) c",
+            "ANALYZE",
+        ] {
+            let query = sqlx::query(statement);
+            let query = if statement.contains("$3") {
+                query.bind(groups).bind(members).bind(today)
+            } else if statement.contains("$1") {
+                query.bind(groups)
+            } else {
+                query
+            };
+            query.execute(&db).await.unwrap();
+        }
+        drop(Settings::connect(URL).await.unwrap());
+        println!(
+            "PERF {}",
+            serde_json::json!({"kind":"fleet_fixture","groups":groups,"members":members,
+            "seconds":started.elapsed().as_secs_f64()})
+        );
+    }
+
+    sqlx::query("SELECT pg_stat_statements_reset()")
+        .execute(&db)
+        .await
+        .unwrap();
+    let before = rss_kib();
+    let started = Instant::now();
+    let settings = Arc::new(
+        Settings::connect_with_chat_limit_and_process_lock(URL, Some(groups as usize + 1))
+            .await
+            .unwrap(),
+    );
+    let (calls, ms) = statement_totals(&db).await;
+    println!(
+        "PERF {}",
+        serde_json::json!({"kind":"fleet_startup","groups":groups,
+        "seconds":started.elapsed().as_secs_f64(),"mirror_rss_kib":rss_kib().saturating_sub(before),
+        "settings_rows":settings.setting_count(),"statements":calls,"db_ms":ms.round(),
+        "top":top_statements(&db).await})
+    );
+
+    let session = Arc::new(MemorySession::default());
+    let pool = SenderPool::new(Arc::clone(&session), 1);
+    let ctx = Arc::new(Ctx::new_with_allowed_chats(
+        Client::new(pool.handle.clone()),
+        settings,
+        grammers_session::storages::erase(session),
+        BotIdentity::new(std::num::NonZeroI64::MIN, None),
+        RuntimeConfig::for_test(),
+        groups as usize + 1,
+        None,
+    ));
+    drop(pool);
+
+    for g in 1..=groups / 10 {
+        let state = ctx.state(-(1_000_000_000_000 + g * 10));
+        for m in 1..=20 {
+            state.count(1000 + m, || "member".into(), ["k_text", "h0"]);
+        }
+    }
+
+    macro_rules! job {
+        ($name:literal, $job:expr) => {{
+            sqlx::query("SELECT pg_stat_statements_reset()")
+                .execute(&db)
+                .await
+                .unwrap();
+            let started = Instant::now();
+            let _ = $job;
+            let seconds = started.elapsed().as_secs_f64();
+            let (calls, ms) = statement_totals(&db).await;
+            println!(
+                "PERF {}",
+                serde_json::json!({"kind":"fleet_job","job":$name,"groups":groups,
+                "seconds":seconds,"statements":calls,"db_ms":ms.round(),
+                "top":top_statements(&db).await})
+            );
+        }};
+    }
+    job!("join::prime", join::prime(&ctx).await);
+    job!("tempmedia::restore", tempmedia::restore(&ctx).await);
+    job!("stats::recover_awards", stats::recover_awards(&ctx).await);
+    job!("load_samples", ctx.load_samples().await);
+    job!("autoconfig::recover_startup", autoconfig::recover_startup(Arc::clone(&ctx)).await);
+    job!("stats::sweep_badges", stats::sweep_badges(&ctx).await);
+    job!("stats::flush", stats::flush(&ctx).await);
+    job!("stats::flush (idle)", stats::flush(&ctx).await);
+    job!("warns::recover_pending", warns::recover_pending(&ctx).await);
+    job!("strict::recover_pending", strict::recover_pending(&ctx).await);
+    job!("captcha::sweep", captcha::sweep(&ctx).await);
+    job!("cleaner_setup::run_recommendations", cleaner_setup::run_recommendations(&ctx).await);
+    job!("rights::run_due", rights::run_due(&ctx).await);
+    job!("stats::run_daily", stats::run_daily(&ctx).await);
+    job!("purge::run_auto", purge::run_auto(&ctx).await);
+    job!("tempmedia::sweep", tempmedia::sweep(&ctx).await);
+    job!("tempmedia::sweep_deferred", tempmedia::sweep_deferred(&ctx).await);
+    job!("nsfw::sweep_pending_webpages", nsfw::sweep_pending_webpages(&ctx).await);
+    job!("log::flush", log::flush(&ctx).await);
+    job!("purge_expired_moderation_cases", ctx.settings.purge_expired_moderation_cases().await);
+    job!("flush_samples", ctx.flush_samples().await);
+    job!("evict_idle", ctx.evict_idle(Duration::ZERO));
+    sqlx::query(
+        "INSERT INTO counters (chat_id, user_id, name, total, day, seen)
+         SELECT -(1000000000000 + g), 999, 'gone', 1, $2, $2
+         FROM generate_series(1, $1::bigint) g",
+    )
+    .bind(groups)
+    .bind(today - 100)
+    .execute(&db)
+    .await
+    .unwrap();
+    job!("stats::prune", stats::prune(&ctx).await);
+    let (left, quiet): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM counters), (SELECT count(*) FROM counters WHERE user_id = 999)",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(quiet, 0, "every quiet member goes");
+    assert_eq!(left, groups * members, "and nobody else");
 }

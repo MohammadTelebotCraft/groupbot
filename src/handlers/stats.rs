@@ -1325,14 +1325,20 @@ pub async fn mark_pruned(ctx: &Ctx) {
 }
 
 pub async fn prune(ctx: &Ctx) -> Result<u64, sqlx::Error> {
-    const BATCH: usize = 500;
+    const PAGE: i64 = 5_000;
 
     let day = today();
     let before = day.saturating_sub(FORGET_DAYS) as i64;
-    let chats = ctx.settings.chats();
+    while ctx.settings.date_uncounted(None, day as i64, PAGE).await? >= PAGE as u64 {
+        tokio::task::yield_now().await;
+    }
     let mut dropped = 0;
-    for batch in chats.chunks(BATCH) {
-        dropped += ctx.settings.forget_idle(batch, before, day as i64).await?;
+    loop {
+        let (gone, full) = ctx.settings.forget_idle(None, before, PAGE).await?;
+        dropped += gone;
+        if !full || gone == 0 {
+            break;
+        }
         tokio::task::yield_now().await;
     }
     if dropped > 0 {

@@ -356,12 +356,8 @@ pub async fn act_detached(ctx: &Arc<Ctx>, detached: Detached<'_>) {
     if !over(margin, armed.limit) || !armed.live {
         return;
     }
-    match ctx
-        .client
-        .delete_messages_critical(chat_ref, &[message_id])
-        .await
-    {
-        Ok(0) => {
+    match ctx.delete_proven(chat, chat_ref, message_id).await {
+        Ok(false) => {
             eprintln!("concept: delete returned zero events in {chat} msg {message_id}");
             return;
         }

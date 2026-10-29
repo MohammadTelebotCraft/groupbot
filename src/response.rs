@@ -1103,13 +1103,9 @@ async fn edit_callback_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
-    fn settings(values: &[(&str, &str)]) -> HashMap<String, String> {
-        values
-            .iter()
-            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-            .collect()
+    fn settings(values: &[(&str, &str)]) -> crate::state::ChatRows {
+        values.iter().copied().collect()
     }
 
     fn decide(values: &[(&str, &str)], kind: ResponseKind, target: bool) -> DeliveryDecision {

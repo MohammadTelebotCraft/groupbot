@@ -1310,7 +1310,7 @@ async fn recognise(
 }
 
 async fn moderate(ctx: &Arc<Ctx>, message: &Message, chat: i64, transcript: Option<&str>) {
-    if let Err(error) = message.delete_critical().await {
+    if let Err(error) = ctx.delete_moderated(chat, message).await {
         eprintln!("voice monitor: could not delete in {chat}: {error}");
         return;
     }

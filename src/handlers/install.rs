@@ -18,6 +18,8 @@ const QUIET_DAYS: i64 = 30;
 
 const DEPARTED_PAGE: i64 = 64;
 
+const DEPARTED_PAGES: usize = 32;
+
 pub async fn departed(ctx: &Ctx, chat: i64) {
     if left_or_forgotten(ctx, chat) {
         return;
@@ -81,26 +83,40 @@ async fn presence(ctx: &Ctx, chat_ref: PeerRef) -> Option<bool> {
 pub async fn forget_departed(ctx: &Ctx) {
     let today = i64::try_from(super::stats::today()).unwrap_or(i64::MAX);
     let horizon = today.saturating_sub(DEPARTED_DAYS);
-    match ctx
-        .settings
-        .chats_marked_before(LEFT_DAY, horizon, DEPARTED_PAGE)
-        .await
-    {
-        Ok(chats) => {
-            super::bounded(chats, super::FLEET_CAMPAIGNS, |chat| {
-                forget_if_gone(ctx, chat)
-            })
+    let mut after = i64::MIN;
+    for _ in 0..DEPARTED_PAGES {
+        let chats = match ctx
+            .settings
+            .chats_marked_before(LEFT_DAY, horizon, after, DEPARTED_PAGE)
             .await
+        {
+            Ok(chats) => chats,
+            Err(error) => {
+                log::warn!("install: departed groups unavailable: {error}");
+                break;
+            }
+        };
+        let Some(&last) = chats.last() else {
+            break;
+        };
+        let full = i64::try_from(chats.len()).is_ok_and(|found| found >= DEPARTED_PAGE);
+        after = last;
+        super::bounded(chats, super::FLEET_CAMPAIGNS, |chat| {
+            forget_if_gone(ctx, chat)
+        })
+        .await;
+        if !full {
+            break;
         }
-        Err(error) => log::warn!("install: departed groups unavailable: {error}"),
     }
 
     let quiet_since = today.saturating_sub(QUIET_DAYS);
     let admitted_before =
         super::tempmedia::unix_now().saturating_sub(QUIET_DAYS.saturating_mul(86_400));
+    let quiet_budget = DEPARTED_PAGE.saturating_mul(DEPARTED_PAGES as i64);
     let mut quiet = Vec::new();
     for batch in ctx.settings.chats().chunks(500) {
-        let room = DEPARTED_PAGE.saturating_sub(i64::try_from(quiet.len()).unwrap_or(i64::MAX));
+        let room = quiet_budget.saturating_sub(i64::try_from(quiet.len()).unwrap_or(i64::MAX));
         if room <= 0 {
             break;
         }

@@ -239,9 +239,12 @@ DEFAULT_MAX_CHATS = 50_000
 DEFAULT_MAX_SETTINGS_ROWS = 5_000_000
 DEFAULT_MAX_SETTINGS_BYTES = 512 * 1024 * 1024
 DEFAULT_MAX_COUNTER_ROWS = 5_000_000
+ABSOLUTE_MAX_COUNTER_ROWS = 50_000_000
+COUNTER_ROWS_PER_CHAT = 400
 DEFAULT_MAX_TALLY_ROWS = 1_000_000
 MIN_MAX_TALLY_ROWS = 10_000
-ABSOLUTE_MAX_TALLY_ROWS = 10_000_000
+# Every group's whole MAX_TALLY_ROWS_PER_CHAT (64) at the largest MAX_SHARD_CHATS (500000).
+ABSOLUTE_MAX_TALLY_ROWS = 32_000_000
 DEFAULT_MAX_NOTE_ROWS = 5_000_000
 DEFAULT_MAX_PENDING_CAPTCHA_ROWS = 500_000
 DEFAULT_BATCH_CHATS = 100
@@ -280,6 +283,7 @@ TYPED_SETTING_KEYS = frozenset(
         "report_at", "report_day", "auto_purge_at", "auto_purge_count", "auto_purge_day",
         "cln_checked_slot", "raid_limit", "raid_window", "raid_time",
         "flood_limit", "flood_window", "cq_lim", "tmed_min", "trade_lim",
+        "left_day", "checked_day", "pruned_day",
     }
 )
 
@@ -313,7 +317,9 @@ def validate_typed_setting_rows(rows: Sequence[tuple[Any, ...]], label: str) -> 
         "flood_limit": (2, 50), "flood_window": (2, 120),
         "cq_lim": (5, 60), "tmed_min": (1, 1_440), "trade_lim": (30, 60),
     }
-    unsigned_64 = {"report_day", "auto_purge_day", "cln_checked_slot"}
+    unsigned_64 = {
+        "report_day", "auto_purge_day", "cln_checked_slot", "left_day", "checked_day", "pruned_day",
+    }
     positive_i64 = {"owner", "glock_until"}
     actions = {
         "strict_action": {"ban", "mute"},
@@ -1219,6 +1225,11 @@ def _tally_row_limit(value: str) -> int:
     return parsed
 
 
+def per_chat_budget(chats: int, per_chat: int, floor: int, ceiling: int) -> int:
+    """The bot's default for a budget that grows with the groups a shard admits."""
+    return min(max(chats * per_chat, floor), ceiling)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, help="chat_ids.txt or shard_route TSV output")
@@ -1251,11 +1262,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-settings-bytes", type=int, default=DEFAULT_MAX_SETTINGS_BYTES
     )
-    parser.add_argument("--max-counter-rows", type=int, default=DEFAULT_MAX_COUNTER_ROWS)
+    # Both default to the bot's own: a share per admitted group (see `per_chat_budget`).
+    parser.add_argument("--max-counter-rows", type=int, default=None)
     parser.add_argument(
         "--max-tally-rows",
         type=_tally_row_limit,
-        default=os.environ.get("MAX_SHARD_TALLY_ROWS", str(DEFAULT_MAX_TALLY_ROWS)),
+        default=os.environ.get("MAX_SHARD_TALLY_ROWS"),
     )
     parser.add_argument("--max-note-rows", type=int, default=DEFAULT_MAX_NOTE_ROWS)
     parser.add_argument(
@@ -1265,7 +1277,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-rows-per-batch", type=int, default=DEFAULT_MAX_ROWS_PER_BATCH)
     parser.add_argument("--apply", action="store_true", help="copy and delete rows; default is read-only preflight")
     parser.add_argument("--json", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.max_counter_rows is None:
+        args.max_counter_rows = per_chat_budget(
+            args.max_chats,
+            COUNTER_ROWS_PER_CHAT,
+            DEFAULT_MAX_COUNTER_ROWS,
+            ABSOLUTE_MAX_COUNTER_ROWS,
+        )
+    if args.max_tally_rows is None:
+        args.max_tally_rows = per_chat_budget(
+            args.max_chats,
+            MAX_TALLY_ROWS_PER_CHAT,
+            DEFAULT_MAX_TALLY_ROWS,
+            ABSOLUTE_MAX_TALLY_ROWS,
+        )
+    return args
 
 
 def main() -> int:

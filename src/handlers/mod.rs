@@ -34,6 +34,7 @@ pub mod limits;
 pub mod lists;
 pub mod locks;
 pub mod log;
+pub mod nickname;
 pub mod notice;
 pub mod nsfw;
 pub mod nsfw_head;
@@ -139,6 +140,7 @@ pub struct ChatState {
     tag_run: AtomicU64,
     member_clear: AtomicBool,
     joined: std::sync::Mutex<HashMap<i32, Vec<Joined>>>,
+    deletes: std::sync::Mutex<DeleteQueue>,
 
     inflight: AtomicUsize,
     inflight_notify: tokio::sync::Notify,
@@ -639,6 +641,7 @@ pub struct Ctx {
     allowed_chats: Option<Arc<HashSet<i64>>>,
 
     chats: RwLock<HashMap<i64, Arc<ChatState>>>,
+    swept_bots: std::sync::Mutex<HashSet<i64>>,
 
     owned_tasks: std::sync::Mutex<OwnedTasks>,
 
@@ -1253,6 +1256,27 @@ const STATS_ROWS_PER_FLUSH: usize = 50_000;
 const LOG_ENTRIES_PER_FLUSH: usize = 50_000;
 const MEDIA_IDS_PER_FLUSH: usize = 50_000;
 
+fn prune_before_growth<K, V>(map: &mut HashMap<K, V>, live: impl FnMut(&K, &mut V) -> bool)
+where
+    K: Eq + Hash,
+{
+    let capacity = map.capacity();
+    if capacity == 0 || map.len() < capacity {
+        return;
+    }
+    map.retain(live);
+    if map.len() > capacity - capacity / 4 {
+        map.reserve(capacity / 4);
+    }
+}
+
+const MESSAGES_WINDOW_MAX: Duration = Duration::from_secs(if raid::WINDOW_RANGE.1 > flood::WINDOW_RANGE.1 {
+    raid::WINDOW_RANGE.1 as u64
+} else {
+    flood::WINDOW_RANGE.1 as u64
+});
+const REMOVALS_WINDOW_MAX: Duration = Duration::from_secs(betrayal::WINDOW_RANGE.1 as u64);
+
 fn make_room<K, V, F>(map: &mut HashMap<K, V>, limit: usize, at: F)
 where
     K: Clone + Eq + Hash,
@@ -1513,6 +1537,76 @@ where
     }
 }
 
+#[derive(Default)]
+struct DeleteQueue {
+    sending: bool,
+    waiting: VecDeque<(i32, tokio::sync::oneshot::Sender<DeleteTurn>)>,
+}
+
+pub type Deleted = Result<bool, Arc<grammers_client::InvocationError>>;
+
+enum DeleteTurn {
+    Done(Deleted),
+    Lead,
+}
+
+const DELETE_BATCH: usize = 100;
+
+struct DeleteLead<'a>(&'a ChatState);
+
+impl Drop for DeleteLead<'_> {
+    fn drop(&mut self) {
+        let mut queue = self.0.deletes.lock().unwrap();
+        while let Some((_, waiter)) = queue.waiting.pop_front() {
+            if waiter.send(DeleteTurn::Lead).is_ok() {
+                return;
+            }
+        }
+        queue.sending = false;
+    }
+}
+
+async fn delete_in_turn<F, Fut>(state: &ChatState, id: i32, send: F) -> Deleted
+where
+    F: FnOnce(Vec<i32>) -> Fut,
+    Fut: std::future::Future<Output = Result<usize, Arc<grammers_client::InvocationError>>>,
+{
+    let waiting = {
+        let mut queue = state.deletes.lock().unwrap();
+        if queue.sending {
+            let (turn, wait) = tokio::sync::oneshot::channel();
+            queue.waiting.push_back((id, turn));
+            Some(wait)
+        } else {
+            queue.sending = true;
+            None
+        }
+    };
+    if let Some(wait) = waiting {
+        match wait.await {
+            Ok(DeleteTurn::Done(result)) => return result,
+            Ok(DeleteTurn::Lead) => {}
+            Err(_) => return Err(Arc::new(grammers_client::InvocationError::Dropped)),
+        }
+    }
+    let lead = DeleteLead(state);
+    let batch: Vec<(i32, tokio::sync::oneshot::Sender<DeleteTurn>)> = {
+        let mut queue = state.deletes.lock().unwrap();
+        let take = queue.waiting.len().min(DELETE_BATCH - 1);
+        queue.waiting.drain(..take).collect()
+    };
+    let ids: Vec<i32> = std::iter::once(id)
+        .chain(batch.iter().map(|(id, _)| *id))
+        .collect();
+    let carried = ids.len();
+    let result = send(ids).await.map(|deleted| deleted >= carried);
+    for (_, waiter) in batch {
+        let _ = waiter.send(DeleteTurn::Done(result.clone()));
+    }
+    drop(lead);
+    result
+}
+
 const DELETE_PARALLEL: usize = 4;
 
 pub async fn delete_chunks(
@@ -1551,6 +1645,34 @@ pub async fn delete_chunks(
 }
 
 impl Ctx {
+    pub async fn delete_moderated(
+        &self,
+        chat: i64,
+        message: &Message,
+    ) -> Result<(), Arc<grammers_client::InvocationError>> {
+        let chat_ref = match message.peer_ref().await {
+            Ok(Some(peer)) => peer,
+            Ok(None) => return Err(Arc::new(grammers_client::InvocationError::Dropped)),
+            Err(error) => return Err(Arc::new(grammers_client::InvocationError::Session(error))),
+        };
+        self.delete_proven(chat, chat_ref, message.id())
+            .await
+            .map(drop)
+    }
+
+    pub async fn delete_proven(&self, chat: i64, chat_ref: PeerRef, id: i32) -> Deleted {
+        let send = |ids: Vec<i32>| async move {
+            self.client
+                .delete_messages_critical(chat_ref, &ids)
+                .await
+                .map_err(Arc::new)
+        };
+        match self.peek(chat) {
+            Some(state) => delete_in_turn(&state, id, send).await,
+            None => send(vec![id]).await.map(|deleted| deleted >= 1),
+        }
+    }
+
     pub fn new_with_allowed_chats(
         client: Client,
         settings: Arc<Settings>,
@@ -1568,6 +1690,7 @@ impl Ctx {
             max_runtime_chats,
             allowed_chats,
             chats: RwLock::new(HashMap::new()),
+            swept_bots: std::sync::Mutex::new(HashSet::new()),
             owned_tasks: std::sync::Mutex::new(OwnedTasks::default()),
             background_epoch: tokio::sync::RwLock::new(()),
             background_panicked: AtomicBool::new(false),
@@ -1748,14 +1871,23 @@ impl Ctx {
         if let Some(state) = self.chats.read().unwrap().get(&chat) {
             return Arc::clone(state);
         }
-        let dirty = Arc::clone(&self.dirty);
-        Arc::clone(self.chats.write().unwrap().entry(chat).or_insert_with(|| {
-            Arc::new(ChatState {
-                chat,
-                dirty,
-                ..Default::default()
-            })
-        }))
+        Arc::clone(
+            self.chats
+                .write()
+                .unwrap()
+                .entry(chat)
+                .or_insert_with(|| self.new_state(chat)),
+        )
+    }
+
+    fn new_state(&self, chat: i64) -> Arc<ChatState> {
+        let swept = self.swept_bots.lock().unwrap().contains(&chat);
+        Arc::new(ChatState {
+            chat,
+            dirty: Arc::clone(&self.dirty),
+            swept_bots: AtomicBool::new(swept),
+            ..Default::default()
+        })
     }
 
     pub fn try_state(&self, chat: i64) -> Option<Arc<ChatState>> {
@@ -1765,7 +1897,6 @@ impl Ctx {
         if let Some(state) = self.chats.read().unwrap().get(&chat) {
             return Some(Arc::clone(state));
         }
-        let dirty = Arc::clone(&self.dirty);
         let mut chats = self.chats.write().unwrap();
         if let Some(state) = chats.get(&chat) {
             return Some(Arc::clone(state));
@@ -1773,13 +1904,13 @@ impl Ctx {
         if chats.len() >= self.max_runtime_chats {
             return None;
         }
-        Some(Arc::clone(chats.entry(chat).or_insert_with(|| {
-            Arc::new(ChatState {
-                chat,
-                dirty,
-                ..Default::default()
-            })
-        })))
+        Some(Arc::clone(
+            chats.entry(chat).or_insert_with(|| self.new_state(chat)),
+        ))
+    }
+
+    fn remember_swept(&self, chat: i64) {
+        self.swept_bots.lock().unwrap().insert(chat);
     }
 
     fn peek(&self, chat: i64) -> Option<Arc<ChatState>> {
@@ -1835,6 +1966,7 @@ impl Ctx {
             return;
         };
         let mut members = state.members.lock().unwrap();
+        prune_before_growth(&mut members, |_, seen| seen.elapsed() < MEMBER_TRUST);
         if members.len() >= PER_CHAT_MAX {
             members.retain(|_, seen| seen.elapsed() < MEMBER_TRUST);
             make_room(&mut members, PER_CHAT_MAX, |seen| *seen);
@@ -2209,6 +2341,7 @@ impl Ctx {
                 if self.filter_versions[slot].load(Ordering::Acquire) != generation {
                     continue;
                 }
+                prune_before_growth(&mut cache, |_, (at, _)| at.elapsed() < FILTERS_TTL);
                 if cache.len() >= PER_CHAT_MAX {
                     cache.retain(|_, (at, _)| at.elapsed() < FILTERS_TTL);
                     make_room(&mut cache, PER_CHAT_MAX, |(at, _)| *at);
@@ -2469,6 +2602,7 @@ impl Ctx {
             return;
         };
         let mut adds = state.adds.lock().unwrap();
+        prune_before_growth(&mut adds, |_, (at, _)| at.elapsed() < ADDS_TTL);
         if adds.len() >= PER_CHAT_MAX {
             adds.retain(|_, (at, _)| at.elapsed() < ADDS_TTL);
             make_room(&mut adds, PER_CHAT_MAX, |(at, _)| *at);
@@ -2696,9 +2830,28 @@ impl Ctx {
         let now = Instant::now();
         let mut ready = Vec::new();
         let mut remaining = MEDIA_IDS_PER_FLUSH;
-        let chats = Dirty::take(&self.dirty.media, FLUSH_CHAT_BATCH);
+        let waiting = self.dirty.media.0.lock().unwrap().len();
+        let mut visited = 0;
+        while visited < waiting {
+            let chats = Dirty::take(&self.dirty.media, FLUSH_CHAT_BATCH.min(waiting - visited));
+            if chats.is_empty() {
+                break;
+            }
+            visited += chats.len();
+            self.take_due_media_of(chats, now, &mut remaining, &mut ready);
+        }
+        ready
+    }
+
+    fn take_due_media_of(
+        &self,
+        chats: Vec<i64>,
+        now: Instant,
+        remaining: &mut usize,
+        ready: &mut Vec<(i64, Vec<i32>)>,
+    ) {
         for chat in chats {
-            if remaining == 0 {
+            if *remaining == 0 {
                 Dirty::mark(&self.dirty.media, chat);
                 continue;
             }
@@ -2711,7 +2864,7 @@ impl Ctx {
             }
             let due = {
                 let mut queue = state.temp_media.lock().unwrap();
-                let due = tempmedia::drain_due_up_to(&mut queue, now, remaining);
+                let due = tempmedia::drain_due_up_to(&mut queue, now, *remaining);
                 if !queue.is_empty() {
                     Dirty::mark(&self.dirty.media, chat);
                 } else {
@@ -2720,11 +2873,10 @@ impl Ctx {
                 due
             };
             if !due.is_empty() {
-                remaining = remaining.saturating_sub(due.len());
+                *remaining = remaining.saturating_sub(due.len());
                 ready.push((chat, due));
             }
         }
-        ready
     }
 
     pub fn take_logs(&self, honour_backoff: bool) -> Vec<(i64, Vec<String>)> {
@@ -3191,6 +3343,7 @@ impl Ctx {
         }) {
             return false;
         }
+        prune_before_growth(&mut notices, |_, (last, window)| last.elapsed() < *window);
         if notices.len() + claims.len() > PER_CHAT_MAX {
             notices.retain(|_, (last, window)| last.elapsed() < *window);
             make_room(
@@ -3230,8 +3383,16 @@ impl Ctx {
             return 0;
         };
         let mut messages = state.messages.lock().unwrap();
+        let live = |_: &i64, times: &mut VecDeque<Instant>| {
+            times
+                .back()
+                .is_some_and(|newest| newest.elapsed() < MESSAGES_WINDOW_MAX)
+        };
+        if !messages.contains_key(&user) {
+            prune_before_growth(&mut messages, live);
+        }
         if messages.len() >= PER_CHAT_MAX && !messages.contains_key(&user) {
-            messages.retain(|_, times| times.iter().any(|t| t.elapsed() < window));
+            messages.retain(live);
             make_room(&mut messages, PER_CHAT_MAX, |times| {
                 times.front().copied().unwrap_or_else(Instant::now)
             });
@@ -3253,6 +3414,13 @@ impl Ctx {
             return 0;
         };
         let mut removals = state.removals.lock().unwrap();
+        if !removals.contains_key(&actor) {
+            prune_before_growth(&mut removals, |_, times| {
+                times
+                    .back()
+                    .is_some_and(|newest| newest.elapsed() < REMOVALS_WINDOW_MAX)
+            });
+        }
         if removals.len() >= PER_CHAT_MAX && !removals.contains_key(&actor) {
             removals.retain(|_, times| times.iter().any(|t| t.elapsed() < window));
             make_room(&mut removals, PER_CHAT_MAX, |times| {
@@ -3329,7 +3497,7 @@ impl Ctx {
 
         let mut going: Vec<i64> = Vec::new();
         for (chat, state) in quiet {
-            if !self.settings.is_locked(chat, bots::LOCK) && state.evictable(idle, now) {
+            if state.evictable(idle, now) {
                 going.push(chat);
             }
         }
@@ -3341,9 +3509,7 @@ impl Ctx {
         let before = chats.len();
         for chat in going {
             if chats.get(&chat).is_some_and(|state| {
-                Arc::strong_count(state) == 1
-                    && !self.settings.is_locked(chat, bots::LOCK)
-                    && state.evictable(idle, now)
+                Arc::strong_count(state) == 1 && state.evictable(idle, now)
             }) {
                 chats.remove(&chat);
             }
@@ -3766,6 +3932,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         && !state.swept_bots.swap(true, Ordering::Relaxed)
     {
         if let Some(permit) = ctx.try_sweep_slot() {
+            ctx.remember_swept(chat);
             let ctx = Arc::clone(ctx);
             Arc::clone(&ctx).spawn_owned(async move {
                 let _permit = permit;
@@ -3867,6 +4034,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
                 || report::handle(ctx, message).await
                 || packs::handle(ctx, message).await
                 || extras::handle(ctx, message, &view).await
+                || nickname::handle(ctx, message, &view).await
                 || captcha::handle(ctx, message).await
                 || tune::handle(ctx, message, &view).await
                 || warns::handle(ctx, message, &view).await
@@ -3902,7 +4070,7 @@ pub async fn respond(
         message,
         kind,
         crate::response::IntendedAudience::RequesterOnly,
-        content.into(),
+        nickname::address(ctx, message, content.into()),
     )
     .await
     {

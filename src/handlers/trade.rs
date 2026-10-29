@@ -835,7 +835,7 @@ async fn act_known(ctx: &Arc<Ctx>, message: &Message, verdict: TradeVerdict<'_>)
     if !deletes(margin, armed.limit, listing, terse) || !armed.live {
         return;
     }
-    if let Err(e) = message.delete_critical().await {
+    if let Err(e) = ctx.delete_moderated(chat, message).await {
         eprintln!("trade: could not delete in {chat}: {e}");
         return;
     }
@@ -883,12 +883,8 @@ async fn act_detached(ctx: &Arc<Ctx>, detached: DetachedTrade<'_>) {
     if !deletes(margin, armed.limit, listing, terse) || !armed.live {
         return;
     }
-    match ctx
-        .client
-        .delete_messages_critical(chat_ref, &[message_id])
-        .await
-    {
-        Ok(0) => {
+    match ctx.delete_proven(chat, chat_ref, message_id).await {
+        Ok(false) => {
             eprintln!("trade: delete affected nothing in {chat} msg {message_id}");
             return;
         }

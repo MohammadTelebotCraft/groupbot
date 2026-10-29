@@ -633,7 +633,7 @@ pub async fn enforce(ctx: &std::sync::Arc<Ctx>, message: &Message) -> bool {
         Ok(Some(peer)) => Some(peer),
         _ => ctx.chat_ref(chat),
     };
-    if let Err(e) = message.delete_critical().await {
+    if let Err(e) = ctx.delete_moderated(chat, message).await {
         eprintln!("join lock: {chat}: could not delete: {e}");
         return false;
     }

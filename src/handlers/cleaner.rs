@@ -216,7 +216,10 @@ async fn join(ctx: &Ctx, user: &Client, chat_ref: PeerRef) -> std::result::Resul
         break result;
     };
     match joined {
-        Ok(Some(_)) => Ok(()),
+        Ok(Some(_)) => {
+            super::cleaner_setup::note_room(ctx).await;
+            Ok(())
+        }
 
         Ok(None) => Err("درخواست عضویت فرستاده شد؛ آن را در گروه تایید کنید.".to_owned()),
         Err(e) if e.to_string().contains("USER_ALREADY_PARTICIPANT") => Ok(()),
@@ -228,6 +231,7 @@ async fn join(ctx: &Ctx, user: &Client, chat_ref: PeerRef) -> std::result::Resul
         }
         Err(e) if e.to_string().contains("CHANNELS_TOO_MUCH") => {
             ctx.pause_cleaner_joins(CLEANER_FULL_PAUSE);
+            super::cleaner_setup::note_full(ctx).await;
             Err("حساب کلینر در گروه های زیادی است و جای خالی ندارد.".to_owned())
         }
         Err(e) if e.to_string().contains("FLOOD_WAIT") => {

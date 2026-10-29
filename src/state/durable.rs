@@ -366,7 +366,7 @@ impl Settings {
         if !inventory.temporaries.is_empty() {
             return Ok(());
         }
-        sqlx::query("DELETE FROM applied_stats_batches WHERE id IN (SELECT id FROM applied_stats_batches WHERE applied_at < now() - interval '90 days' ORDER BY applied_at LIMIT 5000)")
+        sqlx::query("DELETE FROM applied_stats_batches WHERE id IN (SELECT id FROM applied_stats_batches WHERE applied_at < now() - interval '1 day' ORDER BY applied_at LIMIT 5000)")
             .execute(&self.pool).await?;
         Ok(())
     }
@@ -487,7 +487,9 @@ impl Settings {
                          WHERE tallies.chat_id = input.chat AND tallies.counter = input.name
                      )
                  ), affected AS (
-                     SELECT DISTINCT chat FROM input
+                     -- Only a chat adding a counter can cross the per-chat cap. Counting every
+                     -- chat in the chunk read all forty-two rows of each, every minute.
+                     SELECT DISTINCT chat FROM additions
                  ), projected AS (
                      SELECT affected.chat,
                             (SELECT count(*) FROM tallies WHERE chat_id = affected.chat)
