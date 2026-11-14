@@ -30,6 +30,11 @@ cosmic-text = "0.19.0"
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 base64 = "0.22"
 ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+libloading = "0.8"
 unicode-normalization = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 scraper = "0.23"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"

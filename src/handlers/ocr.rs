@@ -11,6 +11,9 @@ use super::nsfw;
 
 #[path = "ocr/signals.rs"]
 pub mod signals;
+#[allow(unsafe_code)]
+#[path = "ocr/worker.rs"]
+pub mod worker;
 pub use signals::{Classification, Decision};
 
 pub const LOCK: &str = "advert";
@@ -233,6 +236,24 @@ fn runtime() -> Result<&'static Runtime, nsfw::ModelError> {
 }
 
 fn command(runtime: &Runtime) -> Result<Command, nsfw::ModelError> {
+    command_for(&runtime.executable, runtime)
+}
+
+fn worker_command(runtime: &Runtime) -> Option<Command> {
+    let mut command = command_for(&std::env::current_exe().ok()?, runtime).ok()?;
+    command.env(worker::ENV, &runtime.directory);
+    #[cfg(test)]
+    command.args([
+        "handlers::ocr::tests::ocr_worker_entry",
+        "--exact",
+        "--include-ignored",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    Some(command)
+}
+
+fn command_for(program: &std::path::Path, runtime: &Runtime) -> Result<Command, nsfw::ModelError> {
     let mut paths = vec![runtime.directory.clone()];
     if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
         paths.extend(std::env::split_paths(&existing));
@@ -242,7 +263,7 @@ fn command(runtime: &Runtime) -> Result<Command, nsfw::ModelError> {
             "could not construct Tesseract library path: {error}"
         ))
     })?;
-    let mut command = Command::new(&runtime.executable);
+    let mut command = Command::new(program);
     command
         .env("LD_LIBRARY_PATH", library_path)
         .env("TESSDATA_PREFIX", &runtime.tessdata)
@@ -670,6 +691,56 @@ fn read_with_options_in_temporary(
     runtime: &Runtime,
     temporary: std::path::PathBuf,
 ) -> Result<String, nsfw::ModelError> {
+    if let Some((whitelist, output)) = worker_request(options, extension)
+        && let Some(answer) =
+            worker::read(|| worker_command(runtime), image, psm, whitelist, output)
+    {
+        drop(TempOcr(temporary));
+        let text = answer.map_err(nsfw::ModelError::Runtime)?;
+        if text.len() as u64 > OCR_MAX_OUTPUT_BYTES {
+            return Err(nsfw::ModelError::contract(format!(
+                "Tesseract output exceeds {OCR_MAX_OUTPUT_BYTES} bytes"
+            )));
+        }
+        return Ok(bounded_output(text, extension));
+    }
+    read_by_command(image, psm, options, extension, runtime, temporary)
+}
+
+fn worker_request<'a>(options: &[&'a str], extension: &str) -> Option<(&'a str, worker::Output)> {
+    match (options, extension) {
+        ([], "txt") => Some(("", worker::Output::Text)),
+        (["-c", "tessedit_create_tsv=1", "-c", "tessedit_create_txt=0"], "tsv") => {
+            Some(("", worker::Output::Tsv))
+        }
+        (["-c", whitelist], "txt") => Some((
+            whitelist.strip_prefix("tessedit_char_whitelist=")?,
+            worker::Output::Text,
+        )),
+        _ => None,
+    }
+}
+
+fn bounded_output(text: String, extension: &str) -> String {
+    text.chars()
+        .take(if extension == "tsv" {
+            OCR_MAX_OUTPUT_BYTES as usize
+        } else {
+            OCR_MAX_TEXT_CHARS
+        })
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+fn read_by_command(
+    image: &image::RgbImage,
+    psm: &str,
+    options: &[&str],
+    extension: &str,
+    runtime: &Runtime,
+    temporary: std::path::PathBuf,
+) -> Result<String, nsfw::ModelError> {
     let cleanup = TempOcr(temporary.clone());
     let input = temporary.join("input.ppm");
     let output_base = temporary.join("output");
@@ -732,16 +803,9 @@ fn read_with_options_in_temporary(
         )));
     }
     let text = std::fs::read_to_string(&output)
-        .map_err(|error| nsfw::ModelError::Runtime(format!("could not read OCR output: {error}")))?
-        .chars()
-        .take(if extension == "tsv" {
-            OCR_MAX_OUTPUT_BYTES as usize
-        } else {
-            OCR_MAX_TEXT_CHARS
-        })
-        .collect::<String>();
+        .map_err(|error| nsfw::ModelError::Runtime(format!("could not read OCR output: {error}")))?;
     drop(cleanup);
-    Ok(text.trim().to_owned())
+    Ok(bounded_output(text, extension))
 }
 
 struct TempOcr(std::path::PathBuf);
@@ -966,6 +1030,67 @@ mod tests {
         std::fs::remove_file(&artifact).expect("remove test artifact");
         std::fs::remove_dir(&blocked).expect("remove test directory");
         std::fs::remove_dir(&temporary).expect("remove private OCR directory");
+    }
+
+    #[test]
+    #[ignore = "the kept OCR worker's entry point in test builds; started by the OCR tests"]
+    fn ocr_worker_entry() {
+        if std::env::var_os(worker::ENV).is_some() {
+            std::process::exit(worker::serve());
+        }
+    }
+
+    #[test]
+    fn the_kept_engine_reads_what_the_command_line_reads() {
+        let _test_guard = OCR_TEMP_TEST_LOCK.lock().unwrap();
+        let runtime = runtime().expect("embedded OCR runtime");
+        let mut pictures = [
+            &include_bytes!("../../tests/fixtures/media/ad-sparse-corners.png")[..],
+            &include_bytes!("../../tests/fixtures/media/ad-small-compressed.jpg")[..],
+            &include_bytes!("../../tests/fixtures/media/ad-market-discussion-model-number.png")[..],
+            &include_bytes!("../../tests/fixtures/media/ad-retail-model-number.png")[..],
+        ]
+        .map(|bytes| bounded_view(&image::load_from_memory(bytes).unwrap().to_rgb8()).into_owned())
+        .to_vec();
+        pictures.push(image::imageops::rotate90(&pictures[0]));
+        pictures.push(image::RgbImage::from_pixel(320, 180, image::Rgb([255, 255, 255])));
+        let digits = ["-c", "tessedit_char_whitelist=۰۱۲۳۴۵۶۷۸۹0123456789"];
+        let tsv = ["-c", "tessedit_create_tsv=1", "-c", "tessedit_create_txt=0"];
+        let passes: [(&str, &[&str], &str); 6] = [
+            ("6", &[], "txt"),
+            ("3", &[], "txt"),
+            ("11", &[], "txt"),
+            ("13", &[], "txt"),
+            ("8", &digits, "txt"),
+            ("6", &tsv, "tsv"),
+        ];
+        let mut compared = 0;
+        for (psm, options, extension) in passes {
+            for picture in &pictures {
+                let by_command = read_by_command(
+                    picture,
+                    psm,
+                    options,
+                    extension,
+                    runtime,
+                    create_private_ocr_temp_dir().unwrap(),
+                )
+                .unwrap();
+                let (whitelist, output) = worker_request(options, extension).unwrap();
+                let kept = worker::read(|| worker_command(runtime), picture, psm, whitelist, output)
+                    .expect("a kept worker is available")
+                    .unwrap();
+                assert_eq!(
+                    bounded_output(kept, extension),
+                    by_command,
+                    "psm {psm} {options:?} on a {}x{} picture",
+                    picture.width(),
+                    picture.height()
+                );
+                compared += usize::from(!by_command.is_empty());
+            }
+        }
+        assert!(compared > 20, "the pictures must actually produce text");
     }
 
     #[test]

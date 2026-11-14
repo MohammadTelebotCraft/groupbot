@@ -126,7 +126,7 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, query: &CallbackQuery) {
         Some("r") => Some(limits::CASE),
         Some("mc") => Some(limits::CASE),
         Some("p") if is_group_picker(data) => None,
-        Some("s" | "p" | "q" | "t") => Some(limits::SET),
+        Some("s" | "p" | "q" | "t" | "cs" | "cy") => Some(limits::SET),
         _ => None,
     } && let Some(presser) = query.sender_id().bare_id()
         && !limits::permits(ctx, chat, presser, cap)
@@ -163,6 +163,14 @@ pub async fn handle(ctx: &std::sync::Arc<Ctx>, query: &CallbackQuery) {
         super::promote::on_callback(ctx, query, payload, chat).await;
         return;
     }
+    if let Some(payload) = data.strip_prefix("cs:") {
+        super::settings_copy::on_callback(ctx, query, payload, chat, false).await;
+        return;
+    }
+    if let Some(payload) = data.strip_prefix("cy:") {
+        super::settings_copy::on_callback(ctx, query, payload, chat, true).await;
+        return;
+    }
     if let Some(action) = data.strip_prefix("p:") {
         super::panel::on_callback(ctx, query, action, false).await;
         return;
@@ -183,6 +191,13 @@ fn is_group_picker(data: &str) -> bool {
 }
 
 fn callback_target_chat(data: &str, here: i64) -> i64 {
+    if let Some(rest) = data.strip_prefix("cs:").or_else(|| data.strip_prefix("cy:")) {
+        return rest
+            .split(':')
+            .nth(2)
+            .and_then(|chat| chat.parse::<i64>().ok())
+            .unwrap_or(here);
+    }
     data.strip_prefix("p:")
         .or_else(|| data.strip_prefix("q:"))
         .or_else(|| data.strip_prefix("h:"))
@@ -247,6 +262,16 @@ mod tests {
         assert_eq!(callback_target_chat("h:7:-1001:root", -9), -1001);
         assert_eq!(callback_target_chat("k:7:-1001:root", -9), -1001);
         assert_eq!(callback_target_chat("s:unrelated", -9), -9);
+        assert_eq!(callback_target_chat("cs:7:-1002:-1001", 7), -1001);
+        assert_eq!(callback_target_chat("cy:7:-1002:-1001", 7), -1001);
+        assert_eq!(callback_target_chat("cs:7:0:-1001", 7), -1001);
+    }
+
+    #[test]
+    fn a_forwarded_copy_card_cannot_copy_into_another_group() {
+        let target = callback_target_chat("cy:7:-1002:-1001", -1003);
+        assert!(!callback_chat_matches(-1003, target));
+        assert_eq!(dispatch_chat(b"cy:7:-1002:-1001", 7), -1001);
     }
 
     #[test]

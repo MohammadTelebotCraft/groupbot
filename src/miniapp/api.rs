@@ -37,6 +37,7 @@ pub fn router() -> Router<MiniAppState> {
         .route("/admins", get(misc::admins_list))
         .route("/admins/{user_id}", delete(misc::remove_admin))
         .route("/rights", get(misc::rights_list))
+        .route("/rights/lock", post(misc::rights_lock))
         .route("/rights/{key}/toggle", post(misc::rights_toggle))
         .route("/log", get(misc::log_list))
         .route("/log/{kind}/toggle", post(misc::log_toggle))

@@ -73,8 +73,6 @@ class Constants:
         self.floor = int(rust_const(trade, "DEFAULT_LIMIT"))
         self.default_limit = int(rust_const(trade, "DEFAULT_LIMIT"))
         self.limit_range = rust_range(trade, "LIMIT_RANGE")
-        self.escalate_from = rust_const(trade, "ESCALATE_FROM")
-        self.escalate_under = int(rust_const(trade, "ESCALATE_UNDER"))
 
 
 # ---------------------------------------------------------------------------------------

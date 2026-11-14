@@ -113,7 +113,7 @@ pub const KINDS: &[Kind] = &[
     Kind {
         name: "music",
         key: "tmed_keep_music",
-        label: "اهنگ",
+        label: "آهنگ",
         matches: locks::is_music,
     },
     Kind {

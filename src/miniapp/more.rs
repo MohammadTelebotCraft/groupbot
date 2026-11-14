@@ -304,7 +304,7 @@ pub async fn strict_toggle(
     strict_get(State(ctx), gate).await.into_response()
 }
 
-const BOT_NAME: &str = "botname:";
+const BOT_NAME: &str = crate::handlers::bots::NAMED;
 
 pub async fn allowed_bots_get(State(ctx): State<Arc<Ctx>>, gate: AdminGate) -> impl IntoResponse {
     let bots: Vec<_> = ctx

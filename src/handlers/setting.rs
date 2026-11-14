@@ -886,6 +886,32 @@ pub async fn shown(ctx: &Ctx, chat: i64, setting: &Setting) -> Result<String, Ap
     }
 }
 
+pub fn bare_label(label: &str) -> &str {
+    label.split('،').next().unwrap_or(label).trim()
+}
+
+pub async fn confirmation(ctx: &Ctx, chat: i64, action: &str) -> Option<String> {
+    if let Some((id, _)) = action.split_once(':')
+        && let Some((setting, _)) = number(id)
+    {
+        let value = shown(ctx, chat, setting).await.ok()?;
+        return Some(format!("✓ {} · {value}", bare_label(setting.label)));
+    }
+    SETTINGS.iter().find_map(|setting| match &setting.kind {
+        Kind::Flag if setting.id == action => Some(
+            match ctx.settings.is_locked(chat, setting.key) {
+                true => format!("✓ {} روشن شد", setting.label),
+                false => format!("✗ {} خاموش شد", setting.label),
+            },
+        ),
+        Kind::Pick { options, .. } => options
+            .iter()
+            .find(|pick| pick.id == action)
+            .map(|pick| format!("✓ {} · {}", setting.label, pick.label)),
+        _ => None,
+    })
+}
+
 async fn set_flag(ctx: &Ctx, chat: i64, setting: &Setting, on: bool) -> Result<(), ApplyError> {
     if super::locks::LOCKS
         .iter()
@@ -970,7 +996,10 @@ pub fn rows(
                 return Vec::new();
             };
             let current = read(ctx, chat);
-            let mut rows = vec![vec![Button::data(setting.label, payload(setting.section))]];
+            let mut rows = vec![vec![Button::data(
+                format!("{} · {}  ✎", bare_label(setting.label), show(current)),
+                payload(&format!("in:{}", setting.id)),
+            )]];
             rows.extend(presets.chunks(*per_row).map(|block| {
                 block
                     .iter()
@@ -983,10 +1012,6 @@ pub fn rows(
                     })
                     .collect()
             }));
-            rows.push(vec![Button::data(
-                format!("✎  عدد دلخواه · {}", show(current)),
-                payload(&format!("in:{}", setting.id)),
-            )]);
             rows
         }
 
@@ -1518,5 +1543,29 @@ mod tests {
             let longest = format!("p:{}:{}:in:{}", i64::MAX, i64::MIN, setting.id);
             assert!(longest.len() <= 64, "payload too long for {}", setting.id);
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DATABASE_URL: a Ctx needs a settings mirror"]
+    async fn the_confirmation_says_what_the_tap_did() {
+        const CHAT: i64 = -100_777_000_321;
+        let (ctx, _pool) = super::super::live_ctx().await;
+        ctx.settings.try_set(CHAT, flood::MODE, false).await.unwrap();
+
+        apply(&ctx, CHAT, "fl_on").await.unwrap();
+        let said = confirmation(&ctx, CHAT, "fl_on").await;
+        assert_eq!(said.as_deref(), Some("✓ ضد رگبار روشن شد"));
+        apply(&ctx, CHAT, "fl_on").await.unwrap();
+        let said = confirmation(&ctx, CHAT, "fl_on").await;
+        assert_eq!(said.as_deref(), Some("✗ ضد رگبار خاموش شد"));
+
+        apply(&ctx, CHAT, "fl_lim:12").await.unwrap();
+        let said = confirmation(&ctx, CHAT, "fl_lim:12").await;
+        assert_eq!(said.as_deref(), Some("✓ پیام · 12"));
+        apply(&ctx, CHAT, "fl_ban").await.unwrap();
+        let said = confirmation(&ctx, CHAT, "fl_ban").await;
+        assert_eq!(said.as_deref(), Some("✓ با متخلف · بن"));
+
+        assert_eq!(confirmation(&ctx, CHAT, "locks").await, None);
     }
 }

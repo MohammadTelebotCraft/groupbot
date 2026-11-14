@@ -555,6 +555,7 @@ async fn apply_with_priority(
     by: By<'_>,
     critical_outbound: bool,
 ) -> Result<usize, Failed> {
+    let target = ctx.with_session_auth(target).await;
     let Some(chat_id) = chat.id.bot_api_dialog_id() else {
         return apply_inner(
             ctx,
@@ -738,6 +739,7 @@ pub(super) async fn kick_member(
     chat: grammers_client::session::types::PeerRef,
     target: grammers_client::session::types::PeerRef,
 ) -> Result<(), MemberMutationError> {
+    let target = ctx.with_session_auth(target).await;
     let (Some(chat_id), Some(user_id)) = (chat.id.bot_api_dialog_id(), target.id.bare_id()) else {
         return ctx
             .client
@@ -751,6 +753,38 @@ pub(super) async fn kick_member(
         .map_err(MemberMutationError::State)?;
     kick_member_locked(ctx, chat, target, &guard)
         .await
+        .map_err(MemberMutationError::Telegram)
+}
+
+pub(super) async fn ban_member_as(
+    ctx: &Ctx,
+    client: &grammers_client::Client,
+    chat_id: i64,
+    chat: grammers_client::session::types::PeerRef,
+    target: grammers_client::session::types::PeerRef,
+) -> Result<(), MemberMutationError> {
+    let mut banned_rights = super::rights::muted(0);
+    banned_rights.view_messages = true;
+    let request = grammers_client::tl::functions::channels::EditBanned {
+        channel: chat.into(),
+        participant: target.into(),
+        banned_rights: banned_rights.into(),
+    };
+    let Some(user_id) = target.id.bare_id() else {
+        return client
+            .invoke(&request)
+            .await
+            .map(drop)
+            .map_err(MemberMutationError::Telegram);
+    };
+    let guard = lock_member(ctx, chat_id, user_id).await;
+    cancel_captcha_for_override(ctx, &guard)
+        .await
+        .map_err(MemberMutationError::State)?;
+    client
+        .invoke(&request)
+        .await
+        .map(drop)
         .map_err(MemberMutationError::Telegram)
 }
 

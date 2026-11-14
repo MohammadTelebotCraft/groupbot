@@ -646,6 +646,7 @@ async fn run_bot_updates(
                 drop_idle_channels: true,
                 max_dormant_channels: dormant_channel_cap(&ctx),
                 concurrent_channel_differences: channel_differences(),
+                deliver_gapped_channel_updates: true,
             },
         )
         .await
@@ -1111,6 +1112,9 @@ async fn capacity_probe() -> Result {
 
 #[tokio::main]
 async fn main() -> Result {
+    if env::var_os(handlers::ocr::worker::ENV).is_some() {
+        std::process::exit(handlers::ocr::worker::serve());
+    }
     if env::args().skip(1).any(|arg| arg == "--media-eval") {
         if env::args().count() != 2 {
             return Err("usage: groupbot --media-eval < requests.jsonl".into());
@@ -1132,6 +1136,7 @@ async fn main() -> Result {
         .map_err(|error| format!("model configuration: {error}"))?;
     handlers::nsfw::remove_abandoned_scratch(&env::temp_dir());
     if env::args().skip(1).any(|arg| arg == "--model-probe") {
+        handlers::nsfw::probe_every_session();
         let classifier = handlers::nsfw::capacity_probe()?;
         let ocr = handlers::ocr::capacity_probe();
         let image = image::RgbImage::from_pixel(384, 384, image::Rgb([127; 3]));
@@ -1496,6 +1501,7 @@ async fn main() -> Result {
                     drop_idle_channels: true,
                     max_dormant_channels: dormant_channel_cap(&cleaner_ctx),
                     concurrent_channel_differences: channel_differences(),
+                    deliver_gapped_channel_updates: false,
                 },
             )
             .await
@@ -1572,8 +1578,12 @@ async fn main() -> Result {
                     }
                 };
                 match update {
-                    Ok(grammers_client::update::Update::NewMessage(message)) => {
+                    Ok(
+                        grammers_client::update::Update::NewMessage(message)
+                        | grammers_client::update::Update::MessageEdited(message),
+                    ) => {
                         receive_failures = 0;
+                        handlers::bots::CLEANER_MESSAGES.fetch_add(1, Ordering::Relaxed);
                         if !handlers::bots::cleaner_candidate(&cleaner_ctx, &message) {
                             continue;
                         }
@@ -1694,8 +1704,12 @@ async fn main() -> Result {
                         break;
                     }
                 };
-                if let grammers_client::update::Update::NewMessage(message) = update
-                    && handlers::bots::cleaner_candidate(&cleaner_ctx, &message)
+                if let grammers_client::update::Update::NewMessage(message)
+                | grammers_client::update::Update::MessageEdited(message) = update
+                    && {
+                        handlers::bots::CLEANER_MESSAGES.fetch_add(1, Ordering::Relaxed);
+                        handlers::bots::cleaner_candidate(&cleaner_ctx, &message)
+                    }
                 {
                     let key = message.peer_id().bot_api_dialog_id().unwrap_or(0);
                     cleaner_worker_telemetry
@@ -2035,7 +2049,7 @@ async fn main() -> Result {
                         }
                     };
                     log::info!(
-                "capacity: runtime_chats={} settings_chats={}/{} settings_rows={} settings_bytes={} counter_rows={} note_rows={} user_chats={} dirty={}/{}/{} pending_writes={} pending_drops={} deferred={} pending_admins={} deleted={} verdicts={} voice={}/{} outbound={}/{} critical_waiting={} update_active={}/{} updates_received={} updates_completed={} cleaner_active={}/{} db_connections={} db_idle={}",
+                "capacity: runtime_chats={} settings_chats={}/{} settings_rows={} settings_bytes={} counter_rows={} note_rows={} user_chats={} dirty={}/{}/{} pending_writes={} pending_drops={} deferred={} pending_admins={} deleted={} verdicts={} voice={}/{} outbound={}/{} critical_waiting={} update_active={}/{} updates_received={} updates_completed={} cleaner_active={}/{} cleaner_messages={} cleaner_bot_posts={} db_connections={} db_idle={}",
                 snapshot.runtime_chats,
                 snapshot.settings_chats,
                 max_shard_chats,
@@ -2064,6 +2078,8 @@ async fn main() -> Result {
                 updates_completed,
                 cleaner_capacity.active.load(Ordering::Relaxed),
                 cleaner_concurrency,
+                handlers::bots::CLEANER_MESSAGES.swap(0, Ordering::Relaxed),
+                cleaner_capacity.received.swap(0, Ordering::Relaxed),
                 db_connections,
                         db_idle,
                     );

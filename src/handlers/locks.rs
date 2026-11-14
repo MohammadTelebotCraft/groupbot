@@ -121,7 +121,28 @@ fn shown_media(raw: &tl::enums::Message, rich: super::rich::Media) -> super::ric
     if let Some(media) = foreign_reply(raw).and_then(|reply| reply.reply_media.as_ref()) {
         shown.merge(super::rich::Media::of(media));
     }
+    if let tl::enums::Message::Message(message) = raw
+        && let Some(tl::enums::MessageMedia::Poll(poll)) = &message.media
+    {
+        for media in poll_media(poll) {
+            shown.merge(super::rich::Media::of(media));
+        }
+    }
     shown
+}
+
+fn poll_media(poll: &tl::types::MessageMediaPoll) -> impl Iterator<Item = &tl::enums::MessageMedia> {
+    let tl::enums::Poll::Poll(asked) = &poll.poll;
+    let tl::enums::PollResults::Results(results) = &poll.results;
+    let answers = asked.answers.iter().filter_map(|answer| match answer {
+        tl::enums::PollAnswer::Answer(answer) => answer.media.as_ref(),
+        tl::enums::PollAnswer::InputPollAnswer(_) => None,
+    });
+    poll.attached_media
+        .as_ref()
+        .into_iter()
+        .chain(results.solution_media.as_ref())
+        .chain(answers)
 }
 
 impl<'a> View<'a> {
@@ -201,6 +222,52 @@ pub fn is_ai(key: &str) -> bool {
 pub fn plain() -> impl Iterator<Item = &'static Lock> {
     LOCKS.iter().filter(|lock| !is_ai(lock.key))
 }
+
+pub const GROUPS: &[(&str, &[&str])] = &[
+    (
+        "رسانه",
+        &[
+            "photo",
+            "video",
+            "gif",
+            "music",
+            "voice",
+            "file",
+            "sticker",
+            "animsticker",
+            "videonote",
+            "paid",
+            "media",
+        ],
+    ),
+    (
+        "متن",
+        &[
+            "links",
+            "hyperlink",
+            "hashtag",
+            "username",
+            "mention",
+            "english",
+            "persian",
+            "commands",
+            "botcall",
+            "phone",
+            "email",
+            "card",
+        ],
+    ),
+    ("ظاهر", &["emoji", "premoji", "spoiler"]),
+    ("فوروارد", &["forward_channel", "forward_user"]),
+    (
+        "تعاملی",
+        &[
+            "poll", "dice", "contact", "location", "button", "story", "todo", "giveaway",
+        ],
+    ),
+    ("هویت", &["anon", "bot", "promoter", "biolink"]),
+    ("رویداد", &["edit", "pin", "service", "comment"]),
+];
 
 pub async fn try_set(
     ctx: &Ctx,
@@ -442,6 +509,47 @@ pub const LOCKS: &[Lock] = &[
         key: "story",
         names: &["استوری", "story", "stories"],
         matches: is_story,
+    },
+    Lock {
+        key: "videonote",
+        names: &[
+            "ویدیو مسیج",
+            "پیام ویدیویی",
+            "فیلم سلفی",
+            "video note",
+            "video messages",
+        ],
+        matches: is_video_note,
+    },
+    Lock {
+        key: "paid",
+        names: &["رسانه پولی", "محتوای پولی", "فاکتور", "paid media", "invoices"],
+        matches: is_paid,
+    },
+    Lock {
+        key: "todo",
+        names: &["چک لیست", "لیست کار", "checklist", "checklists"],
+        matches: is_checklist,
+    },
+    Lock {
+        key: "giveaway",
+        names: &["قرعه کشی", "گیواوی", "giveaway", "giveaways"],
+        matches: is_giveaway,
+    },
+    Lock {
+        key: "phone",
+        names: &["شماره تلفن", "شماره", "تلفن", "phone", "phone numbers"],
+        matches: has_phone,
+    },
+    Lock {
+        key: "email",
+        names: &["ایمیل", "email", "emails"],
+        matches: has_email,
+    },
+    Lock {
+        key: "card",
+        names: &["شماره کارت", "کارت بانکی", "bank card", "card numbers"],
+        matches: has_bank_card,
     },
     Lock {
         key: "pin",
@@ -1654,8 +1762,14 @@ fn is_promoter(view: &View) -> bool {
 }
 
 fn is_mention(view: &View) -> bool {
-    view.shown()
-        .any(|shown| shown.has(|e| matches!(e, tl::enums::MessageEntity::MentionName(_))))
+    view.shown().any(|shown| {
+        shown.has(|e| {
+            matches!(
+                e,
+                tl::enums::MessageEntity::MentionName(_) | tl::enums::MessageEntity::Mention(_)
+            )
+        })
+    })
 }
 
 fn is_forward_channel(view: &View) -> bool {
@@ -1731,7 +1845,46 @@ fn is_poll(view: &View) -> bool {
 }
 
 fn is_dice(view: &View) -> bool {
-    matches!(view.media, Some(Media::Dice(_))) || view.shown_media.dice
+    matches!(view.media, Some(Media::Dice(_)))
+        || matches!(raw_media(view), Some(tl::enums::MessageMedia::Game(_)))
+        || view.shown_media.dice
+}
+
+fn is_video_note(view: &View) -> bool {
+    round(raw_media(view))
+}
+
+fn round(media: Option<&tl::enums::MessageMedia>) -> bool {
+    matches!(media, Some(tl::enums::MessageMedia::Document(document)) if document.round)
+}
+
+fn is_paid(view: &View) -> bool {
+    use tl::enums::MessageMedia as M;
+    matches!(raw_media(view), Some(M::PaidMedia(_) | M::Invoice(_)))
+}
+
+fn is_checklist(view: &View) -> bool {
+    matches!(raw_media(view), Some(tl::enums::MessageMedia::ToDo(_)))
+}
+
+fn is_giveaway(view: &View) -> bool {
+    use tl::enums::MessageMedia as M;
+    matches!(raw_media(view), Some(M::Giveaway(_) | M::GiveawayResults(_)))
+}
+
+fn has_phone(view: &View) -> bool {
+    view.shown()
+        .any(|shown| shown.has(|e| matches!(e, tl::enums::MessageEntity::Phone(_))))
+}
+
+fn has_email(view: &View) -> bool {
+    view.shown()
+        .any(|shown| shown.has(|e| matches!(e, tl::enums::MessageEntity::Email(_))))
+}
+
+fn has_bank_card(view: &View) -> bool {
+    view.shown()
+        .any(|shown| shown.has(|e| matches!(e, tl::enums::MessageEntity::BankCard(_))))
 }
 
 fn is_location(view: &View) -> bool {
@@ -1797,6 +1950,38 @@ pub fn is_file(view: &View) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn groups_hold_every_plain_lock_once() {
+        let grouped: Vec<&str> = GROUPS.iter().flat_map(|(_, keys)| keys.iter().copied()).collect();
+        for lock in plain() {
+            let seen = grouped.iter().filter(|key| **key == lock.key).count();
+            assert_eq!(seen, 1, "«{}» is in {seen} groups, not one", lock.names[0]);
+        }
+        assert_eq!(grouped.len(), plain().count(), "a group names a key that is not a plain lock");
+    }
+
+    #[test]
+    fn a_video_note_is_the_round_flag() {
+        let document = |round| {
+            tl::enums::MessageMedia::Document(tl::types::MessageMediaDocument {
+                nopremium: false,
+                spoiler: false,
+                video: true,
+                round,
+                voice: false,
+                document: None,
+                alt_documents: None,
+                video_cover: None,
+                video_timestamp: None,
+                ttl_seconds: None,
+            })
+        };
+        assert!(round(Some(&document(true))));
+        assert!(!round(Some(&document(false))));
+        assert!(!round(Some(&tl::enums::MessageMedia::Unsupported)));
+        assert!(!round(None));
+    }
 
     fn sticker_with_mime(mime: &str) -> Media {
         let document =

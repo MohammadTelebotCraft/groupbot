@@ -60,6 +60,16 @@ fn simple_choice(tail: &str) -> Option<bool> {
     }
 }
 
+fn media_kind(name: &str) -> Option<&'static tempmedia::Kind> {
+    let alef = |c: char| if c == 'آ' { 'ا' } else { c };
+    tempmedia::KINDS.iter().find(|kind| {
+        commands::normalize(kind.label)
+            .chars()
+            .map(alef)
+            .eq(name.chars().map(alef))
+    })
+}
+
 fn parse(ctx: &Ctx, chat: i64, text: &str) -> Option<Action> {
     let (command, tail) = COMMANDS.iter().find_map(|aliases| {
         aliases
@@ -70,10 +80,7 @@ fn parse(ctx: &Ctx, chat: i64, text: &str) -> Option<Action> {
         "رسانه موقت" if tail.is_empty() => Some(Action::Media(None)),
         "رسانه موقت" => {
             let (name, on) = item_choice(tail, "روشن", "خاموش")?;
-            tempmedia::KINDS
-                .iter()
-                .find(|kind| commands::normalize(kind.label).as_ref() == name.as_str())
-                .map(|kind| Action::Media(Some((kind, on))))
+            media_kind(&name).map(|kind| Action::Media(Some((kind, on))))
         }
         "محدودیت مدیران" if tail.is_empty() => Some(Action::Limits(None)),
         "محدودیت مدیران" => {
@@ -386,5 +393,20 @@ mod tests {
         assert_eq!(simple_choice("خاموش لطفا"), None);
         assert!(commands::strip_prefix("پاکسازی خودکار خوبه", COMMANDS[4][0]).is_some());
         assert!(commands::strip_prefix("پاکسازی خودکارخوبه", COMMANDS[4][0]).is_none());
+    }
+
+    #[test]
+    fn a_temp_media_kind_is_found_with_or_without_the_madda() {
+        for typed in ["آهنگ روشن", "اهنگ روشن"] {
+            let (name, on) = item_choice(typed, "روشن", "خاموش").unwrap();
+            assert!(on);
+            assert_eq!(media_kind(&name).map(|kind| kind.name), Some("music"));
+        }
+        let (name, _) = item_choice("عكس خاموش", "روشن", "خاموش").unwrap();
+        assert_eq!(media_kind(&name).map(|kind| kind.name), Some("photo"));
+        assert!(media_kind("آهنگها").is_none());
+        for kind in tempmedia::KINDS {
+            assert_eq!(media_kind(kind.label).map(|found| found.name), Some(kind.name));
+        }
     }
 }

@@ -679,7 +679,10 @@ impl Kind {
     }
 
     fn filter(self) -> tl::enums::ChannelParticipantsFilter {
-        let q = String::new();
+        self.filter_matching(String::new())
+    }
+
+    fn filter_matching(self, q: String) -> tl::enums::ChannelParticipantsFilter {
         match self {
             Self::Mute => tl::enums::ChannelParticipantsFilter::ChannelParticipantsBanned(
                 tl::types::ChannelParticipantsBanned { q },
@@ -784,10 +787,7 @@ pub async fn view(
             super::style::Colour::Danger,
         )]);
     }
-    rows.push(vec![super::premium::decorate(
-        Button::data("بازگشت", format!("p:{opener}:{chat}:ls").into_bytes()),
-        Some(super::premium::Icon::Back),
-    )]);
+    rows.push(super::panel::back_row(opener, chat, "ls", "ls"));
 
     let shown = entries.len().min(LIMIT);
     let mut title = format!(
@@ -1075,6 +1075,20 @@ async fn listed_member(
         .and_then(|entry| entry.peer))
 }
 
+pub(crate) async fn entries_matching(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    chat: i64,
+    kind: Kind,
+    limit: usize,
+    q: &str,
+) -> Result<Vec<Entry>, sqlx::Error> {
+    if kind.is_member_list() && !q.is_empty() {
+        return Ok(walk_matching(ctx, chat_ref, chat, kind, limit, q).await.0);
+    }
+    entries(ctx, chat_ref, chat, kind, limit).await
+}
+
 async fn walk(
     ctx: &Ctx,
     chat_ref: PeerRef,
@@ -1082,10 +1096,24 @@ async fn walk(
     kind: Kind,
     limit: usize,
 ) -> (Vec<Entry>, usize) {
+    walk_matching(ctx, chat_ref, chat, kind, limit, "").await
+}
+
+async fn walk_matching(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    chat: i64,
+    kind: Kind,
+    limit: usize,
+    q: &str,
+) -> (Vec<Entry>, usize) {
     if chat_ref.id.kind() != PeerKind::Channel {
         return (Vec::new(), 0);
     }
-    let mut participants = ctx.client.iter_participants(chat_ref).filter(kind.filter());
+    let mut participants = ctx
+        .client
+        .iter_participants(chat_ref)
+        .filter(kind.filter_matching(q.to_owned()));
     let mut found = Vec::with_capacity(limit.min(LIMIT * 16));
     while found.len() < limit {
         match participants.next().await {
@@ -1310,5 +1338,26 @@ mod tests {
                 assert!(payload.len() <= 64, "payload too long: {payload}");
             }
         }
+    }
+
+    #[test]
+    fn a_member_search_narrows_the_same_participant_list() {
+        use tl::enums::ChannelParticipantsFilter as F;
+        assert!(matches!(
+            Kind::Ban.filter_matching("ali".to_owned()),
+            F::ChannelParticipantsKicked(tl::types::ChannelParticipantsKicked { q }) if q == "ali"
+        ));
+        assert!(matches!(
+            Kind::Mute.filter_matching("ali".to_owned()),
+            F::ChannelParticipantsBanned(tl::types::ChannelParticipantsBanned { q }) if q == "ali"
+        ));
+        assert!(matches!(
+            Kind::Mute.filter(),
+            F::ChannelParticipantsBanned(tl::types::ChannelParticipantsBanned { q }) if q.is_empty()
+        ));
+        assert!(matches!(
+            Kind::Ban.filter(),
+            F::ChannelParticipantsKicked(tl::types::ChannelParticipantsKicked { q }) if q.is_empty()
+        ));
     }
 }

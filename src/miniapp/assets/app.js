@@ -51,6 +51,10 @@
     return t.value;
   }
 
+  function bdi(html) {
+    return "<bdi>" + html + "</bdi>";
+  }
+
   const ZWNJ = String.fromCharCode(0x200c);
 
   function fold(text) {
@@ -160,6 +164,7 @@
     bot: '<rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4"/><circle cx="12" cy="3" r="1"/><path d="M9 14h.01M15 14h.01"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
     arrowL: '<path d="M19 12H5"/><path d="m12 19-7-7 7-7"/>',
+    arrowR: '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
     arrowUp: '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
     arrowDown: '<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>',
     key: '<circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 8.15-8.15"/><path d="m18 6 3 3"/><path d="m15 9 3 3"/>',
@@ -202,7 +207,7 @@
       (label ? ' aria-label="' + esc(label) + '"' : "") + '><span class="sw' + (on ? " on" : "") + '"></span></button>';
   }
 
-  const HEADER = { dark: "#14161f", light: "#f6f7fb" };
+  const HEADER = { dark: "#080b13", light: "#f4f6fa" };
 
   function themePref() {
     const pref = stored(THEME_KEY);
@@ -213,7 +218,7 @@
     const pref = themePref();
     let theme = pref;
     if (pref === "auto") {
-      if (tg && tg.colorScheme) theme = tg.colorScheme;
+      if (tg && tg.colorScheme && initData) theme = tg.colorScheme;
       else theme = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
     }
     document.documentElement.dataset.theme = theme;
@@ -306,15 +311,17 @@
 
   async function takeDash(d) {
     if (d && Array.isArray(d.sections)) {
-      S.dash = d;
-      return;
+      if (!d.chat || d.chat.id === S.chat) S.dash = d;
+      return true;
     }
     try {
       await refreshDash();
     } catch (e) {
     }
     if (d && d.error) toast(d.error, "warn");
+    else if (d && (d.accepted === "unknown" || d.delivery === "unknown")) toast("معلوم نیست ذخیره شد یا نه؛ وضعیت فعلی دوباره خوانده شد، پیش از تکرار نگاه کنید.", "warn");
     else if (d && d.accepted) toast("ثبت شد؛ کمی بعد در تلگرام اعمال می شود.", "warn");
+    return !(d && (d.accepted || d.error));
   }
 
   let toastTimer = null;
@@ -336,8 +343,12 @@
       document.body.appendChild(el);
     }
     kind = kind === true ? "ok" : kind || "";
-    toastAction = action ? action.run : null;
-    el.className = kind;
+    const chat = S.chat;
+    toastAction = action ? () => S.chat === chat && action.run() : null;
+    const bar = document.getElementById("doc-bar");
+    const place = S.sheet && !WIDE.matches ? " top" : bar && !bar.hidden ? " lift" : "";
+    el.className = kind + place;
+    el.setAttribute("role", kind === "ok" || kind === "warn" ? "status" : "alert");
     el.innerHTML = '<span class="ti">' + icon(kind === "ok" ? "check" : kind === "warn" ? "info" : "alert", 15, 2.4) + '</span><span class="tt">' + esc(text) + "</span>" +
       (action ? '<button class="ta">' + esc(action.label) + "</button>" : "");
     requestAnimationFrame(() => el.classList.add("show"));
@@ -436,6 +447,7 @@
       id: "wp", group: "محافظت", icon: "trash", title: "پاکسازی پیام متخلف",
       desc: "با بن یا سکوت، پیام های قبلی همان نفر هم پاک می شود",
       flags: ["wp_ban", "wp_mute"],
+      warn: "پیام های پاک شده برنمی گردند، و این کار برای سکوت و بن های خودکار (ضد رگبار، سقف اخطار، حالت سختگیرانه) هم انجام می شود.",
       state: () => isOn("wp_ban") || isOn("wp_mute"),
       effect: () => {
         const parts = [];
@@ -462,6 +474,7 @@
       desc: "رسانه ها بعد از مدتی خودکار پاک می شوند",
       flag: "tmed_on", sections: ["tmed"], custom: "tmed", load: "/tempmedia",
       effect: () => "حذف پس از " + shown("tmed_min") + " · " + pickLabel("tmed_who"),
+      tip: "«همه» یعنی رسانه ادمین ها هم پاک می شود.",
     },
     {
       id: "filter", group: "محتوا", icon: "funnel", title: "فیلتر کلمات",
@@ -474,7 +487,7 @@
       desc: "هر عکس و متن با هوش مصنوعی بررسی می شود، نه با کلمه",
       sections: ["cq"], custom: "ai", load: "/locks",
       state: () => S.dash.locks_summary.ai_active > 0,
-      effect: () => fa(S.dash.locks_summary.ai_active) + " موضوع فعال" + (isOn("cq_shadow") ? " · فقط بررسی" : ""),
+      effect: () => fa(S.dash.locks_summary.ai_active) + " موضوع فعال" + (isOn("cq_shadow") && !(S.sheet && S.sheet.id === "cq") ? " · فقط بررسی" : ""),
     },
     {
       id: "imgf", group: "هوشمند", icon: "image", title: "فیلتر تصویری",
@@ -486,7 +499,7 @@
       id: "vm", group: "هوشمند", icon: "mic", title: "نظارت بر ویس",
       desc: "ویس ها شنیده می شود و کلمه های نامناسب حذف می شود",
       flag: "vm_on", custom: "voice",
-      effect: () => "فهرست کلمات نامناسب",
+      effect: () => "ویس ها بررسی و کلمه های نامناسب حذف می شود",
     },
     {
       id: "wc", group: "خودکار", icon: "hand", title: "خوشامد",
@@ -502,9 +515,9 @@
     },
     {
       id: "dr", group: "خودکار", icon: "send", title: "گزارش روزانه",
-      desc: "آمار روز، هر شب در گروه فرستاده می شود",
+      desc: "آمار روز، هر روز در ساعتی که می گویید در گروه فرستاده می شود",
       enabled: "dr", off: "/report/off", onAction: () => "dr:" + setting("dr").value, sections: ["dr"], custom: "report",
-      effect: () => "هر شب " + shown("dr"),
+      effect: () => "هر روز ساعت " + shown("dr"),
     },
     {
       id: "ng", group: "خودکار", icon: "moon", title: "قفل شب",
@@ -565,9 +578,9 @@
     const sub = st === false ? "خاموش" : f.effect();
     const control = featureSwitch(f);
     return (
-      '<div class="row tap" data-open="' + f.id + '" role="button" tabindex="0">' +
+      '<div class="row tap" data-open="' + f.id + '">' +
       '<span class="rico' + (st ? " on" : "") + '">' + icon(f.icon, 17) + "</span>" +
-      '<span class="rt"><span class="t">' + f.title + '</span><span class="s' + (st ? " on" : "") + '">' + esc(sub) + "</span></span>" +
+      '<button class="rt" data-open="' + f.id + '"><span class="t">' + f.title + '</span><span class="s' + (st ? " on" : "") + '">' + esc(sub) + "</span></button>" +
       (control || CHEV) + "</div>"
     );
   }
@@ -585,13 +598,13 @@
     const logOk = S.logInfo && S.logInfo !== "error" ? !!S.logInfo.channel : null;
     const welcomeOk = S.welcomeInfo && S.welcomeInfo !== "error" ? !!(S.welcomeInfo.text || S.welcomeInfo.has_media) : null;
     return [
-      { id: "rights", title: "ربات با همه دسترسی ها ادمین است", sub: "بدون آن هیچ قفل و فیلتری کار نمی کند", done: rightsOk, fix: () => openSheet("rights-help") },
-      { id: "fl", title: "ضد رگبار روشن است", sub: "جلوی پیام های پشت سر هم را می گیرد", done: isOn("fl_on"), fix: () => openSheet("fl") },
-      { id: "cp", title: "احراز هویت روشن است", sub: "ربات های اسپم نمی توانند عضو بمانند", done: isOn("cp_on"), fix: () => openSheet("cp") },
-      { id: "rd", title: "ضد هجوم روشن است", sub: "در برابر ورود دسته جمعی", done: isOn("rd_on"), fix: () => openSheet("rd") },
-      { id: "links", title: "قفل لینک روشن است", sub: "رایج ترین راه تبلیغ در گروه ها", done: linksOn, fix: () => pushPage("locks") },
-      { id: "log", title: "کانال لاگ وصل است", sub: "سابقه همه برخوردها جایی ثبت شود", done: logOk, fix: () => pushPage("log") },
-      { id: "wc", title: "پیام خوشامد نوشته شده", sub: "عضو تازه قوانین را می بیند", done: welcomeOk, fix: () => pushPage("welcome") },
+      { id: "rights", title: "همه دسترسی ها را به ربات بدهید", short: "دسترسی ربات", sub: "بدون آن هیچ قفل و فیلتری کار نمی کند", done: rightsOk, fix: () => openSheet("rights-help") },
+      { id: "fl", title: "ضد رگبار را روشن کنید", short: "ضد رگبار", sub: "جلوی پیام های پشت سر هم را می گیرد", done: isOn("fl_on"), fix: () => openSheet("fl") },
+      { id: "cp", title: "احراز هویت را روشن کنید", short: "احراز هویت", sub: "ربات های اسپم نمی توانند عضو بمانند", done: isOn("cp_on"), fix: () => openSheet("cp") },
+      { id: "rd", title: "ضد هجوم را روشن کنید", short: "ضد هجوم", sub: "در برابر ورود دسته جمعی", done: isOn("rd_on"), fix: () => openSheet("rd") },
+      { id: "links", title: "قفل لینک را روشن کنید", short: "قفل لینک", sub: "رایج ترین راه تبلیغ در گروه ها", done: linksOn, fix: () => pushPage("locks") },
+      { id: "log", title: "کانال لاگ را وصل کنید", short: "کانال لاگ", sub: "سابقه همه برخوردها جایی ثبت شود", done: logOk, fix: () => pushPage("log") },
+      { id: "wc", title: "پیام خوشامد بنویسید", short: "خوشامد", sub: "عضو تازه قوانین را می بیند", done: welcomeOk, fix: () => pushPage("welcome") },
     ];
   }
 
@@ -600,6 +613,177 @@
     if (!list.length) return null;
     const done = list.filter((c) => c.done).length;
     return { pct: Math.round((done / list.length) * 100), done, total: list.length, list };
+  }
+
+  const SITE = window.GM_SITE || {};
+
+  const NEEDED_RIGHTS = "delete_messages+restrict_members+invite_users+pin_messages+change_info+promote_members";
+
+  function addToGroupLink() {
+    return SITE.bot ? "https://t.me/" + SITE.bot + "?startgroup=new&admin=" + NEEDED_RIGHTS : "";
+  }
+
+  function openLink(url) {
+    if (!url) return;
+    try {
+      if (tg && initData && /^https:\/\/t\.me\//.test(url) && tg.openTelegramLink) return tg.openTelegramLink(url);
+      if (tg && initData && tg.openLink) return tg.openLink(url);
+    } catch (e) {
+    }
+    window.open(url, "_blank", "noopener");
+  }
+
+  const SITE_FEATURES = [
+    ["shield", "ضد اسپم و حمله", "ضد رگبار پیام های پشت سر هم را متوقف می کند، ضد هجوم ورود دسته جمعی را می خواباند و احراز هویت، ربات های اسپم را بیرون نگه می دارد.", ["ضد رگبار", "ضد هجوم", "احراز هویت", "لینک در بایو"]],
+    ["lock", "قفل روی هر محتوا", "لینک، فوروارد، عکس، استیکر، منشن، ربات و بیش از سی مورد دیگر؛ به همراه فیلتر کلمه و قفل پک استیکر.", ["۳۷ قفل", "فیلتر کلمه", "پک استیکر"]],
+    ["shieldOff", "ضد خیانت ادمین", "ادمینی که پشت سر هم پیام حذف کند خودکار برخورد می شود، و برای هر ادمین معلوم می کنید چه کارهایی مجاز است.", ["ضد خیانت", "محدودیت مدیران"]],
+    ["hand", "خوشامد و قوانین", "پیام خوشامد با نام عضو تازه که چند ثانیه بعد خودش پاک می شود، و قوانینی که با یک کلمه نشان داده می شود.", ["خوشامد", "قوانین", "عضویت اجباری کانال"]],
+    ["clock", "کارهای خودکار", "قفل شب، پاکسازی روزانه، اسلوموشن، رسانه موقت و پاسخ آماده به کلمه هایی که خودتان تعیین می کنید.", ["قفل شب", "پاکسازی", "پاسخ خودکار"]],
+    ["inbox", "پرونده و گزارش", "هر برخورد ربات و هر گزارش عضو یک پرونده می شود؛ آمار هر روز و کانال لاگ، سابقه کامل را نگه می دارد.", ["پرونده ها", "کانال لاگ", "گزارش روزانه"]],
+  ];
+
+  const SITE_AI = ["محتوای غیراخلاقی", "تبلیغ داخل عکس", "خرید و فروش", "سیگار و قلیان", "مشروب", "سلاح", "قمار و شرط بندی", "مواد مخدر", "خون"];
+
+  const SITE_STEPS = [
+    ["ربات را به گروه اضافه کنید", "با دکمه «افزودن ربات به گروه» و انتخاب گروه."],
+    ["ادمینش کنید", "دسترسی های لازم از پیش انتخاب شده اند (حذف پیام، مسدود کردن، افزودن کاربران، سنجاق، تغییر اطلاعات و افزودن ادمین)؛ فقط تایید کنید."],
+    ["خودش فعال می شود", "با قفل لینک، فایل، سرویس تلگرام و ورود ربات و یک پیام خوشامد شروع می کند؛ بقیه را از داشبورد تنظیم کنید."],
+  ];
+
+  const SITE_FAQ = [
+    ["ربات به چه دسترسی هایی نیاز دارد؟", "شش دسترسی: حذف پیام ها، مسدود کردن کاربران، افزودن کاربران، سنجاق کردن پیام ها، تغییر اطلاعات گروه و افزودن ادمین جدید. تا کامل نشده فعال نمی شود و دقیقا می گوید کدام مانده است."],
+    ["گروه معمولی را هم مدیریت می کند؟", "ربات برای سوپرگروه ساخته شده است. وقتی در یک گروه معمولی ادمینش کنید، تلگرام خودش آن را سوپرگروه می کند و نصب ادامه پیدا می کند."],
+    ["دستورها چطور است؟", "فارسی و بدون اسلش. روی پیام کسی ریپلای کنید و بنویسید «بن»، «سکوت ۱ ساعت» یا «اخطار». «راهنما» در گروه فهرست کامل را نشان می دهد."],
+    ["هوش مصنوعی اشتباه حذف نمی کند؟", "تصمیم ها چند مرحله ای اند: برای موضوع هایی مثل سلاح و سیگار و برای فیلترهای نوشتاری، پیش از حذف یک مدل دوم دوباره به عکس نگاه می کند. حساسیت قابل تنظیم است، هر نگهبان حالت «فقط بررسی» دارد و فیلترهای تصویری تازه اول فقط بررسی می کنند تا مطمئن شوید."],
+    ["کلینر چیست؟", "یک اکانت کمکی که کارهایی را انجام می دهد که تلگرام به ربات ها اجازه نمی دهد، مثل پاک کردن همه پیام های یک نفر و اسلوموشن. پس از کامل شدن دسترسی ها خودش اضافه می شود."],
+    ["تنظیمات را از کجا عوض کنم؟", "در گروه «پنل» بفرستید یا داشبورد را باز کنید؛ هر تغییری فورا در گروه اعمال می شود."],
+  ];
+
+  const SITE_LINKS = [["CHANNEL", "کانال", "send"], ["SUPPORT", "پشتیبانی", "chat"], ["SOURCE", "کد منبع", "terminal"]];
+
+  function unbroken(text) {
+    return String(text).replace(/(^|\s)(ن?می) /g, "$1$2&nbsp;");
+  }
+
+  function siteDevice() {
+    const r = 26;
+    const c = 2 * Math.PI * r;
+    const sw = (on) => '<span class="sw' + (on ? " on" : "") + '"></span>';
+    const row = (ic, t, s, on) => '<div class="lp-s-row"><span class="lp-s-ico' + (on ? " on" : "") + '">' + icon(ic, 14) + '</span><span class="lp-s-rt"><b>' + t + "</b><small" + (on ? ' class="on"' : "") + ">" + s + "</small></span>" + sw(on) + "</div>";
+    const tile = (ic, l, on) => '<span class="lp-s-tile' + (on ? " on" : "") + '"><i>' + icon(ic, 15) + "</i>" + l + "</span>";
+    return (
+      '<div class="lp-device" aria-hidden="true"><div class="lp-notch"></div><div class="lp-screen">' +
+      '<div class="lp-s-top"><span class="lp-s-av">گ</span><span><b>گروه برنامه نویسان</b><small>مالک · ۳ گروه</small></span></div>' +
+      '<div class="lp-s-hero"><div class="lp-s-ring"><svg width="62" height="62" viewBox="0 0 62 62"><circle cx="31" cy="31" r="' + r + '" fill="none" stroke-width="6" class="bgc"/><circle cx="31" cy="31" r="' + r + '" fill="none" stroke-width="6" stroke-linecap="round" class="fgc" stroke-dasharray="' + c.toFixed(1) + '" stroke-dashoffset="' + (c * 0.14).toFixed(1) + '"/></svg><b>۸۶</b></div>' +
+      "<div><small>وضعیت گروه</small><b>گروه محافظت می شود</b><small>۹ امکان روشن · ۱۲ قفل</small></div></div>" +
+      '<div class="lp-s-quick">' + tile("unlock", "بستن گروه") + tile("gavel", "سختگیرانه", true) + tile("key", "احراز هویت", true) + "</div>" +
+      '<div class="lp-s-kpis"><div><small>حذف شده · امروز</small><b>۴۸</b><span class="lp-s-spark"><i style="height:40%"></i><i style="height:65%"></i><i style="height:30%"></i><i style="height:80%"></i><i style="height:55%"></i><i style="height:70%"></i><i style="height:100%"></i></span></div>' +
+      '<div><small>عضو تازه · امروز</small><b>۱۲۳</b><span class="lp-s-spark"><i style="height:50%"></i><i style="height:35%"></i><i style="height:60%"></i><i style="height:45%"></i><i style="height:90%"></i><i style="height:75%"></i><i style="height:100%"></i></span></div></div>' +
+      '<div class="lp-s-list">' + row("bolt", "ضد رگبار", "بیش از ۵ پیام در ۱۰ ثانیه ← سکوت", true) + row("sparkles", "نگهبان هوشمند", "۴ موضوع فعال", true) + row("shield", "ضد هجوم", "خاموش", false) + "</div>" +
+      '<div class="lp-s-tabs">' + [["home", 1], ["grid"], ["users"], ["chart"], ["gear"]].map(([ic, on]) => '<span class="' + (on ? "on" : "") + '">' + icon(ic, 15) + "</span>").join("") + "</div>" +
+      "</div></div>"
+    );
+  }
+
+  function renderSite() {
+    const add = addToGroupLink();
+    const appLink = SITE.app || "";
+    const links = SITE_LINKS.filter(([key]) => SITE.links && SITE.links[key]);
+    const addBtn = (cls, label) => add ? '<a class="lp-btn ' + (cls || "") + '" href="' + esc(add) + '" target="_blank" rel="noopener">' + icon("plus", 18, 2.4) + "<span>" + (label || "افزودن ربات به گروه") + "</span></a>" : "";
+    const appBtn = (cls) => appLink ? '<a class="lp-btn ghost ' + (cls || "") + '" href="' + esc(appLink) + '" target="_blank" rel="noopener">' + icon("grid", 17) + "<span>باز کردن داشبورد</span></a>" : "";
+    const pref = themePref();
+    const nextTheme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+    const head = (kicker, title, sub) => '<div class="lp-head"><span class="lp-kicker">' + kicker + "</span><h2>" + unbroken(title) + "</h2>" + (sub ? "<p>" + sub + "</p>" : "") + "</div>";
+
+    let html = '<div class="lp">';
+    html += '<header class="lp-nav"><div class="lp-wrap lp-nav-in">' +
+      '<a class="lp-brand" href="#top"><span class="lp-logo">' + icon("shieldCheck", 18, 2.2) + "</span>مدیریت گروه</a>" +
+      '<nav class="lp-links"><a href="#features">امکانات</a><a href="#ai">هوش مصنوعی</a><a href="#dashboard">داشبورد</a><a href="#start">راه اندازی</a><a href="#faq">سوال ها</a></nav>' +
+      '<div class="lp-nav-acts"><button class="lp-ibtn" data-site-theme="' + nextTheme + '" aria-label="تغییر پوسته" title="' + (pref === "auto" ? "پوسته خودکار" : "تغییر پوسته") + '">' + icon(nextTheme === "light" ? "sun" : "moon", 18) + "</button>" +
+      (add ? '<a class="lp-btn sm" href="' + esc(add) + '" target="_blank" rel="noopener">' + icon("plus", 16, 2.4) + '<span>افزودن به گروه</span></a>' : "") + "</div></div></header>";
+
+    html += '<section class="lp-hero" id="top"><div class="lp-glow"></div><div class="lp-wrap lp-hero-in"><div class="lp-hero-copy">' +
+      '<span class="lp-pill">' + icon("sparkles", 14) + " ربات مدیریت گروه برای تلگرام</span>" +
+      "<h1>گروه تلگرامت را <em>امن و مرتب</em> نگه دار</h1>" +
+      "<p>ضد اسپم و تبلیغ، قفل روی هر نوع محتوا، نگهبان هوشمند تصویر و یک داشبورد کامل؛ همه داخل خود تلگرام و با دستورهای ساده فارسی.</p>" +
+      '<div class="lp-ctas">' + addBtn("lg") + appBtn("lg") + "</div>" +
+      '<ul class="lp-checks"><li>' + icon("check", 14, 3) + "فعال سازی خودکار</li><li>" + icon("check", 14, 3) + "دستورهای فارسی بدون اسلش</li><li>" + icon("check", 14, 3) + "داشبورد داخل تلگرام</li></ul>" +
+      '</div><div class="lp-hero-art">' + siteDevice() +
+      '<div class="lp-float a"><span class="lp-fi bad">' + icon("trash", 15) + "</span><span><b>لینک تبلیغاتی حذف شد</b><small>قفل لینک · همین الان</small></span></div>" +
+      '<div class="lp-float b"><span class="lp-fi ok">' + icon("key", 15) + "</span><span><b>ربات اسپم بیرون ماند</b><small>احراز هویت · ۲ دقیقه پیش</small></span></div>" +
+      "</div></div></section>";
+
+    html += '<section class="lp-facts"><div class="lp-wrap lp-facts-in">' +
+      [["۳۷", "نوع قفل محتوا"], ["۹", "نگهبان هوشمند تصویر"], ["۲۰", "امکان محافظت و خودکار"], ["۳", "قدم تا راه اندازی"]].map(([n, l]) => "<div><b>" + n + "</b><span>" + l + "</span></div>").join("") +
+      "</div></section>";
+
+    html += '<section class="lp-sec" id="features"><div class="lp-wrap">' +
+      head("امکانات", "هرچه برای اداره یک گروه لازم است", "از جلوی اسپم را گرفتن تا گزارش آخر شب؛ هر امکان با یک لمس روشن و خاموش می شود.") +
+      '<div class="lp-grid">' + SITE_FEATURES.map(([ic, t, s, tags]) =>
+        '<article class="lp-card"><span class="lp-ci">' + icon(ic, 20) + "</span><h3>" + t + "</h3><p>" + s + '</p><div class="lp-tags">' + tags.map((x) => "<span>" + x + "</span>").join("") + "</div></article>").join("") +
+      "</div></div></section>";
+
+    html += '<section class="lp-sec lp-ai" id="ai"><div class="lp-wrap lp-ai-in"><div>' +
+      head("هوش مصنوعی", "نگهبانی که تصویر را می بیند، نه فقط کلمه را", "عکس، استیکر، گیف و پیش نمایش لینک با هوش مصنوعی بررسی می شود؛ تصمیم ها چند مرحله ای اند و هر نگهبان حالت «فقط بررسی» هم دارد.") +
+      '<div class="lp-topics">' + SITE_AI.map((t) => "<span>" + icon("check", 13, 3) + t + "</span>").join("") + "</div></div>" +
+      '<div class="lp-ai-cards">' +
+      [["image", "فیلتر تصویری دلخواه", "یک موضوع بنویسید، مثل «خودرو لوکس»؛ هر عکس نزدیک به آن حذف می شود."],
+        ["users", "قفل چهره", "روی عکس یک نفر «قفل چهره» بزنید تا تصویرهای او در گروه حذف شود."],
+        ["mic", "نظارت بر ویس", "ویس ها شنیده می شود و اگر کلمه نامناسبی داشته باشد حذف می شود."],
+        ["info", "اول فقط بررسی", "فیلتر تصویری تازه اول فقط بررسی می کند و چیزی حذف نمی کند؛ هر وقت مطمئن شدید روشنش کنید."]].map(([ic, t, s]) =>
+        '<div class="lp-mini"><span class="lp-ci sm">' + icon(ic, 17) + "</span><div><h4>" + t + "</h4><p>" + s + "</p></div></div>").join("") +
+      "</div></div></section>";
+
+    html += '<section class="lp-sec" id="dashboard"><div class="lp-wrap lp-split"><div class="lp-split-art">' + siteChat() + "</div><div>" +
+      head("داشبورد و دستورها", "همه چیز داخل خود تلگرام", "بدون رفتن به هیچ سایتی: داشبورد با دکمه «پنل» در گروه باز می شود، و هر کاری هم با یک کلمه فارسی در خود گروه انجام می شود.") +
+      '<ul class="lp-list">' + [
+        ["shieldCheck", "امتیاز امنیت گروه و فهرست کارهای مانده"],
+        ["refresh", "روشن و خاموش با یک لمس، و برگرداندن هر تغییر"],
+        ["chart", "آمار هفت روز: حذف، سکوت، بن و عضو تازه"],
+        ["inbox", "پرونده ها: رسیدگی، یادداشت و لغو برخورد"],
+        ["moon", "پوسته تیره و روشن، هماهنگ با تلگرام"],
+      ].map(([ic, t]) => "<li><span>" + icon(ic, 16) + "</span>" + t + "</li>").join("") + "</ul>" +
+      '<div class="lp-cmds">' + ["بن", "سکوت ۱ ساعت", "اخطار", "قفل لینک", "قفل گروه ۲ ساعت", "حذف ۵۰", "آمار", "پنل"].map((c) => "<code>" + c + "</code>").join("") + "</div>" +
+      "</div></div></section>";
+
+    html += '<section class="lp-sec" id="start"><div class="lp-wrap">' + head("راه اندازی", "سه قدم تا یک گروه امن", "") +
+      '<ol class="lp-steps">' + SITE_STEPS.map(([t, s], i) => '<li><span class="lp-n">' + fa(i + 1) + "</span><h3>" + t + "</h3><p>" + s + "</p></li>").join("") + "</ol>" +
+      (add ? '<div class="lp-center">' + addBtn("lg") + "</div>" : "") + "</div></section>";
+
+    html += '<section class="lp-sec" id="faq"><div class="lp-wrap lp-narrow">' + head("سوال ها", "پرسش های رایج", "") +
+      '<div class="lp-faq">' + SITE_FAQ.map(([q, a], i) => "<details" + (i === 0 ? " open" : "") + "><summary>" + q + '<span class="lp-plus">' + icon("plus", 18) + "</span></summary><p>" + a + "</p></details>").join("") + "</div></div></section>";
+
+    html += '<section class="lp-final"><div class="lp-wrap"><div class="lp-final-in"><span class="lp-logo lg">' + icon("shieldCheck", 26, 2) + "</span>" +
+      "<h2>همین حالا گروهت را امن کن</h2><p>اضافه کنید، ادمین کنید، تمام. بقیه با ربات.</p>" +
+      '<div class="lp-ctas center">' + addBtn("lg light") + appBtn("lg light-ghost") + "</div></div></div></section>";
+
+    html += '<footer class="lp-foot"><div class="lp-wrap lp-foot-in"><a class="lp-brand" href="#top"><span class="lp-logo">' + icon("shieldCheck", 16, 2.2) + "</span>مدیریت گروه</a>" +
+      (links.length ? '<div class="lp-foot-links">' + links.map(([key, label, ic]) => '<a href="' + esc(SITE.links[key]) + '" target="_blank" rel="noopener">' + icon(ic, 15) + label + "</a>").join("") + "</div>" : "") +
+      "<small>ساخته شده برای گروه های فارسی زبان تلگرام</small></div></footer>";
+    html += "</div>";
+
+    const first = !document.body.classList.contains("site");
+    document.body.classList.add("site");
+    document.body.classList.remove("nobar");
+    app.innerHTML = html;
+    if (first && location.hash.length > 1) {
+      const target = document.getElementById(location.hash.slice(1));
+      if (target) target.scrollIntoView();
+    }
+  }
+
+  function siteChat() {
+    const msg = (who, text, cls, extra) => '<div class="lp-msg ' + cls + '">' + (who ? "<b>" + who + "</b>" : "") + "<span>" + text + "</span>" + (extra || "") + "</div>";
+    return (
+      '<div class="lp-chat" aria-hidden="true"><div class="lp-chat-top"><span class="lp-s-av">گ</span><span><b>گروه برنامه نویسان</b><small>۱٬۲۴۸ عضو</small></span></div>' +
+      '<div class="lp-chat-body">' +
+      msg("مهمان ۴۲", "تخفیف ویژه، همین الان عضو شوید <bdi>t.me/offer</bdi>", "in struck", "<em>حذف شد · قفل لینک</em>") +
+      msg("سارا · ادمین", '<span class="lp-reply">مهمان ۴۲</span>سکوت ۱ ساعت', "out") +
+      msg("ربات", "✓ مهمان ۴۲ برای ۱ ساعت سکوت شد.", "in bot") +
+      msg("سارا · ادمین", "قفل لینک", "out") +
+      msg("ربات", "✓ قفل لینک فعال شد.", "in bot") +
+      '</div><div class="lp-panelbtn">' + icon("grid", 15) + " باز کردن پنل</div></div>"
+    );
   }
 
   function renderFatal(glyph, title, sub, retry) {
@@ -614,7 +798,7 @@
   async function start() {
     applyTheme();
     if (!initData) {
-      renderFatal("shieldOff", STATE_MESSAGES.auth_failed, "در گروه «پنل» بفرستید یا از دکمه منوی ربات وارد شوید.", false);
+      renderSite();
       return;
     }
     if (tg && !start.wired) {
@@ -626,7 +810,7 @@
         if (tg.onEvent) tg.onEvent("themeChanged", applyTheme);
         if (tg.SettingsButton) {
           tg.SettingsButton.show();
-          tg.SettingsButton.onClick(() => S.dash && goTab("settings"));
+          tg.SettingsButton.onClick(() => S.dash && leaveTo(() => goTab("settings")));
         }
       } catch (e) {
       }
@@ -655,7 +839,7 @@
       if (known.length === 1) chat = known[0].id;
     }
     if (!chat) {
-      if (!groups.length) {
+      if (!groups.some((g) => g.known)) {
         renderNoGroups();
         return;
       }
@@ -686,11 +870,16 @@
     S.palette = null;
     S.admins = null;
     S.lists = null;
+    S.joinGate = null;
+    S.lockBusy = null;
+    S.rightsBusy = false;
+    S.caseBusy = null;
     S.lockCache = null;
     S.pending = null;
     S.featureQuery = "";
     S.barSel = null;
     S.tab = "home";
+    setClosingConfirmation(false);
     store(STORE_KEY, String(chat));
     app.innerHTML = renderSkeleton();
     try {
@@ -757,19 +946,22 @@
       S.rights = r;
     } catch (e) {
       if (S.chat !== chat) return;
-      S.rights = "error";
+      if (e && e.message === "unseeded") S.rights = "unseeded";
+      else if (S.rights == null) S.rights = "error";
+      if (S.rights === "unseeded") S.rightsHelp = e.detail || "";
     }
     rerenderIfIdle(["home", "members"]);
   }
 
   async function loadSide() {
     const chat = S.chat;
+    const mine = (set) => (d) => { if (S.chat === chat) set(d); };
     const jobs = [
-      api("/locks").then((d) => { S.lockCache = d; }),
-      api("/log").then((d) => { S.logInfo = d; }, () => { S.logInfo = "error"; }),
-      api("/welcome").then((d) => { S.welcomeInfo = d; }, () => { S.welcomeInfo = "error"; }),
-      api("/slow").then((d) => { S.slow = d; }),
-      api("/cases?status=open&limit=5").then((d) => { S.openCases = d; }, () => { S.openCases = "denied"; }),
+      api("/locks").then(mine((d) => { S.lockCache = d; })),
+      api("/log").then(mine((d) => { S.logInfo = d; }), mine(() => { if (S.logInfo == null) S.logInfo = "error"; })),
+      api("/welcome").then(mine((d) => { S.welcomeInfo = d; }), mine(() => { if (S.welcomeInfo == null) S.welcomeInfo = "error"; })),
+      api("/slow").then(mine((d) => { S.slow = d; })),
+      api("/cases?status=open&limit=5").then(mine((d) => { S.openCases = d; }), mine((e) => { if (S.openCases == null || S.openCases === "error") S.openCases = e && e.status === 403 ? "denied" : "error"; })),
     ];
     await Promise.allSettled(jobs);
     if (S.chat !== chat) return;
@@ -815,22 +1007,34 @@
       '<div id="main" class="nobar"><div class="empty"><div class="glyph">' + icon(known ? "shieldOff" : "wifiOff", 32, 1.6) + "</div>" +
       '<div class="t">' + esc(msg) + "</div>" + (sub ? '<div class="s">' + esc(sub) + "</div>" : "") +
       '<div class="btns" style="justify-content:center">' +
-      (known ? "" : '<button class="btn ghost" data-retry-chat>' + icon("refresh", 16) + " تلاش دوباره</button>") +
+      (!known || e.message === "not_admin" ? '<button class="btn ghost" data-retry-chat>' + icon("refresh", 16) + " تلاش دوباره</button>" : "") +
       (S.groups && S.groups.length > 1 ? '<button class="btn" data-picker>انتخاب گروه دیگر</button>' : "") +
+      (e.message === "chat_unknown" && addToGroupLink() ? '<button class="btn" data-open-link="' + esc(addToGroupLink()) + '">' + icon("plus", 16) + " افزودن دوباره ربات</button>" : "") +
       "</div></div></div></div>" + renderOverlays();
     document.body.classList.add("nobar");
     syncBack();
   }
 
   function renderNoGroups() {
+    const add = addToGroupLink();
     app.innerHTML =
-      '<aside id="rail"></aside><div id="view"><div class="top"><div class="grp"><div class="avatar" style="background:var(--card-2);color:var(--muted)">' +
-      icon("shieldCheck", 18) + '</div><div><div class="gname">مدیریت گروه</div><div class="gsub">هنوز گروهی وصل نیست</div></div></div></div>' +
-      '<div id="main" class="nobar"><div class="empty"><div class="glyph">' + icon("users", 32, 1.6) + "</div>" +
-      '<div class="t">گروهی برای مدیریت نیست</div>' +
-      '<div class="s">ربات را به گروه خود اضافه و ادمین کنید و همه دسترسی ها را به آن بدهید. بعد این صفحه را دوباره باز کنید.</div>' +
-      '<button class="btn" data-reboot>' + icon("refresh", 16) + " بررسی دوباره</button>" +
-      "</div></div></div>";
+      '<aside id="rail"></aside><div id="view"><div class="top"><div class="grp"><span class="avatar brand">' +
+      icon("shieldCheck", 18, 2.2) + '</span><span><span class="gname" style="display:block">مدیریت گروه</span><span class="gsub" style="display:block">هنوز گروهی وصل نیست</span></span></div></div>' +
+      '<div id="main" class="nobar"><div class="onboard">' +
+      '<div class="ob-hero"><span class="ob-mark">' + icon("shieldCheck", 30, 1.9) + "</span>" +
+      "<h1>اولین گروهتان را وصل کنید</h1><p>ربات را به گروه اضافه و ادمین کنید؛ خودش فعال می شود و گروه همین جا ظاهر می شود.</p></div>" +
+      '<ol class="ob-steps">' + SITE_STEPS.map(([t, s], i) => '<li><span class="ob-n">' + fa(i + 1) + '</span><span class="rt"><span class="t wrap">' + t + '</span><span class="s wrap">' + s + "</span></span></li>").join("") + "</ol>" +
+      '<div class="ob-acts">' +
+      (add ? '<button class="btn block lg" data-open-link="' + esc(add) + '">' + icon("plus", 18, 2.4) + " افزودن ربات به گروه</button>" : "") +
+      '<button class="btn ghost block" data-reboot>' + icon("refresh", 16) + " گروه را اضافه کردم، بررسی کن</button></div>" +
+      '<div class="ob-gets"><div class="h"><div class="t">بعد از وصل شدن</div></div><div class="list">' +
+      [["shield", "ضد اسپم، ضد هجوم و احراز هویت", "با یک لمس روشن می شوند"],
+        ["lock", "۳۷ قفل محتوا و فیلتر کلمه", "لینک، فوروارد، عکس، استیکر و بیشتر"],
+        ["sparkles", "نگهبان هوشمند تصویر", "محتوای غیراخلاقی، تبلیغ، سلاح و…"],
+        ["chart", "آمار و پرونده ها", "هر برخورد ثبت می شود"]].map(([ic, t, s]) =>
+        '<div class="row"><span class="rico on">' + icon(ic, 17) + '</span><span class="rt"><span class="t">' + t + '</span><span class="s">' + s + "</span></span></div>").join("") +
+      "</div></div></div></div></div>";
+    document.body.classList.add("nobar");
   }
 
   function renderSkeleton() {
@@ -856,8 +1060,13 @@
 
   function openCaseCount() {
     const c = S.openCases;
-    if (!c || c === "denied" || !c.cases) return 0;
+    if (!c || c === "denied" || c === "error" || !c.cases) return 0;
     return c.cases.length;
+  }
+
+  function caseBadge() {
+    const n = openCaseCount();
+    return n ? n + (S.openCases.has_more ? "+" : "") : 0;
   }
 
   function groupButton(extra) {
@@ -866,14 +1075,16 @@
     const role = S.dash ? (S.dash.viewer.is_owner ? "مالک" : "ادمین") : g && g.is_owner ? "مالک" : "ادمین";
     const many = S.groups && S.groups.length > 1;
     const chosen = !!(g || S.dash);
+    const h = S.health && S.health !== "error" ? S.health : null;
+    const dot = h ? '<span class="hdot ' + (h.issues.some((i) => i.severity === "bad") ? "bad" : h.issues.length ? "warn" : "ok") + '"></span>' : "";
     return (
-      '<button class="grp' + (extra || "") + '" data-picker' + (many ? "" : " disabled") + ' aria-label="انتخاب گروه">' +
+      '<button class="grp' + (extra || "") + '" data-picker aria-label="' + esc("گروه: " + decode(title) + "، تغییر گروه") + '">' +
       (chosen
-        ? '<span class="avatar" style="' + avatarStyle(S.chat) + '">' + esc(initial(title)) + "</span>"
+        ? '<span class="avatar" style="' + avatarStyle(S.chat) + '">' + esc(initial(title)) + dot + "</span>"
         : '<span class="avatar" style="background:var(--card-2);color:var(--muted)">' + icon("users", 18) + "</span>") +
-      '<span style="min-width:0;flex:1"><span class="gname" style="display:block">' + title + '</span><span class="gsub" style="display:block">' +
+      '<span style="min-width:0;flex:1"><span class="gname" style="display:block">' + bdi(title) + '</span><span class="gsub" style="display:block">' +
       (chosen ? role + (many ? " · " + fa(S.groups.length) + " گروه" : "") : fa((S.groups || []).length) + " گروه در دسترس") + "</span></span>" +
-      (many ? '<span class="chev" style="color:var(--muted)">' + icon("chevD", 16) + "</span>" : "") +
+      '<span class="chev" style="color:var(--muted)">' + icon("chevD", 16) + "</span>" +
       "</button>"
     );
   }
@@ -887,15 +1098,15 @@
   }
 
   function renderTop(bare) {
-    const wideTitle = '<div class="wide-only" style="min-width:0"><div class="ptitle">' + (TAB_TITLES[S.tab] || "") + '</div><div class="gsub">' + (S.dash ? S.dash.chat.title : "") + "</div></div>";
+    const wideTitle = S.tab === "home" ? '<div class="wide-only" style="min-width:0"><div class="ptitle">' + TAB_TITLES.home + '</div><div class="gsub">' + (S.dash ? S.dash.chat.title : "") + "</div></div>" : '<div class="wide-only"></div>';
     return '<div class="top">' + groupButton(bare ? "" : " hide-wide") + (bare ? "" : wideTitle) + topActions(bare) + "</div>";
   }
 
   function renderPageTop(title, sub, right) {
     return (
       '<div class="top"><div class="lead">' +
-      '<button class="ibtn" data-back aria-label="بازگشت">' + icon("arrowL", 20) + "</button>" +
-      '<div style="min-width:0"><div class="ptitle">' + title + '</div><div class="gsub">' + (sub || "") + "</div></div></div>" +
+      '<button class="ibtn" data-back aria-label="بازگشت">' + icon("arrowR", 20) + "</button>" +
+      '<div style="min-width:0"><div class="ptitle">' + title + '</div><div class="gsub">' + (sub ? bdi(sub) : "") + "</div></div></div>" +
       '<div class="acts">' + (right || "") + "</div></div>"
     );
   }
@@ -906,7 +1117,7 @@
 
   function tabBadge(id) {
     if (id === "home") return issueCount();
-    if (id === "reports") return openCaseCount();
+    if (id === "reports") return caseBadge();
     return 0;
   }
 
@@ -941,7 +1152,7 @@
       '<button class="searchbtn" data-palette>' + icon("search", 16) + "<span>جستجو</span><kbd>Ctrl K</kbd></button>" +
       TABS.map(([id, ic, label]) => nav('data-tab="' + id + '"', ic, label, !root && S.tab === id, tabBadge(id))).join("") +
       '<div class="rh">دسترسی سریع</div>' +
-      RAIL_PAGES.map(([id, ic, label]) => nav('data-push-root="' + id + '"', ic, label, root && root.id === id, id === "cases" ? openCaseCount() : 0)).join("") +
+      RAIL_PAGES.map(([id, ic, label]) => nav('data-push-root="' + id + '"', ic, label, root && root.id === id, id === "cases" ? caseBadge() : 0)).join("") +
       '<div class="rfoot"><kbd>Ctrl K</kbd> جستجو · <kbd>Esc</kbd> بازگشت</div>' +
       "</aside>"
     );
@@ -950,12 +1161,58 @@
   function renderOverlays() {
     const sh = S.sheet;
     const open = sh && !sh.fresh;
-    return '<div id="dim" data-close' + (open ? ' class="open"' : "") + '></div><div id="sheet" role="dialog" aria-modal="true"' + (open ? ' class="open"' : "") + ">" + (sh ? sheetHtml() : "") + "</div>" + renderPalette();
+    return '<div id="dim" data-close' + (open ? ' class="open"' : "") + '></div><div id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-t" tabindex="-1"' + (open ? ' class="open"' : "") + (sh ? "" : " hidden") + ">" + (sh ? sheetHtml() : "") + "</div>" + renderPalette();
+  }
+
+  const FOCUS_SCOPES = [".confirm", "#palette", "#sheet", "#view", "#rail", "#tabs"];
+
+  function focusTarget(el) {
+    const scope = FOCUS_SCOPES.find((s) => el.closest(s));
+    if (!scope) return null;
+    const tag = el.tagName.toLowerCase();
+    let sel = tag + (el.id ? "#" + CSS.escape(el.id) : "");
+    for (const a of el.attributes) {
+      if (a.name.startsWith("data-")) sel += "[" + a.name + '="' + CSS.escape(a.value) + '"]';
+    }
+    if (sel === tag) return null;
+    const root = document.querySelector(scope);
+    const index = root ? Array.from(root.querySelectorAll(sel)).indexOf(el) : 0;
+    return { scope, sel, index: Math.max(0, index) };
+  }
+
+  function restoreFocus(t) {
+    const root = t && app.querySelector(t.scope);
+    if (!root) return;
+    const all = root.querySelectorAll(t.sel);
+    const el = all[Math.min(t.index, all.length - 1)];
+    if (el) el.focus({ preventScroll: true });
+  }
+
+  function typedValues() {
+    const out = {};
+    app.querySelectorAll("#view input[id], #view textarea[id]").forEach((el) => {
+      if (el.type === "search" || el.type === "time" || el.id === "doc-text") return;
+      if (el.value !== el.defaultValue) out[el.id] = el.value;
+    });
+    return out;
+  }
+
+  function restoreTyped(values) {
+    Object.keys(values).forEach((id) => {
+      const el = document.getElementById(id);
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) el.value = values[id];
+    });
   }
 
   function renderShellBare() {
-    app.innerHTML = '<aside id="rail"></aside><div id="view">' + renderTop(true) + '<div id="main" class="nobar"></div></div>' + renderOverlays();
+    app.innerHTML = '<aside id="rail"></aside><div id="view">' + renderTop(true) + '<div id="main" class="nobar">' + pickPrompt() + "</div></div>" + renderOverlays();
     document.body.classList.add("nobar");
+  }
+
+  function pickPrompt() {
+    const add = addToGroupLink();
+    return '<div class="empty"><div class="glyph">' + icon("users", 32, 1.6) + '</div><div class="t">یک گروه انتخاب کنید</div><div class="s">' + fa((S.groups || []).length) + ' گروه در دسترس است.</div><div class="btns" style="justify-content:center"><button class="btn" data-picker>' + icon("users", 16) + " انتخاب گروه</button>" +
+      (add ? '<button class="btn ghost" data-open-link="' + esc(add) + '">' + icon("plus", 16) + " افزودن به گروه دیگر</button>" : "") + "</div></div>";
   }
 
   function render() {
@@ -964,9 +1221,16 @@
     const view = page ? renderPage(page) : renderTop(false) + '<div id="main">' + renderTab() + "</div>";
     const html = renderRail() + '<div id="view">' + view + "</div>" + (page ? "" : renderTabs()) + renderOverlays() + renderConfirm();
     const y = window.scrollY;
-    const focused = document.activeElement && document.activeElement.id;
+    const active = document.activeElement;
+    const focused = active && active.id;
+    const focusKey = active && active !== document.body && app.contains(active) ? focusTarget(active) : null;
     const sheetY = (document.getElementById("sheet") || {}).scrollTop || 0;
+    const typed = render.page === page && render.tab === S.tab && !S.dropTyped ? typedValues() : null;
+    S.dropTyped = false;
     app.innerHTML = html;
+    if (typed) restoreTyped(typed);
+    render.page = page;
+    render.tab = S.tab;
     document.body.classList.toggle("nobar", !!page);
     window.scrollTo(0, y);
     const sheetEl = document.getElementById("sheet");
@@ -977,6 +1241,11 @@
         el.focus();
         el.setSelectionRange(el.value.length, el.value.length);
       }
+    } else if (S.confirm && !(active && active.closest && active.closest(".confirm"))) {
+      const cancel = app.querySelector(".confirm [data-confirm-cancel].btn");
+      if (cancel) cancel.focus({ preventScroll: true });
+    } else if (focusKey) {
+      restoreFocus(focusKey);
     }
     if (S.sheet && S.sheet.fresh) openSheetAnimation();
     if (page && DOCS[page.id]) syncDoc(page);
@@ -1008,6 +1277,7 @@
   function back() {
     if (S.palette) return closePalette();
     if (S.confirm) {
+      if (S.confirm.busy) return;
       S.confirm = null;
       render();
       return;
@@ -1019,30 +1289,26 @@
     if (S.stack.length) {
       const page = currentPage();
       if (page && DOCS[page.id] && docDirty(page)) {
-        S.confirm = {
-          title: "تغییرات ذخیره نشده کنار گذاشته شود؟",
-          sub: "متنی که نوشته اید ذخیره نشده است.",
-          label: "کنار گذاشتن",
-          quiet: true,
-          run: async () => {
-            page.draft = page.saved;
-            S.stack.pop();
-            setClosingConfirmation(false);
-          },
-        };
-        render();
-        return;
+        return leaveTo(() => popPage());
       }
       if (page && page.id === "cases" && page.data && page.data.detail) {
         delete page.data.detail;
+        if (page.listStale) loadCases(page, page.data.status || "open", page.data.user || "");
         render();
         return;
       }
-      S.stack.pop();
-      render();
+      popPage();
       return;
     }
     if (S.tab !== "home") goTab("home");
+  }
+
+  function popPage() {
+    flushField();
+    const page = S.stack.pop();
+    setClosingConfirmation(false);
+    if (page && page.fromSheet) return openSheet(page.fromSheet);
+    render();
   }
 
   function counter(day, key) {
@@ -1086,8 +1352,10 @@
     let sub = facts;
     let acts = "";
     if (h == null) {
+      cls = " neutral";
       title = "در حال بررسی…";
     } else if (h === "error") {
+      cls = " neutral";
       title = "وضعیت ربات خوانده نشد";
       sub = "تنظیمات در دسترس است · " + facts;
       acts = '<button class="hbtn" data-recheck>' + icon("refresh", 14) + " تلاش دوباره</button>";
@@ -1095,11 +1363,12 @@
       const bad = h.issues.some((i) => i.severity === "bad");
       cls = bad ? " bad" : " warn";
       title = fa(h.issues.length) + " مورد نیاز به توجه دارد";
-      sub = bad ? "بخشی از محافظت الان کار نمی کند." : "یک تنظیم ناقص مانده است.";
-      acts = '<button class="hbtn solid" data-fix="' + esc(h.issues[0].fix) + '">رفع مشکل</button><button class="hbtn" data-recheck>' + icon("refresh", 14) + " بررسی دوباره</button>";
+      sub = bad ? "بخشی از محافظت الان کار نمی کند؛ جزئیات و راه حل در زیر." : "یک تنظیم ناقص مانده است؛ جزئیات در زیر.";
+      acts = '<button class="hbtn" data-recheck>' + icon("refresh", 14) + " بررسی دوباره</button>";
     } else {
+      cls = " ok";
       title = sc && sc.pct >= 100 ? "گروه کاملا محافظت می شود" : "گروه محافظت می شود";
-      if (sc && sc.pct < 100) acts = '<button class="hbtn solid" data-scroll="setup">تکمیل راه اندازی</button>';
+      if (sc && sc.pct < 100) sub = facts + " · " + fa(sc.total - sc.done) + " قدم تا محافظت کامل";
     }
     return (
       '<div class="hero' + cls + '"><div class="top-line">' + (sc ? ring(sc.pct) : "") +
@@ -1121,30 +1390,61 @@
     const sc = score();
     if (!sc || sc.pct >= 100) return "";
     const items = checks().filter((c) => c.done !== null);
+    const done = items.filter((c) => c.done);
+    const left = sc.total - sc.done;
+    const fixing = new Set(S.health && S.health !== "error" ? S.health.issues.map((i) => i.fix) : []);
     return '<div class="sec" id="setup"><div class="card"><div class="setup-head"><div class="t"><span>راه اندازی گروه</span><span class="pill accent">' + fa(sc.done) + " از " + fa(sc.total) + '</span></div>' +
-      '<div class="s">چند قدم تا محافظت کامل؛ روی هر مورد بزنید.</div><div class="progress"><span style="width:' + sc.pct + '%"></span></div></div>' +
-      items.map((c, i) =>
-        '<button class="row' + (c.done ? " done" : "") + '" data-check="' + i + '"><span class="check' + (c.done ? " done" : "") + '">' + icon("check", 14, 3) + '</span><span class="rt"><span class="t">' + c.title + '</span><span class="s">' + c.sub + "</span></span>" + (c.done ? "" : CHEV) + "</button>"
-      ).join("") + "</div></div>";
+      '<div class="s">' + (left === 1 ? "یک قدم تا محافظت کامل مانده است." : fa(left) + " قدم تا محافظت کامل مانده است.") + '</div><div class="progress"><span style="width:' + sc.pct + '%"></span></div></div>' +
+      items.map((c, i) => c.done || fixing.has(c.id) ? "" :
+        '<button class="row" data-check="' + i + '"><span class="check"></span><span class="rt"><span class="t">' + c.title + '</span><span class="s">' + c.sub + "</span></span>" + CHEV + "</button>"
+      ).join("") +
+      (done.length ? '<div class="row done-sum"><span class="check done">' + icon("check", 14, 3) + '</span><span class="rt"><span class="t n">' + fa(done.length) + ' مورد انجام شده</span><span class="s">' + done.map((c) => c.short).join("، ") + "</span></span></div>" : "") +
+      "</div></div>";
+  }
+
+  function groupState() {
+    const r = S.rights;
+    if (!r || r === "error" || r === "unseeded" || !Array.isArray(r.rights)) return null;
+    const lock = r.lock || {};
+    const until = lock.until && lock.until > Date.now() / 1000 ? lock.until : null;
+    const allClosed = r.rights.length > 0 && r.rights.every((x) => !x.open);
+    const manual = !!lock.manual;
+    const night = !!lock.night;
+    return { manual, until, night, allClosed, closed: manual || !!until || night || allClosed };
   }
 
   function groupClosed() {
-    if (!S.rights || S.rights === "error" || !S.rights.rights) return null;
-    return S.rights.rights.every((r) => !r.open);
+    const g = groupState();
+    return g ? g.closed : null;
+  }
+
+  function groupStateText(g) {
+    if (!g) return S.rights === "unseeded" ? "هنوز تنظیم نشده" : S.rights === "error" ? "خوانده نشد" : "…";
+    if (g.manual) return "بسته است";
+    if (g.until) return "بسته تا " + fa(new Date(g.until * 1000).toLocaleTimeString("fa-IR", { hour: "2-digit", minute: "2-digit" }));
+    if (g.night) return "قفل شب تا " + shown("ngt");
+    if (g.allClosed) return "همه دسترسی ها بسته";
+    return "باز است";
   }
 
   function renderQuick() {
-    const closed = groupClosed();
-    const q = (attr, ic, label, cls) =>
-      "<button " + attr + (cls ? ' class="' + cls + '"' : "") + '><span class="q">' + icon(ic, 20) + '</span><span class="l">' + label + "</span></button>";
+    const g = groupState();
+    const closed = g ? g.closed : null;
+    const q = (attr, ic, label, state, cls) =>
+      "<button " + attr + ' class="' + (cls || "") + '" aria-label="' + esc(label + "، " + state) + '"><span class="q">' + icon(ic, 20) + '</span><span class="l">' + label + '</span><span class="st">' + esc(state) + "</span></button>";
+    const flag = (id) => (isOn(id) ? "روشن" : "خاموش");
+    const night = sectionEnabled("ng");
+    const purge = sectionEnabled("ap");
+    const slow = S.slow && S.slow !== "error" ? S.slow.seconds : null;
+    const lockText = S.lockBusy === "closing" ? "در حال بستن…" : S.lockBusy === "opening" ? "در حال باز کردن…" : groupStateText(g);
     return (
       '<div class="quick">' +
-      q('data-quick="close"', closed ? "lock" : "unlock", closed ? "گروه بسته است" : "بستن گروه", closed ? "bad" : "") +
-      q('data-apply="strict"', "gavel", "سختگیرانه", isOn("strict") ? "on" : "") +
-      q('data-apply="cp_on"', "key", "احراز هویت", isOn("cp_on") ? "on" : "") +
-      q('data-open="ng"', "moon", "قفل شب", sectionEnabled("ng") ? "on" : "") +
-      q('data-open="sl"', "snail", "اسلوموشن", S.slow && S.slow.seconds > 0 ? "on" : "") +
-      q('data-open="ap"', "trash", "پاکسازی", sectionEnabled("ap") ? "on" : "") +
+      q('data-quick="close"', closed ? "lock" : "unlock", "قفل گروه", lockText, (closed ? "bad" : "") + (S.lockBusy ? " busy" : "")) +
+      q('data-apply="strict"', "gavel", "سختگیرانه", flag("strict"), isOn("strict") ? "on" : "") +
+      q('data-apply="cp_on"', "key", "احراز هویت", flag("cp_on"), isOn("cp_on") ? "on" : "") +
+      q('data-open="ng"', "moon", "قفل شب", night ? shown("ngf") + " تا " + shown("ngt") : "خاموش", night ? "on" : "") +
+      q('data-open="sl"', "snail", "اسلوموشن", slow == null ? "…" : slow > 0 ? slowLabel(slow) : "خاموش", slow > 0 ? "on" : "") +
+      q('data-open="ap"', "trash", "پاکسازی خودکار", purge ? shown("apt") : "خاموش", purge ? "on" : "") +
       "</div>"
     );
   }
@@ -1160,11 +1460,7 @@
       const max = Math.max(1, ...values);
       const now = values[values.length - 1];
       const prev = values.length > 1 ? values[values.length - 2] : null;
-      let delta = "";
-      if (prev != null) {
-        const diff = now - prev;
-        delta = diff === 0 ? "مثل دیروز" : '<span class="' + (diff > 0 ? "up" : "down") + (id === "joined" ? " good" : "") + '">' + icon(diff > 0 ? "arrowUp" : "arrowDown", 11, 3) + fa(Math.abs(diff)) + "</span> از دیروز";
-      }
+      const delta = prev != null ? "دیروز " + fa(prev) : "";
       return '<button class="kpi" data-kpi="' + id + '"><div class="l">' + icon(m.icon, 14) + label + " · امروز</div><div class=\"v\">" + fa(now) + '</div><div class="d">' + delta + "</div>" +
         '<div class="spark">' + values.map((v) => '<i style="height:' + Math.max(8, (v / max) * 100) + '%"></i>').join("") + "</div></button>";
     }).join("") + "</div>";
@@ -1172,8 +1468,8 @@
 
   function renderHomeCases() {
     const c = S.openCases;
-    if (!c || c === "denied" || !c.cases || !c.cases.length) return "";
-    return '<div class="sec"><div class="h"><div class="t">گزارش های باز</div><button class="more" data-push="cases">همه ' + icon("chevL", 14) + "</button></div>" +
+    if (!c || c === "denied" || c === "error" || !c.cases || !c.cases.length) return "";
+    return '<div class="sec"><div class="h"><div class="t">پرونده های باز <span class="count">· ' + fa(caseBadge()) + '</span></div><button class="more" data-push="cases">همه ' + icon("chevL", 14) + "</button></div>" +
       '<div class="list">' + c.cases.slice(0, 3).map(caseRow).join("") + "</div></div>";
   }
 
@@ -1182,11 +1478,11 @@
     return (
       '<div class="grid2 wide-left"><div class="col">' +
       '<div class="sec first">' + renderHero() + renderIssues() + "</div>" +
+      renderSetup() +
       '<div class="sec"><div class="h"><div class="t">اقدام سریع</div></div>' + renderQuick() + "</div>" +
       '<div class="sec"><div class="h"><div class="t">امروز در گروه</div><button class="more" data-tab="reports">گزارش کامل ' + icon("chevL", 14) + "</button></div>" + renderKpis() + "</div>" +
-      renderHomeCases() +
       '</div><div class="col">' +
-      renderSetup() +
+      renderHomeCases() +
       '<div class="sec"><div class="h"><div class="t">محافظت اصلی</div><button class="more" data-tab="features">همه امکانات ' + icon("chevL", 14) + "</button></div>" +
       '<div class="list">' + top + "</div></div>" +
       "</div></div>"
@@ -1194,17 +1490,30 @@
   }
 
   function renderFeatures() {
-    const q = fold(S.featureQuery);
     const cat = S.featCat;
     const total = FEATURES.filter((f) => featureState(f) !== null && !f.always).length;
-    let html = '<div class="phead"><div class="t">امکانات</div><div class="s">' + fa(activeFeatureCount()) + " از " + fa(total) + " امکان روشن است · روی هر کدام بزنید تا تنظیمش کنید</div></div>" +
+    const html = '<div class="phead"><div class="t">امکانات</div><div class="s">' + fa(activeFeatureCount()) + " از " + fa(total) + " امکان روشن است · روی هر کدام بزنید تا تنظیمش کنید</div></div>" +
       '<div class="sec"><label class="search">' + icon("search", 16) +
-      '<input id="feature-search" type="search" placeholder="جستجو، مثلا «لینک» یا «ویس»" value="' + esc(S.featureQuery || "") + '" /></label>' +
+      '<input id="feature-search" type="search" placeholder="جستجو، مثلا «لینک» یا «ویس»" aria-label="جستجوی امکانات و قفل ها" value="' + esc(S.featureQuery || "") + '" /></label>' +
       '<div class="chips scroll" style="margin-top:10px">' +
       [["all", "همه"]].concat(GROUPS.map(([g]) => [g, g])).concat([["on", "روشن ها"], ["off", "خاموش ها"]]).map(([id, label]) =>
-        '<button class="chip sm' + (cat === id ? " on" : "") + '" data-feat-cat="' + esc(id) + '">' + label + "</button>").join("") +
+        '<button class="chip sm' + (cat === id ? " on" : "") + '" data-feat-cat="' + esc(id) + '" aria-pressed="' + (cat === id) + '">' + label + "</button>").join("") +
       "</div></div>";
-    let any = false;
+    return html + '<div id="feat-results">' + featureResults() + "</div>";
+  }
+
+  function featureResults() {
+    const q = fold(S.featureQuery);
+    const cat = S.featCat;
+    let html = "";
+    if (q && S.lockCache && (cat === "all" || cat === "محتوا" || cat === "on" || cat === "off")) {
+      const locks = S.lockCache.plain.concat(S.lockCache.ai || []).filter((l) => fold(decode(l.label)).includes(q) && (cat !== "on" || l.on) && (cat !== "off" || !l.on));
+      if (locks.length) {
+        html += '<div class="sec"><div class="h"><div class="t with-ic"><span class="hic">' + icon("lock", 15) + '</span><span>قفل ها<span class="sub">روی هر کدام بزنید تا روشن یا خاموش شود</span></span></div><button class="more" data-push="locks">همه قفل ها ' + icon("chevL", 14) + "</button></div>" +
+          '<div class="lockgrid">' + locks.slice(0, 9).map(lockTile).join("") + "</div></div>";
+      }
+    }
+    let any = !!html;
     let body = "";
     GROUPS.forEach(([g, gic, gdesc]) => {
       if (cat !== "all" && cat !== "on" && cat !== "off" && cat !== g) return;
@@ -1222,12 +1531,12 @@
       const on = all.filter((f) => featureState(f) === true && !f.always).length;
       const switchable = all.filter((f) => featureState(f) !== null && !f.always).length;
       body +=
-        '<div class="sec"><div class="h"><div class="t">' + g + '<span class="sub">' + gdesc + '</span></div><div class="count">' +
+        '<div class="sec"><div class="h"><div class="t with-ic"><span class="hic">' + icon(gic, 15) + "</span><span>" + g + '<span class="sub">' + gdesc + '</span></span></div><div class="count">' +
         (switchable ? fa(on) + " از " + fa(switchable) + " روشن" : "") + "</div></div>" +
         '<div class="list">' + items.map(featureRow).join("") + "</div></div>";
     });
     html += '<div class="tiles">' + body + "</div>";
-    if (!any) html += '<div class="empty sm"><div class="glyph">' + icon("search", 24) + '</div><div class="t">' + (q ? "چیزی با این نام نیست" : cat === "on" ? "هیچ امکانی روشن نیست" : "همه امکانات روشن است") + "</div></div>";
+    if (!any) html += '<div class="empty sm"><div class="glyph">' + icon("search", 24) + '</div><div class="t">' + (q ? "چیزی با این نام نیست" : cat === "on" ? "هیچ امکانی روشن نیست" : "همه امکانات روشن است") + "</div>" + (q ? '<div class="s">جستجوی کامل تر، همه تنظیم ها و صفحه ها: <button class="more" data-palette>جستجوی سراسری</button></div>' : "") + "</div>";
     html += '<div class="sec"><button class="btn outline block" data-open="help">' + icon("book", 16) + " دستورهایی که از داخل گروه کار می کنند</button></div>";
     return html;
   }
@@ -1236,7 +1545,7 @@
     ban: ["بن شده ها", "ban", "کسانی که از گروه بیرون شده اند"],
     mute: ["سکوت شده ها", "mute", "نمی توانند پیام بدهند"],
     vip: ["کاربران ویژه", "star", "از همه قفل ها معاف اند"],
-    free: ["معاف ها", "unlock", "از ضد رگبار و اد اجباری معاف اند"],
+    free: ["معاف ها", "unlock", "از عضویت اجباری کانال و اد اجباری معاف اند"],
     filter: ["فیلتر کلمات", "funnel", "پیامی که این کلمه ها را دارد حذف می شود"],
     answer: ["پاسخ خودکار", "chat", "به این کلمه ها پاسخ آماده داده می شود"],
     cmd: ["دستور های سفارشی", "terminal", "کلمه هایی که خودتان برای بن، سکوت یا اخراج ساخته اید"],
@@ -1255,32 +1564,38 @@
   function renderMembers() {
     const a = S.admins;
     let admins = '<div class="sec"><div class="h"><div class="t">ادمین ها' + (a && a !== "error" ? ' <span class="count">· ' + fa(a.admins.length) + "</span>" : "") + "</div>" +
-      (S.dash.viewer.is_owner ? '<button class="more" data-open="lim">محدودیت ها ' + icon("chevL", 14) + "</button>" : "") + "</div>";
+      '<button class="more" data-open="lim">محدودیت ها ' + icon("chevL", 14) + "</button></div>";
     if (!a) {
       admins += '<div class="list">' + ('<div class="row"><div class="sk" style="width:36px;height:36px;border-radius:11px"></div><div class="rt"><div class="sk" style="width:120px;height:12px"></div></div></div>').repeat(3) + "</div>";
     } else if (a === "error") {
-      admins += '<div class="list"><div class="row"><span class="rt"><span class="s">فهرست ادمین ها خوانده نشد.</span></span><button class="btn sm ghost" data-reload-admins>تلاش</button></div></div>';
+      admins += '<div class="list"><div class="row"><span class="rico warn">' + icon("wifiOff", 17) + '</span><span class="rt"><span class="t n">فهرست ادمین ها خوانده نشد.</span></span><button class="btn sm ghost" data-reload-admins>' + icon("refresh", 14) + " تلاش دوباره</button></div></div>";
     } else {
       admins += '<div class="list">' + a.admins.map((ad) => {
-        const removable = a.can_remove && !ad.is_creator && !ad.is_bot;
+        const known = typeof ad.removable === "boolean";
+        const removable = a.can_remove && !ad.is_creator && !ad.is_bot && (!known || ad.removable);
+        const role = ad.is_creator ? "مالک گروه" : ad.is_bot ? "ربات" : !known ? "ادمین" : ad.removable ? "ادمین · ربات می تواند عزلش کند" : "ادمین · فقط از تلگرام عزل می شود";
         return (
           '<div class="row"><span class="avatar sm" style="' + avatarStyle(ad.id) + '">' + esc(initial(ad.name)) + "</span>" +
-          '<span class="rt"><span class="t">' + ad.name + '</span><span class="s">' + (ad.is_creator ? "مالک گروه" : ad.is_bot ? "ربات" : "ادمین") + "</span></span>" +
-          (ad.is_creator ? '<span class="pill ok">مالک</span>' : ad.is_bot ? '<span class="pill mute">ربات</span>' : "") +
-          (removable ? '<button class="ibtn sm danger" data-remove-admin="' + ad.id + '" data-name="' + ad.name + '" title="عزل" aria-label="عزل">' + icon("x", 17) + "</button>" : "") +
+          '<span class="rt"><span class="t">' + bdi(ad.name) + '</span><span class="s">' + role + "</span></span>" +
+          (ad.is_creator ? '<span class="pill ok">' + icon("star", 11, 2.6) + " مالک</span>" : "") +
+          (removable ? '<button class="ibtn danger" data-remove-admin="' + esc(String(ad.id)) + '" title="عزل" aria-label="' + esc("عزل " + decode(ad.name)) + '">' + icon("x", 18) + "</button>" : "") +
           "</div>"
         );
       }).join("") + "</div>";
-      admins += '<div class="hint start">' + (a.can_remove ? "ربات فقط ادمین هایی را عزل می کند که خودش اضافه کرده. برای ترفیع، در گروه روی پیام کاربر «ترفیع» بفرستید." : "فقط مالک گروه می تواند ادمین عزل کند.") + "</div>";
+      admins += '<div class="hint start">' + (a.can_remove ? "برای ادمین کردن کسی، در گروه روی پیامش «ترفیع» بفرستید." : "فقط مالک گروه می تواند ادمین عزل کند.") + "</div>";
     }
     admins += "</div>";
 
-    const closed = groupClosed();
-    let rights = '<div class="sec"><div class="h"><div class="t">دسترسی اعضای عادی</div></div><div class="list">' +
-      '<button class="row" data-push="rights"><span class="rico' + (closed ? " bad" : " on") + '">' + icon(closed ? "lock" : "chat", 17) + '</span><span class="rt"><span class="t">' + (closed ? "گروه بسته است" : "چه چیزی می توانند بفرستند") + '</span><span class="s">' +
-      (closed ? "هیچ عضو عادی نمی تواند پیام بدهد" : "پیام، عکس، ویدیو، ویس، استیکر، نظرسنجی…") + "</span></span>" + CHEV + "</button>" +
-      '<button class="row" data-open="ad"><span class="rico' + (featureState(feature("ad")) ? " on" : "") + '">' + icon("userPlus", 17) + '</span><span class="rt"><span class="t">اد اجباری</span><span class="s">' + (featureState(feature("ad")) ? esc(feature("ad").effect()) : "خاموش") + "</span></span>" + CHEV + "</button>" +
-      '<button class="row" data-push="joingate"><span class="rico">' + icon("door", 17) + '</span><span class="rt"><span class="t">عضویت اجباری در کانال</span><span class="s">تا عضو کانال نشوند پیام نمی دهند</span></span>' + CHEV + "</button>" +
+    const g = groupState();
+    const closed = g ? g.closed : null;
+    const jg = S.joinGate && S.joinGate !== "error" ? S.joinGate : null;
+    const adOn = featureState(feature("ad"));
+    let rights = '<div class="sec"><div class="h"><div class="t">ورود و دسترسی اعضا</div></div><div class="list">' +
+      '<button class="row" data-push="rights"><span class="rico' + (closed ? " bad" : closed === false ? " on" : "") + '">' + icon(closed ? "lock" : "chat", 17) + '</span><span class="rt"><span class="t">دسترسی اعضای عادی</span><span class="s' + (closed ? " bad" : "") + '">' +
+      (closed ? "گروه " + groupStateText(g) : closed === false ? "گروه باز است · چه چیزی می توانند بفرستند" : groupStateText(g)) + "</span></span>" + CHEV + "</button>" +
+      '<button class="row" data-open="ad"><span class="rico' + (adOn ? " on" : "") + '">' + icon("userPlus", 17) + '</span><span class="rt"><span class="t">اد اجباری</span><span class="s' + (adOn ? " on" : "") + '">' + (adOn ? esc(feature("ad").effect()) : "خاموش") + "</span></span>" + CHEV + "</button>" +
+      '<button class="row" data-push="joingate"><span class="rico' + (jg && jg.channel ? " on" : "") + '">' + icon("door", 17) + '</span><span class="rt"><span class="t">عضویت اجباری در کانال</span><span class="s' + (jg && jg.channel ? " on" : "") + '">' +
+      (jg ? (jg.channel ? 'روشن · <bdi dir="ltr">@' + esc(decode(jg.channel).replace(/^@/, "")) + "</bdi>" : "خاموش") : "تا عضو کانال نشوند پیام نمی دهند") + "</span></span>" + CHEV + "</button>" +
       "</div></div>";
 
     const lists = '<div class="sec"><div class="h"><div class="t">لیست ها</div></div><div class="list">' +
@@ -1349,43 +1664,41 @@
 
   function renderReports() {
     const a = S.activity;
-    let left = '<div class="phead"><div class="t">گزارش ها</div><div class="s">آمار هفته، گزارش های اعضا و کانال لاگ</div></div>';
+    let left = '<div class="phead"><div class="t">گزارش ها</div><div class="s">آمار هفته، پرونده ها و کانال لاگ</div></div>';
     if (!a) left += '<div class="sec"><div class="sk" style="height:240px;border-radius:18px"></div></div>';
     else if (a === "error") {
       left += '<div class="sec"><div class="card"><div class="empty sm"><div class="glyph">' + icon("wifiOff", 24) + '</div><div class="t">آمار خوانده نشد</div><div class="s" style="margin-bottom:14px">اتصال را بررسی کنید.</div><button class="btn sm ghost" data-reload-activity>' + icon("refresh", 14) + " تلاش دوباره</button></div></div></div>";
     } else {
       left += '<div class="sec">' + renderChart(a) + "</div>";
+      const sel = S.barSel == null ? 0 : S.barSel;
+      const day = a.days.find((d) => d.ago === sel) || a.days[0];
+      const shownKeys = day.counters.filter((x) => x.count > 0);
+      left += '<div class="sec"><div class="h"><div class="t">جزئیات ' + dayName(day) + "</div></div>";
+      if (!shownKeys.length) {
+        left += '<div class="note mute">' + icon("info", 16) + "<span>" + (sel === 0 ? "امروز هنوز رویدادی ثبت نشده. شمارش از اولین حذف، سکوت یا عضو تازه شروع می شود." : "در این روز رویدادی ثبت نشده.") + "</span></div>";
+      } else {
+        left += '<div class="list">' + shownKeys.map((x) =>
+          '<div class="row compact"><span class="rt"><span class="t n">' + x.label + '</span></span><span class="count strong">' + fa(x.count) + "</span></div>"
+        ).join("") + "</div>";
+      }
+      left += "</div>";
     }
 
     let right = "";
     const c = S.openCases;
     if (c !== "denied") {
-      right += '<div class="sec"><div class="h"><div class="t">پرونده ها' + (openCaseCount() ? ' <span class="count">· ' + fa(openCaseCount()) + (c && c.has_more ? "+" : "") + " باز</span>" : "") + '</div><button class="more" data-push="cases">همه ' + icon("chevL", 14) + "</button></div>";
+      right += '<div class="sec"><div class="h"><div class="t">پرونده های باز' + (openCaseCount() ? ' <span class="count">· ' + fa(caseBadge()) + "</span>" : "") + '</div><button class="more" data-push="cases">همه پرونده ها ' + icon("chevL", 14) + "</button></div>";
       if (!c) right += '<div class="sk" style="height:110px;border-radius:18px"></div>';
+      else if (c === "error") right += '<div class="list"><div class="row"><span class="rico warn">' + icon("wifiOff", 17) + '</span><span class="rt"><span class="t n">پرونده ها خوانده نشد.</span></span><button class="btn sm ghost" data-reload-cases>' + icon("refresh", 14) + " تلاش دوباره</button></div></div>";
       else if (!c.cases.length) right += '<div class="card"><div class="empty sm"><div class="glyph">' + icon("shieldCheck", 24) + '</div><div class="t">پرونده باز نیست</div><div class="s">همه گزارش ها رسیدگی شده است.</div></div></div>';
       else right += '<div class="list">' + c.cases.slice(0, 4).map(caseRow).join("") + "</div>";
       right += "</div>";
     }
 
-    if (a && a !== "error") {
-      const sel = S.barSel == null ? 0 : S.barSel;
-      const day = a.days.find((d) => d.ago === sel) || a.days[0];
-      const shownKeys = day.counters.filter((x) => x.count > 0);
-      right += '<div class="sec"><div class="h"><div class="t">جزئیات ' + dayName(day) + "</div></div>";
-      if (!shownKeys.length) {
-        right += '<div class="note mute">' + icon("info", 16) + "<span>" + (sel === 0 ? "امروز هنوز رویدادی ثبت نشده. شمارش از اولین حذف، سکوت یا عضو تازه شروع می شود." : "در این روز رویدادی ثبت نشده.") + "</span></div>";
-      } else {
-        right += '<div class="list">' + day.counters.map((x) =>
-          '<div class="row compact"><span class="rt"><span class="t n">' + x.label + '</span></span><span class="count" style="color:' + (x.count ? "var(--text)" : "var(--muted-2)") + ';font-weight:650">' + fa(x.count) + "</span></div>"
-        ).join("") + "</div>";
-      }
-      right += "</div>";
-    }
-
     const log = S.logInfo && S.logInfo !== "error" ? S.logInfo : null;
     right += '<div class="sec"><div class="h"><div class="t">ثبت و گزارش</div></div><div class="list">' +
-      '<button class="row" data-push="log"><span class="rico' + (log && log.channel ? " on" : "") + '">' + icon("fileText", 17) + '</span><span class="rt"><span class="t">کانال لاگ</span><span class="s">' +
-      (log ? (log.channel ? "وصل · " + fa(log.kinds.filter((k) => k.on).length) + " رویداد ثبت می شود" : "وصل نیست") : "…") + "</span></span>" +
+      '<button class="row" data-push="log"><span class="rico' + (log && log.channel ? " on" : log ? " warn" : "") + '">' + icon("fileText", 17) + '</span><span class="rt"><span class="t">کانال لاگ</span><span class="s' + (log && log.channel ? " on" : "") + '">' +
+      (log ? (log.channel ? "وصل · " + fa(log.kinds.filter((k) => k.on).length) + " نوع رویداد ثبت می شود" : "وصل نیست؛ برخوردها جایی ثبت نمی شود") : S.logInfo === "error" ? "خوانده نشد" : "…") + "</span></span>" +
       (log && !log.channel ? '<span class="pill warn">وصل کنید</span>' : "") + CHEV + "</button>" +
       featureRow(feature("dr")) + "</div></div>";
     right += '<div class="hint">شمارش ها از ربات است و با آمار خود تلگرام فرق دارد. آمار ماه، ساعت ها و فعال ترین اعضا: «آمار» در گروه.</div>';
@@ -1400,52 +1713,66 @@
       return '<div class="row"><span class="rico' + (it.on ? " on" : "") + '">' + icon(ic, 17) + '</span><span class="rt"><span class="t">' + title + '</span><span class="s">' + sub + "</span></span>" + swb('data-apply="' + id + '"', it.on, title) + "</div>";
     };
     const sheetRow = (fid, ic, title, sub, on) =>
-      '<button class="row" data-open="' + fid + '"><span class="rico' + (on ? " on" : "") + '">' + icon(ic, 17) + '</span><span class="rt"><span class="t">' + title + '</span><span class="s">' + sub + "</span></span>" + CHEV + "</button>";
+      '<button class="row" data-open="' + fid + '"><span class="rico' + (on ? " on" : "") + '">' + icon(ic, 17) + '</span><span class="rt"><span class="t">' + title + '</span><span class="s' + (on ? " on" : "") + '">' + sub + "</span></span>" + CHEV + "</button>";
     const pageRow = (pid, ic, title, sub, on) =>
-      '<button class="row" data-push="' + pid + '"><span class="rico' + (on ? " on" : "") + '">' + icon(ic, 17) + '</span><span class="rt"><span class="t">' + title + '</span><span class="s">' + sub + "</span></span>" + CHEV + "</button>";
+      '<button class="row" data-push="' + pid + '"><span class="rico' + (on ? " on" : "") + '">' + icon(ic, 17) + '</span><span class="rt"><span class="t">' + title + '</span><span class="s' + (on ? " on" : "") + '">' + sub + "</span></span>" + CHEV + "</button>";
     const sec = (title, rows) => '<div class="sec"><div class="h"><div class="t">' + title + '</div></div><div class="list">' + rows + "</div></div>";
     const pref = themePref();
 
+    let pill = "";
+    if (health) {
+      const bad = health.issues.some((i) => i.severity === "bad");
+      pill = !health.bot_admin ? '<span class="pill bad">ربات ادمین نیست</span>'
+        : bad ? '<span class="pill bad">' + icon("alert", 12, 2.6) + " دسترسی ناقص</span>"
+        : health.issues.length ? '<span class="pill warn">' + fa(health.issues.length) + " مورد مانده</span>"
+        : '<span class="pill ok">' + icon("check", 12, 3) + " ربات فعال</span>";
+      if (health.issues.length || !health.bot_admin) pill = '<button class="pillbtn" data-tab="home" aria-label="دیدن مشکل ها در خانه">' + pill + "</button>";
+    }
     let html = '<div class="phead"><div class="t">تنظیمات</div><div class="s">رفتار ربات در این گروه</div></div>';
     html += '<div class="sec"><div class="card"><div class="profile"><span class="avatar xl" style="' + avatarStyle(S.chat) + '">' + esc(initial(S.dash.chat.title)) + "</span>" +
-      '<span class="rt"><span class="t">' + S.dash.chat.title + '</span><span class="s">' + (S.dash.viewer.is_owner ? "شما مالک هستید" : "شما ادمین هستید") + "</span></span>" +
-      (health ? (health.bot_admin ? '<span class="pill ok">' + icon("check", 12, 3) + " ربات فعال</span>" : '<span class="pill bad">ربات ادمین نیست</span>') : "") + "</div>" +
-      '<div class="row" style="border-top:1px solid var(--border)"><span class="rico">' + icon("key", 17) + '</span><span class="rt"><span class="t">شناسه گروه</span><span class="s" dir="ltr" style="text-align:right">' + S.chat + "</span></span>" +
-      '<button class="ibtn" data-copy="' + S.chat + '" title="کپی" aria-label="کپی شناسه">' + icon("copy", 18) + "</button></div>" +
-      (S.groups && S.groups.length > 1 ? '<button class="row" data-picker><span class="rico">' + icon("users", 17) + '</span><span class="rt"><span class="t">تغییر گروه</span><span class="s">' + fa(S.groups.length) + " گروه در دسترس</span></span>" + CHEV + "</button>" : "") +
+      '<span class="rt"><span class="t">' + bdi(S.dash.chat.title) + '</span><span class="s">' + (S.dash.viewer.is_owner ? "شما مالک هستید" : "شما ادمین هستید") + "</span></span>" + pill + "</div>" +
+      '<div class="row" style="border-top:1px solid var(--border)"><span class="rico">' + icon("key", 17) + '</span><span class="rt"><span class="t">شناسه گروه</span><span class="s"><bdi dir="ltr" class="num">' + S.chat + "</bdi></span></span>" +
+      '<button class="ibtn" data-copy="' + S.chat + '" title="کپی" aria-label="کپی شناسه گروه">' + icon("copy", 18) + "</button></div>" +
+      '<button class="row" data-picker><span class="rico">' + icon("users", 17) + '</span><span class="rt"><span class="t">' + (S.groups && S.groups.length > 1 ? "تغییر گروه" : "گروه های شما") + '</span><span class="s">' + (S.groups && S.groups.length > 1 ? fa(S.groups.length) + " گروه در دسترس" : "افزودن ربات به گروه دیگر") + "</span></span>" + CHEV + "</button>" +
       "</div></div>";
 
+    const welcome = S.welcomeInfo && S.welcomeInfo !== "error" ? S.welcomeInfo : null;
+    const welcomeSet = !!(welcome && (welcome.text || welcome.has_media));
+    const gate = S.joinGate && S.joinGate !== "error" ? S.joinGate : null;
     let col1 = sec("ورود اعضا",
-      sheetRow("cp", "key", "احراز هویت", isOn("cp_on") ? esc(feature("cp").effect()) : "خاموش", isOn("cp_on")) +
-      pageRow("welcome", "hand", "پیام خوشامد", "متن و حذف خودکار", S.welcomeInfo && S.welcomeInfo !== "error" && !!S.welcomeInfo.text) +
+      featureRow(feature("cp")) +
+      pageRow("welcome", "hand", "پیام خوشامد", welcome ? (welcomeSet ? "نوشته شده · حذف خودکار: " + shown("wct") : "نوشته نشده") : "متن و حذف خودکار", welcomeSet) +
       pageRow("rules", "scroll", "قوانین گروه", "با «قوانین» در گروه نمایش داده می شود") +
-      pageRow("joingate", "door", "عضویت اجباری در کانال", "تا عضو کانال نشوند پیام نمی دهند") +
+      pageRow("joingate", "door", "عضویت اجباری در کانال", gate ? (gate.channel ? "روشن" : "خاموش") : "تا عضو کانال نشوند پیام نمی دهند", !!(gate && gate.channel)) +
       flagRow("lb_on", "refresh", "بازگشت اعضای خارج شده", "کسی که بیرون رفت دوباره اضافه می شود"));
     col1 += sec("پیام های ربات",
       sheetRow("response-policy", "chat", "دیده شدن پیام ها", "خصوصی کردن اعلان ها و خوشامد") +
-      sheetRow("nt", "bell", "اعلان حذف", isOn("nt_on") ? "روشن · پاک شدن پس از " + shown("nt_t") + " ثانیه" : "خاموش", isOn("nt_on")) +
+      featureRow(EXTRA_SHEETS.nt) +
       flagRow("rk_on", "star", "مقام خودکار", "با فعالیت، عنوان می گیرند") +
       pageRow("list:answer", "chat", "پاسخ خودکار", "کلمه و پاسخ آماده") +
       pageRow("list:cmd", "terminal", "دستور های سفارشی", "کلمه های خودتان برای بن و سکوت"));
 
     let col2 = sec("مدیران",
-      (S.dash.viewer.is_owner
-        ? sheetRow("lim", "userCog", "محدودیت مدیران", isOn("lim_on") ? "روشن · هر ادمین فقط کارهای مجازش" : "خاموش", isOn("lim_on"))
-        : '<div class="row"><span class="rico">' + icon("userCog", 17) + '</span><span class="rt"><span class="t">محدودیت مدیران</span><span class="s">فقط مالک ربات تغییر می دهد · ' + (isOn("lim_on") ? "روشن" : "خاموش") + "</span></span></div>") +
-      sheetRow("bt", "shieldOff", "ضد خیانت ادمین", isOn("bt_on") ? esc(feature("bt").effect()) : "خاموش", isOn("bt_on")) +
+      (S.dash.viewer.is_owner ? featureRow(EXTRA_SHEETS.lim) : sheetRow("lim", "userCog", "محدودیت مدیران", (isOn("lim_on") ? "روشن" : "خاموش") + " · فقط مالک تغییر می دهد", isOn("lim_on"))) +
+      featureRow(feature("bt")) +
       '<button class="row" data-tab="members"><span class="rico">' + icon("users", 17) + '</span><span class="rt"><span class="t">فهرست ادمین ها</span><span class="s">مشاهده و عزل</span></span>' + CHEV + "</button>");
-    col2 += sec("لاگ و گزارش",
-      pageRow("log", "fileText", "کانال لاگ", S.logInfo && S.logInfo !== "error" && S.logInfo.channel ? "وصل" : "وصل نیست", S.logInfo && S.logInfo.channel) +
-      pageRow("cases", "inbox", "پرونده ها", "گزارش ها و سابقه برخوردها") +
-      sheetRow("dr", "send", "گزارش روزانه", sectionEnabled("dr") ? esc(feature("dr").effect()) : "خاموش", sectionEnabled("dr")));
+    const log = S.logInfo && S.logInfo !== "error" ? S.logInfo : null;
+    col2 += sec("ثبت و گزارش",
+      pageRow("log", "fileText", "کانال لاگ", log ? (log.channel ? "وصل" : "وصل نیست") : S.logInfo === "error" ? "خوانده نشد" : "…", !!(log && log.channel)) +
+      featureRow(feature("dr")));
     col2 += sec("ظاهر",
-      '<div class="row" style="display:block;padding:12px"><div class="seg">' +
+      '<div class="row" style="display:block;padding:12px"><div class="seg" role="radiogroup" aria-label="پوسته">' +
       [["auto", "monitor", "خودکار"], ["dark", "moon", "تیره"], ["light", "sun", "روشن"]].map(([id, ic, label]) =>
-        '<button class="' + (pref === id ? "on" : "") + '" data-theme-set="' + id + '">' + icon(ic, 14) + " " + label + "</button>").join("") +
+        '<button role="radio" aria-checked="' + (pref === id) + '" class="' + (pref === id ? "on" : "") + '" data-theme-set="' + id + '">' + icon(ic, 14) + " " + label + "</button>").join("") +
       '</div><div class="hint start">«خودکار» از پوسته تلگرام پیروی می کند.</div></div>');
-    col2 += sec("راهنما",
+    const rightsOk = health && !health.issues.some((i) => i.fix === "rights");
+    const add = addToGroupLink();
+    const share = SITE.bot ? "https://t.me/share/url?url=" + encodeURIComponent("https://t.me/" + SITE.bot) + "&text=" + encodeURIComponent("ربات مدیریت گروه؛ ضد اسپم، قفل محتوا و داشبورد کامل") : "";
+    col2 += sec("راهنما و ربات",
       sheetRow("help", "book", "دستورهای داخل گروه", "کارهایی که با ریپلای روی پیام انجام می شود") +
-      sheetRow("rights-help", "shieldCheck", "دسترسی های لازم ربات", health && !health.issues.some((i) => i.fix === "rights") ? "همه دسترسی ها داده شده" : "راهنمای ادمین کردن ربات", health && !health.issues.some((i) => i.fix === "rights")));
+      sheetRow("rights-help", "shieldCheck", "دسترسی های لازم ربات", rightsOk ? "همه دسترسی ها داده شده" : "راهنمای ادمین کردن ربات", rightsOk) +
+      (add ? '<button class="row" data-open-link="' + esc(add) + '"><span class="rico">' + icon("plus", 17) + '</span><span class="rt"><span class="t">افزودن ربات به گروه دیگر</span><span class="s">دسترسی های لازم از پیش انتخاب شده</span></span>' + CHEV + "</button>" : "") +
+      (share ? '<button class="row" data-open-link="' + esc(share) + '"><span class="rico">' + icon("send", 17) + '</span><span class="rt"><span class="t">معرفی ربات به دیگران</span><span class="s">فرستادن لینک ربات در تلگرام</span></span>' + CHEV + "</button>" : ""));
     html += '<div class="grid2"><div class="col">' + col1 + '</div><div class="col">' + col2 + "</div></div>";
     html += '<div class="about">داده ها مستقیم از ربات خوانده می شوند · تغییرات فورا در گروه اعمال می شود</div>';
     return html;
@@ -1460,12 +1787,24 @@
     joingate: () => api("/join-gate"),
     imgf: () => api("/lists/imgf"),
     voice: () => api("/voice"),
-    cases: () => api("/cases?status=open").then((data) => { data.status = "open"; data.user = ""; return data; }),
+    cases: (page) => {
+      const was = page && page.data;
+      const status = (was && was.status) || "open";
+      const user = (was && was.user) || "";
+      return api("/cases?status=" + status + (user ? "&user_id=" + encodeURIComponent(user) : "")).then(async (data) => {
+        data.status = status;
+        data.user = user;
+        if (was && was.detail) data.detail = await api("/cases/" + was.detail.id).catch(() => was.detail);
+        return data;
+      });
+    },
   };
 
   async function pushPage(id) {
     if (id === "settings") return goTab("settings");
+    flushField();
     const page = { id, data: null, error: null };
+    if (S.sheet && S.sheet.id !== "picker") page.fromSheet = S.sheet.id;
     S.stack.push(page);
     S.sheet = null;
     S.confirm = null;
@@ -1477,14 +1816,11 @@
   }
 
   function pushRoot(id) {
-    const page = currentPage();
-    if (page && DOCS[page.id] && docDirty(page)) {
-      toast("اول تغییرات را ذخیره یا رها کنید.", "warn");
-      return;
-    }
-    S.stack = [];
-    setClosingConfirmation(false);
-    return pushPage(id);
+    return leaveTo(() => {
+      S.stack = [];
+      setClosingConfirmation(false);
+      return pushPage(id);
+    });
   }
 
   async function loadPage(page) {
@@ -1495,19 +1831,23 @@
       if (page.id.startsWith("list:")) {
         const kind = page.id.slice(5);
         const [d, mode] = await Promise.all([
-          api("/lists/" + kind),
+          api("/lists/" + kind + (page.remoteQ ? "?q=" + encodeURIComponent(page.remoteQ) : "")),
           kind === "filter" ? api("/filter-words").catch(() => null) : Promise.resolve(null),
         ]);
+        if (S.chat !== chat) return;
         page.data = d;
         page.mode = mode;
         S.lists = S.lists || {};
-        S.lists[kind] = page.data;
+        if (!page.remoteQ) S.lists[kind] = page.data;
       } else {
-        page.data = await PAGE_LOADERS[page.id]();
+        const data = await PAGE_LOADERS[page.id](page);
+        if (S.chat !== chat) return;
+        page.data = data;
         if (page.id === "locks") S.lockCache = page.data;
         if (page.id === "rights") S.rights = page.data;
         if (page.id === "log") S.logInfo = page.data;
         if (page.id === "welcome") S.welcomeInfo = page.data;
+        if (page.id === "joingate") S.joinGate = page.data;
         if (DOCS[page.id]) {
           page.saved = decode(page.data.text || "");
           if (page.draft == null || !keep) page.draft = page.saved;
@@ -1570,7 +1910,7 @@
   }
 
   const CASE_STATUS = { open: ["باز", "warn"], resolved: ["رسیدگی شده", "ok"], reversed: ["لغو شده", "mute"] };
-  const CASE_ACTION = { none: "بدون اقدام", delete: "حذف پیام", warn: "اخطار", mute: "سکوت", ban: "بن", kick: "اخراج", unmute: "رفع سکوت", unban: "رفع بن" };
+  const CASE_ACTION = { none: "بدون اقدام", delete: "حذف پیام", warn: "اخطار", mute: "سکوت", ban: "بن", kick: "اخراج", unmute: "رفع سکوت", unban: "رفع بن", reverse: "لغو برخورد" };
   const CASE_SOURCE = { automatic: "خودکار، توسط ربات", moderator: "توسط ادمین", report: "گزارش یک عضو" };
   const CASE_EVENT = {
     reported: ["گزارش شد", "warn", "alert"],
@@ -1590,7 +1930,15 @@
 
   function caseRow(c) {
     const st = CASE_STATUS[c.status] || [c.status, "mute"];
-    return '<button class="row" data-case="' + c.id + '"><span class="rico ' + (c.status === "open" ? "warn" : "") + '">' + icon(c.source === "report" ? "alert" : "fileText", 16) + '</span><span class="rt"><span class="t">' + esc(c.subject_name || "کاربر نامشخص") + '</span><span class="s">' + esc(c.reason) + " · " + ago(c.created_at) + '</span></span><span class="pill ' + st[1] + '">' + esc(st[0]) + "</span></button>";
+    return '<button class="row" data-case="' + c.id + '"><span class="rico ' + (c.status === "open" ? "warn" : "") + '">' + icon(c.source === "report" ? "alert" : "fileText", 16) + '</span><span class="rt"><span class="t">' + (c.subject_name ? "<bdi>" + esc(c.subject_name) + "</bdi>" : "کاربر نامشخص") + '</span><span class="s">' + esc(c.reason) + " · " + ago(c.created_at) + '</span></span><span class="pill ' + st[1] + '">' + esc(st[0]) + "</span></button>";
+  }
+
+  const MEDIA_KIND = { text: "متن", photo: "عکس", video: "ویدیو", animation: "گیف", gif: "گیف", sticker: "استیکر", voice: "ویس", video_note: "ویدیو مسیج", audio: "آهنگ", music: "آهنگ", document: "فایل", file: "فایل", poll: "نظرسنجی", contact: "مخاطب", location: "موقعیت" };
+
+  function messageLink(c) {
+    const chat = String(S.chat);
+    if (!c.message || !/^-100\d+$/.test(chat)) return "";
+    return "https://t.me/c/" + chat.slice(4) + "/" + c.message;
   }
 
   function renderCasesPage(page) {
@@ -1600,37 +1948,44 @@
     if (d.detail) {
       const c = d.detail;
       const st = CASE_STATUS[c.status] || [c.status, "mute"];
-      html += '<div class="sec first"><div class="card"><div class="profile"><span class="rico ' + (st[1] === "warn" ? "warn" : "ok") + '" style="width:48px;height:48px;border-radius:15px">' + icon("fileText", 22) + '</span><span class="rt"><span class="t wrap">' + esc(c.subject_name || "کاربر نامشخص") + '</span><span class="s wrap">' + esc(c.reason) + '</span></span><span class="pill ' + st[1] + '">' + esc(st[0]) + "</span></div>" +
+      const busy = S.caseBusy;
+      html += '<div class="sec first"><div class="card"><div class="profile"><span class="rico ' + (st[1] === "warn" ? "warn" : "ok") + '" style="width:48px;height:48px;border-radius:15px">' + icon("fileText", 22) + '</span><span class="rt"><span class="t wrap">' + (c.subject_name ? "<bdi>" + esc(c.subject_name) + "</bdi>" : "کاربر نامشخص") + '</span><span class="s wrap">' + esc(c.reason) + '</span></span><span class="pill ' + st[1] + '">' + esc(st[0]) + "</span></div>" +
         '<dl class="kv" style="border-top:1px solid var(--border);margin:0">' +
         "<dt>اقدام</dt><dd>" + esc(caseAction(c.action)) + "</dd>" +
         "<dt>منبع</dt><dd>" + esc(CASE_SOURCE[c.source] || c.source || "—") + "</dd>" +
-        (c.subject ? '<dt>شناسه کاربر</dt><dd dir="ltr" style="text-align:left">' + esc(c.subject) + "</dd>" : "") +
-        (c.media_kind ? "<dt>نوع پیام</dt><dd>" + esc(c.media_kind) + "</dd>" : "") +
+        (c.subject ? '<dt>شناسه کاربر</dt><dd><bdi dir="ltr" class="num">' + esc(c.subject) + "</bdi></dd>" : "") +
+        (c.media_kind ? "<dt>نوع پیام</dt><dd>" + esc(MEDIA_KIND[c.media_kind] || c.media_kind) + "</dd>" : "") +
         "<dt>زمان</dt><dd>" + esc(ago(c.created_at)) + "</dd>" +
         "</dl></div>";
       if (c.evidence) html += '<div class="h" style="padding-top:16px"><div class="t">متن پیام</div></div><div class="evidence">' + esc(c.evidence) + "</div>";
+      const link = c.status === "open" ? messageLink(c) : "";
+      if (link) html += '<button class="btn outline block" style="margin-top:12px" data-case-open="' + esc(link) + '">' + icon("chat", 16) + " دیدن پیام در گروه</button>";
       html += "</div>";
       const events = c.events || [];
       if (events.length) {
         html += '<div class="sec"><div class="h"><div class="t">تاریخچه</div></div><div class="card timeline">' + events.map((ev) => {
           const k = CASE_EVENT[ev.kind] || [ev.kind, "", "info"];
-          return '<div class="tl"><span class="tdot ' + k[1] + '">' + icon(k[2], 12, 2.6) + '</span><div class="tb"><div class="tt">' + esc(k[0]) + (ev.action ? " · " + esc(caseAction(ev.action)) : "") + '</div><div class="ts">' + esc(ev.actor_name && !/^\d+$/.test(ev.actor_name) ? ev.actor_name : ev.actor ? "ادمین" : "ربات") + " · " + esc(ago(ev.created_at)) + (ev.note ? " · " + esc(ev.note) : "") + "</div></div></div>";
+          const named = ev.action && ev.action !== "none" && ev.action !== "reverse" ? " · " + esc(caseAction(ev.action)) : "";
+          return '<div class="tl"><span class="tdot ' + k[1] + '">' + icon(k[2], 12, 2.6) + '</span><div class="tb"><div class="tt">' + esc(k[0]) + named + '</div><div class="ts"><bdi>' + esc(ev.actor_name && !/^\d+$/.test(ev.actor_name) ? ev.actor_name : ev.actor ? "ادمین" : "ربات") + "</bdi> · " + esc(ago(ev.created_at)) + (ev.note ? " · " + esc(ev.note) : "") + "</div></div></div>";
         }).join("") + "</div></div>";
       }
-      html += '<div class="sec"><div class="h"><div class="t">رسیدگی</div></div><textarea class="text-input" id="case-note" maxlength="500" placeholder="یادداشت اختیاری؛ در تاریخچه ثبت می شود" style="min-height:84px"></textarea><div class="btns" style="padding-top:10px">';
-      if (c.status === "open") html += '<button class="btn ghost" data-case-action="none">' + icon("check", 16) + ' بررسی شد</button><button class="btn danger" data-case-action="delete">' + icon("trash", 16) + " حذف پیام</button>";
-      if (c.status === "resolved" && ["warn", "mute", "ban"].includes(c.action)) html += '<button class="btn soft-danger" data-case-action="reverse">لغو ' + esc(caseAction(c.action)) + "</button>";
-      html += '<button class="btn outline" data-case-note>ثبت یادداشت</button></div></div></div>';
+      const dis = busy ? " disabled" : "";
+      html += '<div class="sec"><div class="h"><div class="t">رسیدگی</div></div><textarea class="text-input" id="case-note" maxlength="500" placeholder="یادداشت اختیاری؛ در تاریخچه ثبت می شود" aria-label="یادداشت پرونده" style="min-height:84px"></textarea><div class="btns" style="padding-top:10px">';
+      if (c.status === "open") html += '<button class="btn ghost" data-case-action="none"' + dis + ">" + (busy === "none" ? '<span class="spinner"></span>' : icon("check", 16)) + ' بررسی شد، بدون اقدام</button><button class="btn danger" data-case-action="delete"' + dis + ">" + (busy === "delete" ? '<span class="spinner"></span>' : icon("trash", 16)) + " حذف پیام</button>";
+      if (c.status === "resolved" && ["warn", "mute", "ban"].includes(c.action)) html += '<button class="btn soft-danger" data-case-action="reverse"' + dis + ">" + (busy === "reverse" ? '<span class="spinner"></span>' : "") + "لغو " + esc(caseAction(c.action)) + "</button>";
+      html += '<button class="btn outline" data-case-note' + dis + ">ثبت یادداشت</button></div></div></div>";
       return html;
     }
     const status = d.status || "open";
-    html += '<div class="sec first"><div class="seg">' +
-      [["open", "باز"], ["resolved", "رسیدگی شده"], ["all", "همه"]].map(([id, label]) => '<button class="' + (status === id ? "on" : "") + '" data-case-filter="' + id + '">' + label + "</button>").join("") +
-      '</div><label class="search" style="margin-top:10px">' + icon("search", 16) + '<input id="case-user" inputmode="numeric" enterkeyhint="search" placeholder="جستجو با شناسه عددی کاربر" value="' + esc(d.user || "") + '" /></label></div>';
-    html += '<div class="sec">';
-    if (!(d.cases || []).length) html += '<div class="card"><div class="empty sm"><div class="glyph">' + icon("shieldCheck", 26) + '</div><div class="t">پرونده ای نیست</div><div class="s">' + (status === "open" ? "همه گزارش ها رسیدگی شده است." : "چیزی پیدا نشد.") + "</div></div></div>";
+    const loading = S.casesLoading;
+    html += '<div class="sec first"><div class="seg" role="tablist" aria-label="وضعیت پرونده">' +
+      [["open", "باز"], ["resolved", "رسیدگی شده"], ["all", "همه"]].map(([id, label]) => '<button role="tab" aria-selected="' + (status === id) + '" class="' + (status === id ? "on" : "") + '" data-case-filter="' + id + '">' + label + "</button>").join("") +
+      '</div><div class="addrow" style="margin-top:10px"><label class="search" style="flex:1">' + icon("search", 16) + '<input id="case-user" inputmode="numeric" enterkeyhint="search" placeholder="شناسه عددی کاربر" aria-label="جستجو با شناسه عددی کاربر" value="' + esc(d.user || "") + '" /></label><button class="btn ghost" data-case-search>جستجو</button></div>' +
+      (d.user ? '<div class="hint start">پرونده های کاربر <bdi dir="ltr" class="num">' + esc(d.user) + '</bdi> · <button class="more" data-case-clear>همه کاربران</button></div>' : "") + "</div>";
+    html += '<div class="sec' + (loading ? " loading" : "") + '">';
+    if (!(d.cases || []).length) html += '<div class="card"><div class="empty sm"><div class="glyph">' + icon("shieldCheck", 26) + '</div><div class="t">پرونده ای نیست</div><div class="s">' + (d.user ? "این کاربر پرونده ای در این بخش ندارد." : status === "open" ? "همه گزارش ها رسیدگی شده است." : "چیزی پیدا نشد.") + "</div></div></div>";
     else html += '<div class="list">' + d.cases.map(caseRow).join("") + "</div>";
-    if (d.has_more && d.cases.length) html += '<button class="btn ghost block" style="margin-top:12px" data-case-more="' + d.cases[d.cases.length - 1].id + '">بیشتر</button>';
+    if (d.has_more && d.cases.length) html += '<button class="btn ghost block" style="margin-top:12px" data-case-more="' + d.cases[d.cases.length - 1].id + '"' + (S.casesMore ? " disabled" : "") + ">" + (S.casesMore ? '<span class="spinner"></span> در حال خواندن…' : "پرونده های بیشتر") + "</button>";
     html += '<div class="hint">اعضا با ریپلای و «گزارش» پرونده باز می کنند؛ برخوردهای خودکار ربات هم اینجا ثبت می شود.</div>';
     return html + "</div></div>";
   }
@@ -1657,8 +2012,20 @@
     return '<button class="chip' + (l.on ? " on" : "") + '" data-lock="' + esc(l.key) + '" aria-pressed="' + (l.on ? "true" : "false") + '">' + icon(l.icon || (l.on ? "LOCKED" : "UNLOCKED"), 13, 2.4) + l.label + "</button>";
   }
 
+  function shadowFlag(key) {
+    if (key === "advert") return "ad_shadow";
+    if (key === "trade") return "tr_shadow";
+    if (/^c_/.test(key)) return "cq_shadow";
+    return null;
+  }
+  function isShadowed(key) {
+    const flag = shadowFlag(key);
+    return !!(flag && S.dash && isOn(flag));
+  }
+
   function lockTile(l) {
-    return '<button class="lock' + (l.on ? " on" : "") + '" data-lock="' + esc(l.key) + '" aria-pressed="' + (l.on ? "true" : "false") + '"><span class="li">' + icon(l.icon || (l.on ? "LOCKED" : "UNLOCKED"), 14, 2.4) + '</span><span class="ln">' + l.label + '</span><span class="ls"></span></button>';
+    const shadow = l.on && isShadowed(l.key);
+    return '<button class="lock' + (l.on ? " on" : "") + (shadow ? " shadow" : "") + '" data-lock="' + esc(l.key) + '" aria-pressed="' + (l.on ? "true" : "false") + '"' + (shadow ? ' title="روشن، ولی فقط بررسی می کند و حذف نمی کند"' : "") + '><span class="li">' + icon(l.icon || (l.on ? "LOCKED" : "UNLOCKED"), 14, 2.4) + '</span><span class="ln">' + l.label + (shadow ? "<small>فقط بررسی، بدون حذف</small>" : "") + '</span><span class="ls"></span></button>';
   }
 
   function renderLocksPage(page) {
@@ -1667,10 +2034,10 @@
     if (!page.data) return html + loadingList() + "</div>";
     const q = fold(S.lockQuery);
     const view = S.lockView;
-    html += '<div class="sec first">' + searchBox("lock-search", "جستجوی قفل…", S.lockQuery) +
-      '<div style="display:flex;gap:8px;margin-top:10px"><div class="seg" style="flex:1">' +
-      [["all", "همه"], ["on", "روشن"], ["off", "خاموش"]].map(([id, label]) => '<button class="' + (view === id ? "on" : "") + '" data-lock-view="' + id + '">' + label + "</button>").join("") +
-      '</div></div><div class="btns" style="margin-top:10px"><button class="btn sm ghost" data-locks-all="1">' + icon("lock", 14) + ' همه روشن</button><button class="btn sm soft-danger" data-locks-all="0">' + icon("unlock", 14) + " همه خاموش</button></div></div>";
+    html += '<div class="sec first">' + searchBox("lock-search", "جستجوی قفل، مثلا «لینک» یا «عکس»", S.lockQuery) +
+      '<div class="seg" style="margin-top:10px" role="tablist" aria-label="نمایش">' +
+      [["all", "همه قفل ها"], ["on", "روشن ها"], ["off", "خاموش ها"]].map(([id, label]) => '<button role="tab" aria-selected="' + (view === id) + '" class="' + (view === id ? "on" : "") + '" data-lock-view="' + id + '">' + label + "</button>").join("") +
+      "</div></div>";
     const visible = (l) => (!q || fold(l.label).includes(q)) && (view === "all" || (view === "on" ? l.on : !l.on));
     const groupHtml = (title, items, bulk) => {
       const shownItems = items.filter(visible);
@@ -1687,21 +2054,32 @@
       body += groupHtml(title, items, true);
     });
     if (page.data.ai.length) body += groupHtml("نگهبان هوشمند", page.data.ai, false);
-    html += body || '<div class="empty sm"><div class="glyph">' + icon("search", 24) + '</div><div class="t">قفلی با این مشخصات نیست</div></div>';
+    html += body || '<div class="empty sm"><div class="glyph">' + icon("search", 24) + '</div><div class="t">قفلی با این مشخصات نیست</div>' + (q ? '<div class="s">«' + esc(S.lockQuery) + "» در نام هیچ قفلی نیست.</div>" : "") + "</div>";
+    if (q) return html + "</div>";
+
+    const botOn = !!(page.data.plain.find((l) => l.key === "bot") || {}).on;
     const b = page.data.botOptions;
-    if (b && b.items && !q) {
-      html += '<div class="sec"><div class="h"><div class="t">رفتار قفل ربات</div></div><div class="list">' +
+    if (b && b.items) {
+      html += '<div class="sec"><div class="h"><div class="t">رفتار قفل ربات' + (botOn ? "" : '<span class="sub">با روشن کردن قفل «ربات» اعمال می شود</span>') + '</div></div><div class="list' + (botOn ? "" : " idle") + '">' +
         b.items.filter((it) => it.key !== "bot").map((it) => '<div class="row"><span class="rt"><span class="t n">' + esc(it.label) + "</span></span>" + swb('data-botopt="' + esc(it.key) + '"', it.on, it.label) + "</div>").join("") +
         "</div></div>";
     }
     const ab = page.data.allowedBots;
-    if (ab && ab.bots && !q) {
+    if (ab && ab.bots) {
       html += '<div class="sec"><div class="h"><div class="t">ربات های مجاز <span class="count">· ' + fa(ab.bots.length) + '</span><span class="sub">قفل ربات این ها را حذف نمی کند</span></div></div>' +
-        '<div class="addrow"><input class="text-input" id="allow-bot" dir="ltr" autocapitalize="off" autocomplete="off" enterkeyhint="done" placeholder="@examplebot" /><button class="btn" data-allow-bot>' + icon("plus", 16) + " افزودن</button></div>" +
-        (ab.bots.length ? '<div class="list" style="margin-top:10px">' + ab.bots.map((b) => '<div class="row compact"><span class="rico sm on">' + icon("bot", 15) + '</span><span class="rt"><span class="t n" dir="ltr" style="text-align:right">' + (b.name || b.id) + '</span></span><button class="ibtn sm danger" data-disallow-bot="' + esc(b.id) + '" aria-label="حذف">' + icon("x", 17) + "</button></div>").join("") + "</div>" : "") +
+        '<div class="addrow"><input class="text-input" id="allow-bot" dir="ltr" autocapitalize="off" autocomplete="off" enterkeyhint="done" placeholder="@examplebot" aria-label="یوزرنیم ربات" /><button class="btn" data-allow-bot>' + icon("plus", 16) + " افزودن</button></div>" +
+        (ab.bots.length ? '<div class="list" style="margin-top:10px">' + ab.bots.map((b) => '<div class="row compact"><span class="rico sm on">' + icon("bot", 15) + '</span><span class="rt"><span class="t n"><bdi dir="ltr">' + (b.name || b.id) + '</bdi></span></span><button class="ibtn danger" data-disallow-bot="' + esc(b.id) + '" aria-label="' + esc("حذف " + decode(String(b.name || b.id)) + " از ربات های مجاز") + '">' + icon("x", 18) + "</button></div>").join("") + "</div>" : "") +
         "</div>";
     }
-    html += '<div class="hint">ادمین ها و کاربران ویژه از قفل ها معاف اند. قفل پک استیکر: در گروه روی استیکر «قفل پک».</div>';
+
+    const packs = S.lists && S.lists.pack;
+    html += '<div class="sec"><div class="h"><div class="t">بیشتر</div></div><div class="list">' +
+      '<button class="row" data-push="list:pack"><span class="rico">' + icon("sparkles", 17) + '</span><span class="rt"><span class="t">پک های استیکر قفل شده</span><span class="s">قفل کردن: در گروه روی استیکر «قفل پک»</span></span>' + (packs ? '<span class="count">' + fa(packs.entries.length) + "</span>" : "") + CHEV + "</button>" +
+      '<button class="row" data-push="list:filter"><span class="rico">' + icon("funnel", 17) + '</span><span class="rt"><span class="t">فیلتر کلمات</span><span class="s">پیامی که این کلمه ها را دارد حذف می شود</span></span>' + CHEV + "</button>" +
+      "</div></div>";
+
+    html += '<div class="sec"><div class="card bulk"><div class="rt"><span class="t">همه قفل ها با هم</span><span class="s">ادمین ها و کاربران ویژه از همه قفل ها معاف اند.</span></div><div class="btns">' +
+      '<button class="btn sm ghost" data-locks-all="1">' + icon("lock", 14) + ' روشن کردن همه</button><button class="btn sm soft-danger" data-locks-all="0">' + icon("unlock", 14) + " خاموش کردن همه</button></div></div></div>";
     return html + "</div>";
   }
 
@@ -1710,18 +2088,35 @@
     if (!page.data) return html + loadingList() + "</div>";
     const rights = page.data.rights;
     const open = rights.filter((r) => r.open).length;
-    const allClosed = open === 0;
-    html += '<div class="sec first"><div class="note' + (allClosed ? " warn" : " mute") + '">' + icon(allClosed ? "lock" : "info", 16) + "<span>" +
-      (allClosed ? "گروه بسته است: هیچ عضو عادی نمی تواند چیزی بفرستد." : "هر دسترسی که بسته شود برای همه اعضای عادی بسته می شود؛ ادمین ها استثنا هستند.") + "</span></div>" +
-      (page.data.pending ? '<div class="note warn" style="margin-top:8px">' + icon("clock", 16) + "<span>تغییری در صف اعمال است و تا چند لحظه دیگر در تلگرام دیده می شود.</span></div>" : "") +
-      '<div class="btns" style="margin-top:12px">' +
-      '<button class="btn soft-danger" data-rights-all="0"' + (allClosed ? " disabled" : "") + ">" + icon("lock", 15) + " بستن گروه</button>" +
-      '<button class="btn ghost" data-rights-all="1"' + (open === rights.length ? " disabled" : "") + ">" + icon("unlock", 15) + " باز کردن همه</button></div></div>";
-    html += '<div class="sec"><div class="h"><div class="t">اعضای عادی می توانند <span class="count">· ' + fa(open) + " از " + fa(rights.length) + '</span></div></div><div class="list">' +
+    const lock = page.data.lock || {};
+    const until = lock.until && lock.until > Date.now() / 1000 ? lock.until : null;
+    const g = { manual: !!lock.manual, until, night: !!lock.night, allClosed: open === 0 };
+    const shut = g.manual || !!g.until || g.night;
+    const busy = S.lockBusy;
+    let act;
+    if (g.manual || g.until) act = '<button class="btn" data-group-lock="0"' + (busy ? " disabled" : "") + ">" + icon("unlock", 16) + (busy === "opening" ? " در حال باز کردن…" : " باز کردن گروه") + "</button>";
+    else if (g.night) act = '<button class="btn ghost" data-open="ng">' + icon("moon", 16) + " تنظیم قفل شب</button>";
+    else if (g.allClosed) act = '<button class="btn" data-rights-all="1"' + (S.rightsBusy ? " disabled" : "") + ">" + icon("unlock", 16) + " باز کردن همه دسترسی ها</button>";
+    else act = '<button class="btn soft-danger" data-group-lock="1"' + (busy ? " disabled" : "") + ">" + icon("lock", 16) + (busy === "closing" ? " در حال بستن…" : " بستن گروه") + "</button>";
+    const sub = g.manual ? "با «قفل گروه» بسته شده؛ فقط ادمین ها می توانند پیام بدهند."
+      : g.until ? "تا " + groupStateText(g).replace("بسته تا ", "") + " بسته است؛ بعد خودش باز می شود."
+      : g.night ? "قفل شب روشن است؛ در پایان بازه خودش باز می شود."
+      : g.allClosed ? "همه دسترسی ها یکی یکی بسته شده اند؛ هیچ عضو عادی نمی تواند چیزی بفرستد."
+      : "اعضای عادی هر چه زیر روشن است را می توانند بفرستند.";
+    const closedNow = shut || g.allClosed;
+    html += '<div class="sec first"><div class="card state-card' + (closedNow ? " shut" : "") + '"><div class="profile"><span class="rico ' + (closedNow ? "bad" : "ok") + '" style="width:48px;height:48px;border-radius:15px">' + icon(closedNow ? "lock" : "unlock", 22) + '</span><span class="rt"><span class="t">' + (closedNow ? "گروه بسته است" : "گروه باز است") + '</span><span class="s wrap">' + sub + "</span></span></div>" +
+      '<div class="state-act">' + act + "</div></div>" +
+      (page.data.pending ? '<div class="note warn" style="margin-top:10px">' + icon("clock", 16) + "<span>تغییری در صف اعمال است و تا چند لحظه دیگر در تلگرام دیده می شود.</span></div>" : "") + "</div>";
+    const rbusy = S.rightsBusy;
+    html += '<div class="sec"><div class="h"><div class="t">اعضای عادی می توانند <span class="count">· ' + fa(open) + " از " + fa(rights.length) + "</span>" +
+      (shut ? '<span class="sub">بعد از باز شدن گروه همین ها اعمال می شود</span>' : "") + '</div><div class="hacts">' +
+      '<button class="hbtn" data-rights-all="1"' + (open === rights.length || rbusy ? " disabled" : "") + ">همه باز</button>" +
+      '<button class="hbtn off" data-rights-all="0"' + (open === 0 || rbusy ? " disabled" : "") + ">همه بسته</button></div></div>" +
+      '<div class="list' + (rbusy ? " busy" : "") + '">' +
       rights.map((r) =>
-        '<div class="row"><span class="rico sm' + (r.open ? " on" : "") + '">' + icon(r.icon || (r.open ? "UNLOCKED" : "LOCKED"), 15) + '</span><span class="rt"><span class="t n">' + r.label + '</span></span><button class="swb" data-right="' + esc(r.key) + '" role="switch" aria-checked="' + (r.open ? "true" : "false") + '"><span class="sw' + (r.open ? " on" : "") + '"></span></button></div>'
+        '<div class="row"><span class="rico sm' + (r.open ? " on" : "") + '">' + icon(r.icon || (r.open ? "UNLOCKED" : "LOCKED"), 15) + '</span><span class="rt"><span class="t n">' + r.label + '</span></span><button class="swb" data-right="' + esc(r.key) + '" role="switch" aria-checked="' + (r.open ? "true" : "false") + '" aria-label="' + String(r.label).replace(/"/g, "&quot;") + '"><span class="sw' + (r.open ? " on" : "") + '"></span></button></div>'
       ).join("") + "</div></div>";
-    html += '<div class="hint">بستن موقت گروه: در گروه «قفل گروه ۲ ساعت». قفل شب در «امکانات».</div>';
+    html += '<div class="hint">ادمین ها همیشه می توانند بفرستند. بستن برای مدت مشخص: در گروه «قفل گروه ۲ ساعت».</div>';
     return html + "</div>";
   }
 
@@ -1730,12 +2125,12 @@
     if (!page.data) return html + loadingList() + "</div>";
     const d = page.data;
     const on = d.kinds.filter((k) => k.on).length;
-    html += '<div class="sec first"><div class="card"><div class="profile"><span class="rico' + (d.channel ? " ok" : " warn") + '" style="width:48px;height:48px;border-radius:15px">' + icon("fileText", 22) + '</span><span class="rt"><span class="t">' + (d.channel ? "کانال وصل است" : "کانالی وصل نیست") + '</span><span class="s"' + (d.channel ? ' dir="ltr" style="text-align:right"' : "") + ">" +
-      (d.channel ? d.channel : "رویدادها جایی ثبت نمی شود") + "</span></span>" + (d.channel ? '<span class="pill ok">وصل</span>' : '<span class="pill warn">ندارد</span>') + "</div></div>" +
+    html += '<div class="sec first"><div class="card"><div class="profile"><span class="rico' + (d.channel ? " ok" : " warn") + '" style="width:48px;height:48px;border-radius:15px">' + icon("fileText", 22) + '</span><span class="rt"><span class="t">' + (d.channel ? "کانال وصل است" : "کانالی وصل نیست") + '</span><span class="s">' +
+      (d.channel ? (/^-?\d+$/.test(decode(d.channel)) ? 'کانال خصوصی · <bdi dir="ltr" class="num">' + d.channel + "</bdi>" : '<bdi dir="ltr">' + (decode(d.channel).startsWith("@") ? "" : "@") + d.channel + "</bdi>") : "رویدادها جایی ثبت نمی شود") + "</span></span>" + (d.channel ? '<span class="pill ok">وصل</span>' : '<span class="pill warn">ندارد</span>') + "</div></div>" +
       '<div class="field"><div class="fl"><span>' + (d.channel ? "تغییر کانال" : "وصل کردن کانال") + '</span></div><div class="addrow"><input class="text-input" id="log-channel" dir="ltr" autocapitalize="off" autocomplete="off" enterkeyhint="done" placeholder="@channel" /><button class="btn" data-log-connect>' + (d.channel ? "تغییر" : "وصل کن") + "</button></div>" +
       '<div class="hint start">اول ربات را در کانال ادمین کنید. ربات یک پیام آزمایشی در کانال می فرستد. برای کانال خصوصی: یک پیام کانال را در گروه فوروارد کنید و روی آن «تنظیم لاگ» بزنید.</div></div></div>';
-    html += '<div class="sec"><div class="h"><div class="t">چه رویدادهایی ثبت شود <span class="count">· ' + fa(on) + " از " + fa(d.kinds.length) + "</span></div></div>" +
-      '<div class="list">' +
+    html += '<div class="sec"><div class="h"><div class="t">چه رویدادهایی ثبت شود <span class="count">· ' + fa(on) + " از " + fa(d.kinds.length) + "</span>" + (d.channel ? "" : '<span class="sub">پس از وصل شدن کانال ثبت می شود</span>') + "</div></div>" +
+      '<div class="list' + (d.channel ? "" : " idle") + '">' +
       d.kinds.map((k) =>
         '<div class="row"><span class="rt"><span class="t n">' + k.label + "</span></span>" + swb('data-log="' + esc(k.key) + '"', k.on, k.label) + "</div>"
       ).join("") + "</div></div>";
@@ -1793,8 +2188,8 @@
     const d = page.data;
     const has = !!(d.text || d.has_media);
     html += '<div class="grid2"><div class="col"><div class="sec first"><div class="field" style="padding-top:0"><div class="fl"><span>متن</span><span id="doc-count" class="count"></span></div>' +
-      '<textarea class="text-input" id="doc-text" placeholder="' + esc(doc.placeholder) + '">' + esc(page.draft || "") + "</textarea>" +
-      (doc.tags.length ? '<div class="chips" style="margin-top:10px">' + doc.tags.map(([tag, label]) => '<button class="chip sm" data-insert="' + esc(tag) + '">' + icon("plus", 12) + label + "</button>").join("") + "</div>" +
+      '<textarea class="text-input" id="doc-text" aria-label="' + esc("متن " + doc.title) + '" placeholder="' + esc(doc.placeholder) + '">' + esc(page.draft || "") + "</textarea>" +
+      (doc.tags.length ? '<div class="chips" style="margin-top:10px">' + doc.tags.map(([tag, label]) => '<button class="chip sm" data-insert="' + esc(tag) + '" aria-label="' + esc("گذاشتن " + label + " در متن") + '">' + icon("plus", 12) + label + "</button>").join("") + "</div>" +
         '<div class="hint start">روی هر برچسب بزنید تا در متن گذاشته شود.' + (d.has_media ? " · رسانه همراه فقط از داخل گروه عوض می شود" : " · برای خوشامد با عکس: در گروه روی عکس ریپلای کنید و «تنظیم خوشامد» بفرستید.") + "</div>" : '<div class="hint start">اعضا با فرستادن «قوانین» در گروه این متن را می بینند.</div>') + "</div>" +
       (has ? '<div style="padding-top:14px"><button class="btn soft-danger block" data-confirm="' + doc.off + '">' + icon("trash", 16) + " حذف " + doc.title + "</button></div>" : "") +
       "</div></div>";
@@ -1802,7 +2197,7 @@
     const wct = page.id === "welcome" ? setting("wct") : null;
     if (wct) html += '<div class="sec"><div class="h"><div class="t">حذف خودکار پیام خوشامد</div></div><div class="card pad">' + renderNumberField(wct, true) + "</div></div>";
     html += "</div></div>";
-    html += '<div class="savebar" id="doc-bar" hidden><span class="s"><span class="dot warn"></span>تغییرات ذخیره نشده</span><button class="btn ghost sm" data-doc-revert>برگرداندن</button><button class="btn sm" data-doc-save>' + icon("check", 16) + " ذخیره</button></div>";
+    html += '<div class="savebar" id="doc-bar" hidden><span class="s"><span class="dot warn"></span>تغییرات ذخیره نشده</span><button class="btn ghost sm" data-doc-revert>کنار گذاشتن</button><button class="btn sm" data-doc-save>' + icon("check", 16) + " ذخیره</button></div>";
     return html + "</div>";
   }
 
@@ -1811,10 +2206,10 @@
     if (!page.data) return html + loadingList() + "</div>";
     const d = page.data;
     html += '<div class="sec first">' +
-      (d.channel ? '<div class="list" style="margin-bottom:12px"><div class="row"><span class="rico on">' + icon("door", 17) + '</span><span class="rt"><span class="t" dir="ltr" style="text-align:right">' + d.channel + '</span><span class="s">فعال · تا عضو نشوند پیام نمی دهند</span></span><span class="pill ok">روشن</span></div></div>' : "") +
+      (d.channel ? '<div class="list" style="margin-bottom:12px"><div class="row"><span class="rico on">' + icon("door", 17) + '</span><span class="rt"><span class="t"><bdi dir="ltr">@' + esc(decode(d.channel).replace(/^@/, "")) + '</bdi></span><span class="s on">روشن · تا عضو این کانال نشوند پیام نمی دهند</span></span></div></div>' : "") +
       '<div class="note mute">' + icon("info", 16) + "<span>تا وقتی عضو کانال نشوند نمی توانند پیام بدهند. ربات باید در آن کانال ادمین باشد.</span></div>" +
-      '<div class="field"><div class="fl"><span>یوزرنیم یا لینک کانال</span></div><input class="text-input" id="join-gate-input" dir="ltr" autocapitalize="off" autocomplete="off" enterkeyhint="done" placeholder="@channel" value="' + esc(decode(d.channel || "")) + '" /></div>' +
-      '<div class="btns" style="padding-top:12px"><button class="btn" data-joingate-save>' + icon("check", 16) + " ذخیره</button>" +
+      '<div class="field"><div class="fl"><span>' + (d.channel ? "تغییر کانال" : "یوزرنیم کانال عمومی") + '</span></div><input class="text-input" id="join-gate-input" dir="ltr" autocapitalize="off" autocomplete="off" enterkeyhint="done" placeholder="@mychannel" aria-label="یوزرنیم کانال" value="' + esc(d.channel ? "@" + decode(d.channel).replace(/^@/, "") : "") + '" /><div class="hint start">یوزرنیم یا لینک t.me کانال؛ ربات اول بررسی می کند که کانال پیدا شود.</div></div>' +
+      '<div class="btns" style="padding-top:12px"><button class="btn" data-joingate-save>' + icon("check", 16) + (d.channel ? " ذخیره کانال تازه" : " روشن کردن") + "</button>" +
       (d.channel ? '<button class="btn soft-danger" data-joingate-off>خاموش کردن</button>' : "") + "</div></div>";
     return html + "</div>";
   }
@@ -1832,11 +2227,11 @@
         const live = !e.name.endsWith(" ~");
         const label = live ? e.name : e.name.slice(0, -2);
         const pending = S.pending === "imgf:" + e.key;
-        return '<div class="row"><span class="rico' + (live ? " on" : "") + '">' + icon("image", 17) + '</span><span class="rt"><span class="t">' + label + '</span><span class="s' + (live ? " on" : "") + '">' + (live ? "فعال · حذف می کند" : "فقط بررسی · حذف نمی کند") + "</span></span>" +
-          swb('data-filter-toggle="' + esc(e.key) + '"', live, label) +
+        return '<div class="row"><span class="rico' + (live ? " on" : "") + '">' + icon("image", 17) + '</span><span class="rt"><span class="t">' + bdi(label) + '</span><span class="s' + (live ? " on" : "") + '">' + (live ? "فعال · حذف می کند" : "فقط بررسی · حذف نمی کند") + "</span></span>" +
+          swb('data-filter-toggle="' + esc(e.key) + '"', live, decode(label)) +
           (pending
             ? '<button class="btn sm danger" data-remove="imgf" data-key="' + esc(e.key) + '">حذف؟</button>'
-            : '<button class="ibtn sm danger" data-remove="imgf" data-key="' + esc(e.key) + '" aria-label="حذف">' + icon("x", 17) + "</button>") +
+            : '<button class="ibtn danger" data-remove="imgf" data-key="' + esc(e.key) + '" aria-label="' + esc("حذف موضوع " + decode(label)) + '">' + icon("x", 18) + "</button>") +
           "</div>";
       }).join("") + "</div>";
     }
@@ -1848,14 +2243,17 @@
     if (!page.data) return html + loadingList() + "</div>";
     const d = page.data;
     const q = fold(S.listQuery);
-    html += '<div class="sec first"><div class="addrow"><input class="text-input" id="voice-word" maxlength="64" enterkeyhint="done" placeholder="کلمه تازه" /><button class="btn" data-voice-add>' + icon("plus", 16) + " افزودن</button></div>" +
+    html += '<div class="sec first"><div class="addrow"><input class="text-input" id="voice-word" maxlength="64" enterkeyhint="done" placeholder="کلمه تازه" aria-label="کلمه تازه" /><button class="btn" data-voice-add>' + icon("plus", 16) + " افزودن</button></div>" +
       (d.words.length > 8 ? '<div style="margin-top:10px">' + searchBox("list-search", "جستجو در " + fa(d.words.length) + " کلمه…", S.listQuery) + "</div>" : "") + "</div>";
     html += '<div class="sec"><div class="h"><div class="t">فهرست <span class="count">· ' + fa(d.words.length) + "</span></div>" +
-      (d.words.length ? '<button class="more" style="color:var(--danger)" data-confirm="voice-clear">پاک کردن همه</button>' : "") + "</div>";
+      (d.words.length ? '<button class="more danger" data-confirm="voice-clear">پاک کردن همه</button>' : "") + "</div>";
     if (!d.words.length) html += '<div class="card"><div class="empty sm"><div class="glyph">' + icon("mic", 24) + '</div><div class="t">فهرست خالی است</div></div></div>';
     else {
       html += '<div class="list">' + d.words.map((w) =>
-        '<div class="row compact"' + (q && !fold(w.word).includes(q) ? " hidden" : "") + '><span class="rt"><span class="t n">' + esc(w.word) + '</span></span><button class="ibtn sm danger" data-voice-remove="' + esc(w.key) + '" aria-label="حذف">' + icon("x", 17) + "</button></div>"
+        '<div class="row compact"' + (q && !fold(w.word).includes(q) ? " hidden" : "") + '><span class="rt"><span class="t n"><bdi>' + esc(w.word) + '</bdi></span></span>' +
+          (S.pending === "voice:" + w.key
+            ? '<button class="btn sm danger" data-voice-remove="' + esc(w.key) + '">حذف؟</button>'
+            : '<button class="ibtn danger" data-voice-remove="' + esc(w.key) + '" aria-label="' + esc("حذف " + w.word) + '">' + icon("x", 18) + "</button>") + "</div>"
       ).join("") + "</div>";
     }
     html += "</div>";
@@ -1865,13 +2263,24 @@
 
   const LIST_SEARCH_THRESHOLD = 8;
 
+  function entryName(kind, e) {
+    if ((kind === "vip" || kind === "free") && /^\d+$/.test(decode(e.name))) {
+      const ad = S.admins && S.admins !== "error" ? S.admins.admins.find((a) => String(a.id) === decode(e.name)) : null;
+      return ad ? bdi(ad.name) : 'کاربر <bdi dir="ltr" class="num">' + e.name + "</bdi>";
+    }
+    return bdi(e.name);
+  }
+
+  const REMOVE_WORD = { ban: "رفع بن", mute: "رفع سکوت" };
+
   function renderListPage(page, kind) {
     const [title, ic, desc] = LIST_KINDS[kind];
     const d = page.data;
-    const right = d && d.entries.length ? '<button class="ibtn danger" data-confirm="clear:' + kind + '" title="پاکسازی لیست" aria-label="پاکسازی لیست">' + icon("trash", 20) + "</button>" : "";
+    const right = d && d.entries.length ? '<button class="ibtn danger" data-confirm="clear:' + kind + '" title="پاکسازی لیست" aria-label="پاکسازی همه لیست">' + icon("trash", 20) + "</button>" : "";
     let html = renderPageTop(title, d ? fa(d.entries.length) + (d.truncated ? "+" : "") + " مورد" : S.dash.chat.title, right) + '<div id="main" class="nobar">';
     if (!d) return html + loadingList() + "</div>";
     const q = fold(S.listQuery);
+    const remote = (kind === "ban" || kind === "mute") && (d.truncated || page.remoteQ);
     html += '<div class="sec first">';
     if (kind === "filter") {
       const exact = page.mode && page.mode.exact;
@@ -1880,33 +2289,58 @@
           '<button class="' + (exact ? "" : "on") + '" data-word-exact="0">هر جای متن</button><button class="' + (exact ? "on" : "") + '" data-word-exact="1">فقط کلمه جدا</button></div>' +
           '<div class="hint start">' + (exact ? "«بت» در «صحبت» پیدا نمی شود؛ فقط وقتی جدا آمده باشد." : "«بت» در «صحبت» هم پیدا می شود؛ برای کلمه های کوتاه «فقط کلمه جدا» را بزنید.") + "</div></div>" : "");
     } else if (kind === "answer") {
-      html += '<div class="card pad"><div class="fl" style="font-size:13px;font-weight:600;margin-bottom:10px">پاسخ تازه</div>' +
+      html += '<div class="card pad"><div class="fl" style="font-size:13px;font-weight:600;margin-bottom:10px">پاسخ تازه یا ویرایش</div>' +
         '<input class="text-input" id="answer-trigger" maxlength="64" placeholder="وقتی کسی نوشت… مثلا «سلام»" />' +
         '<textarea class="text-input" id="answer-text" maxlength="3500" placeholder="ربات جواب بدهد… مثلا «درود، خوش آمدی»" style="min-height:84px;margin-top:8px"></textarea>' +
-        '<button class="btn block" style="margin-top:10px" data-answer-add>' + icon("plus", 16) + " افزودن پاسخ</button>" +
-        '<div class="hint start">مخاطب پاسخ ها: ' + esc(pickLabel("an_act")) + ' · <button class="more" data-open="an">تغییر</button> · پاسخ با عکس: در گروه روی پیام «تنظیم پاسخ ‹کلمه›».</div></div>';
+        '<button class="btn block" style="margin-top:10px" data-answer-add>' + icon("check", 16) + " ذخیره پاسخ</button>" +
+        '<div class="hint start">برای ویرایش، روی یک پاسخ در فهرست بزنید. مخاطب پاسخ ها: ' + esc(pickLabel("an_act")) + ' · <button class="more" data-open="an">تغییر</button> · پاسخ با عکس: در گروه روی پیام «تنظیم پاسخ ‹کلمه›».</div></div>';
     } else if (LIST_HOWTO[kind]) {
       html += '<div class="note mute">' + icon("info", 16) + "<span>" + LIST_HOWTO[kind] + "</span></div>";
     }
-    if (d.entries.length > LIST_SEARCH_THRESHOLD) {
-      html += '<div style="margin-top:10px">' + searchBox("list-search", "جستجو در " + fa(d.entries.length) + " مورد…", S.listQuery) + "</div>";
+    if (d.entries.length > LIST_SEARCH_THRESHOLD || remote) {
+      html += '<div style="margin-top:10px">' + searchBox("list-search", remote ? "جستجوی نام در همه " + title : "جستجو در " + fa(d.entries.length) + " مورد…", S.listQuery) + "</div>";
     }
     html += "</div>";
     html += '<div class="sec">';
-    if (!d.entries.length) html += '<div class="card"><div class="empty sm"><div class="glyph">' + icon(ic, 26, 1.8) + '</div><div class="t">لیست خالی است</div><div class="s">' + (desc || "") + "</div></div></div>";
-    else {
+    if (!d.entries.length) {
+      html += '<div class="card"><div class="empty sm"><div class="glyph">' + icon(page.remoteQ ? "search" : ic, 26, 1.8) + '</div><div class="t">' + (page.remoteQ ? "کسی با این نام پیدا نشد" : "لیست خالی است") + '</div><div class="s">' + (page.remoteQ ? "" : desc || "") + "</div></div></div>";
+    } else {
+      const removeWord = REMOVE_WORD[kind] || "حذف";
       html += '<div class="list">' + d.entries.map((e) => {
         const pending = S.pending === kind + ":" + e.key;
-        const hide = q && !fold(decode(e.name)).includes(q);
-        return '<div class="row"' + (hide ? " hidden" : "") + '><span class="rico sm">' + icon(ic, 15) + '</span><span class="rt"><span class="t n">' + e.name + "</span></span>" +
+        const hide = !remote && q && !fold(decode(entryName(kind, e).replace(/<[^>]+>/g, "")) + " " + decode(e.name)).includes(q);
+        const plain = decode(e.name);
+        const body = kind === "answer"
+          ? '<button class="rt" data-answer-edit="' + esc(e.key) + '" aria-label="' + esc("ویرایش پاسخ " + plain) + '"><span class="t">' + bdi(e.name) + '</span><span class="s">' + (e.preview ? bdi(e.preview) : e.media ? "فقط رسانه" : "") + "</span></button>" + (e.media ? '<span class="pill mute">' + icon("image", 12) + " رسانه</span>" : "")
+          : '<span class="rt"><span class="t n">' + entryName(kind, e) + "</span></span>";
+        return '<div class="row"' + (hide ? " hidden" : "") + '><span class="rico sm">' + icon(ic, 15) + "</span>" + body +
           (pending
-            ? '<button class="btn sm danger" data-remove="' + kind + '" data-key="' + esc(e.key) + '">حذف؟</button>'
-            : '<button class="ibtn sm danger" data-remove="' + kind + '" data-key="' + esc(e.key) + '" aria-label="حذف">' + icon("x", 17) + "</button>") +
+            ? '<button class="btn sm danger" data-remove="' + kind + '" data-key="' + esc(e.key) + '">' + removeWord + "؟</button>"
+            : '<button class="ibtn danger" data-remove="' + kind + '" data-key="' + esc(e.key) + '" aria-label="' + esc(removeWord + " " + plain) + '" title="' + removeWord + '">' + icon("x", 18) + "</button>") +
           "</div>";
       }).join("") + "</div>";
-      if (d.truncated) html += '<div class="hint">بیش از ' + fa(d.entries.length) + " مورد؛ برای یافتن مورد خاص جستجو کنید.</div>";
+      if (d.truncated && !page.remoteQ) html += '<div class="hint">فقط ' + fa(d.entries.length) + " مورد اول نمایش داده می شود؛ برای پیدا کردن بقیه، نام را جستجو کنید.</div>";
     }
     return html + "</div></div>";
+  }
+
+  function searchListRemote(page, kind, value) {
+    clearTimeout(searchListRemote.timer);
+    searchListRemote.timer = setTimeout(async function run(retried) {
+      const q = String(value || "").trim().slice(0, 64);
+      if (currentPage() !== page) return;
+      try {
+        const d = await api("/lists/" + kind + (q ? "?q=" + encodeURIComponent(q) : ""));
+        if (currentPage() !== page || String(S.listQuery || "").trim().slice(0, 64) !== q) return;
+        page.data = d;
+        page.remoteQ = q;
+        if (!q) S.lists[kind] = d;
+        render();
+      } catch (e) {
+        if (e && e.status === 429 && retried !== true) searchListRemote.timer = setTimeout(() => run(true), 1100);
+        else report(e);
+      }
+    }, 1100);
   }
 
   function openSheet(fid) {
@@ -1916,6 +2350,7 @@
       pushPage(f.page);
       return;
     }
+    S.sheetReturn = document.activeElement && app.contains(document.activeElement) ? focusTarget(document.activeElement) : null;
     S.sheet = { id: fid, data: null, fresh: true };
     S.confirm = null;
     S.palette = null;
@@ -1932,8 +2367,8 @@
     requestAnimationFrame(() => {
       dim.classList.add("open");
       sheetEl.classList.add("open");
-      const first = sheetEl.querySelector("button, input");
-      if (first && WIDE.matches) first.focus({ preventScroll: true });
+      const close = WIDE.matches && sheetEl.querySelector(".sheet-close");
+      (close || sheetEl).focus({ preventScroll: true });
     });
   }
 
@@ -1956,6 +2391,7 @@
   }
 
   function closeSheet() {
+    flushField();
     S.sheet = null;
     S.pending = null;
     const dim = document.getElementById("dim");
@@ -1966,16 +2402,21 @@
       sheet.style.transform = "";
       setTimeout(() => {
         if (S.sheet || !sheet.isConnected) return;
-        if (S.dash && !S.palette && !S.confirm) render();
-        else sheet.innerHTML = "";
+        if (S.dash && !S.palette && !S.confirm) {
+          render();
+          if (S.sheetReturn) restoreFocus(S.sheetReturn);
+        } else sheet.innerHTML = "";
+        S.sheetReturn = null;
       }, 240);
     }
     syncBack();
   }
 
   const EXTRA_SHEETS = {
-    lim: { id: "lim", icon: "userCog", title: "محدودیت مدیران", desc: "با روشن بودن، هر ادمین فقط کارهایی را می تواند بکند که اینجا مجاز است", flag: "lim_on", sections: ["lim"], custom: "lim", load: "/limits" },
-    nt: { id: "nt", icon: "bell", title: "اعلان حذف", desc: "وقتی پیامی حذف شد، به فرستنده اش گفته می شود چرا", flag: "nt_on", sections: ["nt"] },
+    lim: { id: "lim", icon: "userCog", title: "محدودیت مدیران", desc: "با روشن بودن، هر ادمین فقط کارهایی را می تواند بکند که اینجا مجاز است", flag: "lim_on", sections: ["lim"], custom: "lim", load: "/limits",
+      effect: () => "هر ادمین فقط کارهای مجازش" },
+    nt: { id: "nt", icon: "bell", title: "اعلان حذف", desc: "وقتی پیامی حذف شد، به فرستنده اش گفته می شود چرا", flag: "nt_on", sections: ["nt"],
+      effect: () => (setting("nt_t") && setting("nt_t").value === 0 ? "اعلان پاک نمی شود" : "اعلان پس از " + shown("nt_t") + " ثانیه پاک می شود") },
     "response-policy": { id: "response-policy", icon: "chat", title: "دیده شدن پیام های ربات", desc: "فقط اعلان های حذف و خوشامد؛ بقیه پیام ها عادی می مانند", custom: "response_policy", load: "/response-policy", neutral: true },
     "rights-help": { id: "rights-help", icon: "shieldCheck", title: "دسترسی های ربات", desc: "ربات بدون این دسترسی ها نمی تواند گروه را محافظت کند", custom: "rights_help", neutral: true },
     help: { id: "help", icon: "book", title: "دستورهای داخل گروه", desc: "این کارها به یک پیام یا کاربر در گروه نیاز دارند", custom: "help", neutral: true },
@@ -1997,9 +2438,14 @@
 
   function masterControl(f) {
     if (f.always || f.neutral) return "";
+    if (f.id === "lim" && !S.dash.viewer.is_owner) return '<span class="pill ' + (isOn("lim_on") ? "ok" : "mute") + '">' + (isOn("lim_on") ? "روشن" : "خاموش") + "</span>";
     if (f.flag) return swb('data-apply="' + f.flag + '"', isOn(f.flag), f.title);
     if (f.enabled) return swb('data-power="' + f.id + '"', sectionEnabled(f.enabled), f.title);
     return "";
+  }
+
+  function sheetError() {
+    return '<div class="card" style="margin-top:12px"><div class="empty sm"><div class="glyph">' + icon("wifiOff", 24) + '</div><div class="t">این بخش خوانده نشد</div><div class="s" style="margin-bottom:14px">اتصال را بررسی کنید و دوباره امتحان کنید.</div><button class="btn sm ghost" data-sheet-retry>' + icon("refresh", 14) + " تلاش دوباره</button></div></div>";
   }
 
   function sheetLoading(h) {
@@ -2008,17 +2454,20 @@
 
   function renderSheetBody(f) {
     const st = featureState(f);
-    let html = '<div class="handle"></div><div class="sheet-head"><span class="rico' + (st ? " on" : "") + '">' + icon(f.icon, 22) + '</span><div style="flex:1;min-width:0"><div class="t">' + f.title + '</div><div class="s">' + f.desc + "</div></div>" + masterControl(f) +
+    let html = '<div class="handle" aria-hidden="true"></div><div class="sheet-head"><span class="rico' + (st ? " on" : "") + '">' + icon(f.icon, 22) + '</span><div style="flex:1;min-width:0"><div class="t" id="sheet-t">' + f.title + '</div><div class="s">' + f.desc + "</div></div>" + masterControl(f) +
       '<button class="ibtn sheet-close" data-close aria-label="بستن">' + icon("x", 20) + "</button></div>";
 
+    const shadowed = f.id === "cq" ? [["cq_shadow", "موضوع ها"], ["ad_shadow", "تبلیغ"], ["tr_shadow", "خرید و فروش"]].filter(([id]) => isOn(id)).map(([, l]) => l) : [];
     if (st === true && f.effect && !f.always) {
-      html += '<div class="status-line on"><span class="dot on"></span><span>روشن · ' + esc(f.effect()) + "</span></div>";
+      html += '<div class="status-line on"><span class="dot on"></span><span>روشن · ' + esc(f.effect()) + (shadowed.length ? " · فقط بررسی: " + shadowed.join("، ") : "") + "</span></div>";
     } else if (st === true && f.effect) {
       html += '<div class="status-line"><span class="dot"></span><span>' + esc(f.effect()) + "</span></div>";
     } else if (st === false && f.enabled) {
       html += '<div class="status-line"><span class="dot"></span><span>خاموش · با انتخاب یک ساعت یا کلید بالا روشن می شود.</span></div>';
-    } else if (st === false && (f.flag || f.flags)) {
-      html += '<div class="status-line"><span class="dot"></span><span>خاموش · تنظیمات زیر با روشن کردن کلید اعمال می شود.</span></div>';
+    } else if (st === false && f.flags) {
+      html += '<div class="status-line"><span class="dot"></span><span>خاموش · برای روشن کردن، یکی از کلیدهای زیر را بزنید.</span></div>';
+    } else if (st === false && f.flag) {
+      html += '<div class="status-line"><span class="dot"></span><span>خاموش · تنظیمات زیر با روشن کردن کلید بالا اعمال می شود.</span></div>';
     }
 
     const adv = [];
@@ -2040,11 +2489,19 @@
       const it = setting(id);
       if (it) fields += '<div class="row" style="padding-right:0;padding-left:0"><span class="rt"><span class="t n">' + (it.icon ? icon(it.icon, 14) + " " : "") + it.label + "</span></span>" + swb('data-apply="' + it.id + '"', it.on, it.label) + "</div>";
     });
-    if (fields) html += '<div class="sheet-card">' + fields + "</div>";
 
     const custom = SHEET_BLOCKS[f.custom];
-    if (custom) html += custom(f);
+    const fieldsHtml = fields ? '<div class="sheet-card">' + fields + "</div>" : "";
+    if (f.id === "cq") html += (custom ? custom(f) : "") + fieldsHtml;
+    else html += fieldsHtml + (custom ? custom(f) : "");
     if (f.tip) html += '<div class="note mute" style="margin-top:12px">' + icon("info", 16) + "<span>" + f.tip + "</span></div>";
+    if (f.warn) html += '<div class="note warn" style="margin-top:12px">' + icon("alert", 16) + "<span>" + f.warn + "</span></div>";
+
+    if (f.id === "cq" && adv.length) {
+      html += '<div class="h" style="padding-top:16px"><div class="t">فقط بررسی، بدون حذف<span class="sub">روشن باشد، فقط در کانال لاگ ثبت می شود</span></div></div><div class="list">' +
+        adv.map((it) => '<div class="row"><span class="rt"><span class="t n">' + it.label + "</span></span>" + swb('data-apply="' + it.id + '"', it.on, it.label) + "</div>").join("") + "</div>";
+      adv.length = 0;
+    }
 
     if (adv.length) {
       const open = S.adv.has(f.id);
@@ -2071,7 +2528,7 @@
     ai: () => {
       const d = S.sheet && S.sheet.data;
       if (!d) return sheetLoading();
-      if (d === "error") return "";
+      if (d === "error") return sheetError();
       return '<div class="h" style="padding-top:16px"><div class="t">موضوع ها <span class="count">· ' + fa(d.ai.filter((l) => l.on).length) + " از " + fa(d.ai.length) + '</span></div></div><div class="lockgrid">' +
         d.ai.map(lockTile).join("") + "</div>" +
         '<div class="list" style="margin-top:12px"><button class="row" data-push="imgf"><span class="rico">' + icon("image", 17) + '</span><span class="rt"><span class="t">فیلتر تصویری شما</span><span class="s">موضوع های دلخواه</span></span>' + CHEV + "</button></div>";
@@ -2079,7 +2536,7 @@
     response_policy: () => {
       const d = S.sheet && S.sheet.data;
       if (!d) return sheetLoading(180);
-      if (d === "error") return "";
+      if (d === "error") return sheetError();
       let html = '<div class="note" style="margin-top:4px">' + icon("info", 16) + "<span>عمومی یعنی پیام عادی گروه؛ خصوصی فقط به همان کاربر نشان داده می شود.</span></div><div class=\"sheet-card\">";
       html += d.overrides.map((item) => '<div class="field"><div class="fl"><span>' + esc(item.label) + "</span><b>" + policyVisibilityLabel(item.visibility) + '</b></div><div class="seg">' +
         policyChoice("kind", item.id, "public", item.visibility === "public") +
@@ -2097,12 +2554,14 @@
     },
     voice: () => '<div class="list" style="margin-top:12px"><button class="row" data-push="voice"><span class="rico">' + icon("list", 17) + '</span><span class="rt"><span class="t">کلمه های نامناسب</span><span class="s">فهرست را ببینید و کم و زیاد کنید</span></span>' + CHEV + "</button></div>",
     answers: () => '<div class="list" style="margin-top:12px"><button class="row" data-push="list:answer"><span class="rico">' + icon("chat", 17) + '</span><span class="rt"><span class="t">کلمه ها و پاسخ ها</span><span class="s">ببینید، اضافه یا حذف کنید</span></span>' + CHEV + "</button></div>",
-    report: () => '<button class="btn outline block" style="margin-top:12px" data-report-test>' + icon("send", 16) + " ارسال آزمایشی گزارش امروز در گروه</button>",
+    report: () => '<button class="btn outline block" style="margin-top:12px" data-report-test>' + icon("send", 16) + " ارسال آزمایشی گزارش امروز در گروه</button>" +
+      '<div class="hint">گزارش آزمایشی برای همه اعضای گروه فرستاده می شود.</div>',
     strict: () => {
       const d = S.sheet && S.sheet.data;
       if (!d) return sheetLoading(110);
-      if (d === "error") return "";
-      if (!d.causes.length) return '<div class="note mute" style="margin-top:12px">' + icon("info", 16) + "<span>هیچ قفل یا فیلتری روشن نیست؛ اول یکی را روشن کنید تا اینجا بیاید.</span></div>";
+      if (d === "error") return sheetError();
+      if (!d.causes.length) return '<div class="note mute" style="margin-top:12px">' + icon("info", 16) + "<span>هیچ قفل یا فیلتری روشن نیست؛ اول یکی را روشن کنید تا اینجا بیاید.</span></div>" +
+        '<button class="btn ghost block" style="margin-top:10px" data-push="locks">' + icon("lock", 16) + " رفتن به قفل ها</button>";
       return '<div class="sheet-card"><div class="field"><div class="fl"><span>چه چیزهایی تخلف حساب شود</span><b>' + fa(d.causes.filter((c) => c.on).length) + " از " + fa(d.causes.length) + '</b></div><div class="chips">' +
         d.causes.map((c) => '<button class="chip' + (c.on ? " on" : "") + '" data-cause="' + esc(c.key) + '" aria-pressed="' + c.on + '">' + (c.on ? icon("check", 13, 3) : "") + esc(c.label) + "</button>").join("") +
         '</div><div class="hint start">فقط موارد انتخاب شده به شمارش تخلف اضافه می شوند؛ دست کم یکی همیشه می ماند.</div></div></div>';
@@ -2110,14 +2569,14 @@
     tmed: () => {
       const d = S.sheet && S.sheet.data;
       if (!d) return sheetLoading(90);
-      if (d === "error") return "";
+      if (d === "error") return sheetError();
       return '<div class="sheet-card"><div class="field"><div class="fl"><span>کدام رسانه ها موقت باشند</span><b>' + fa(d.kinds.filter((k) => k.on).length) + " از " + fa(d.kinds.length) + '</b></div><div class="chips">' +
         d.kinds.map((k) => '<button class="chip' + (k.on ? " on" : "") + '" data-tmed-kind="' + esc(k.name) + '" aria-pressed="' + k.on + '">' + (k.on ? icon("check", 13, 3) : "") + esc(k.label) + "</button>").join("") + "</div></div></div>";
     },
     lim: () => {
       const d = S.sheet && S.sheet.data;
       if (!d) return sheetLoading(220);
-      if (d === "error") return "";
+      if (d === "error") return sheetError();
       return '<div class="h" style="padding-top:16px"><div class="t">ادمین ها مجازند <span class="count">· ' + fa(d.caps.filter((c) => c.allowed).length) + " از " + fa(d.caps.length) + "</span></div></div>" +
         (isOn("lim_on") ? "" : '<div class="note mute" style="margin-bottom:10px">' + icon("info", 16) + "<span>تا کلید بالا روشن نشود، همه ادمین ها همه کار می توانند بکنند.</span></div>") +
         '<div class="list">' + d.caps.map((c) => '<div class="row"><span class="rt"><span class="t n">' + esc(c.label) + "</span></span>" +
@@ -2127,9 +2586,9 @@
     slow: () => {
       const d = S.sheet && S.sheet.data;
       if (!d) return sheetLoading(110);
-      if (d === "error") return "";
+      if (d === "error") return sheetError();
       return '<div class="sheet-card"><div class="field"><div class="fl"><span>فاصله بین دو پیام هر عضو</span><b>' + slowLabel(d.seconds) + '</b></div><div class="chips">' +
-        d.steps.map((s) => '<button class="chip' + (s.value === d.seconds ? " on" : "") + (s.value === 0 ? " danger" : "") + '" data-slow="' + s.value + '">' + fa(s.label) + "</button>").join("") + "</div></div></div>" +
+        d.steps.map((s) => '<button class="chip' + (s.value === d.seconds ? " on" : "") + '" data-slow="' + s.value + '" aria-pressed="' + (s.value === d.seconds) + '">' + fa(s.label) + "</button>").join("") + "</div></div></div>" +
         '<div class="note mute" style="margin-top:12px">' + icon("info", 16) + "<span>اسلوموشن را فقط اکانت کلینر می تواند تنظیم کند؛ اگر کلینر ندارید در گروه «افزودن کلینر» بفرستید.</span></div>";
     },
     help: () => HELP.map(([title, rows]) => '<div class="h" style="padding-top:14px"><div class="t">' + title + '</div></div><div class="list">' +
@@ -2145,18 +2604,51 @@
     return '<button class="' + (selected ? "on" : "") + '" data-policy-choice="' + esc(kind + ":" + id + ":" + visibility) + '">' + policyVisibilityLabel(visibility) + "</button>";
   }
 
+  const FIELDS = {
+    fl_lim: ["بیش از چند پیام", "پیام"],
+    fl_win: ["در چند ثانیه", "ثانیه"],
+    bt_lim: ["بیش از چند حذف", "حذف"],
+    bt_win: ["در چند دقیقه", "دقیقه"],
+    rd_lim: ["بیش از چند عضو تازه", "عضو"],
+    rd_win: ["در چند ثانیه", "ثانیه"],
+    rd_time: [null, "دقیقه"],
+    s_lim: [null, "تخلف"],
+    s_time: [null, "دقیقه"],
+    tmed_min: [null, "دقیقه"],
+    cp_t: ["مهلت پاسخ", "ثانیه"],
+    cp_n: [null, "گزینه"],
+    nt_t: [null, "ثانیه"],
+    wn_lim: [null, "اخطار"],
+    gpe: [null, "ثانیه"],
+    gpt: [null, "ثانیه"],
+    wct: ["پاک شدن پس از", "ثانیه"],
+    ad: [null, "نفر"],
+    apc: [null, "پیام"],
+    cq_lim: ["آستانه حذف موضوع ها", null, "عدد کمتر یعنی سخت گیرتر: عکس های بیشتری حذف می شود و اشتباه هم بیشتر."],
+    tr_lim: ["آستانه حذف خرید و فروش", null, "عدد کمتر یعنی سخت گیرتر: آگهی های بیشتری حذف می شود و اشتباه هم بیشتر."],
+  };
+
+  function fieldLabel(it) {
+    const f = FIELDS[it.id];
+    if (f && f[0]) return f[0];
+    return it.clock ? it.label.split("،")[0] : it.label;
+  }
+
   function renderNumberField(it, standalone) {
+    const f = FIELDS[it.id] || [];
+    const unit = f[1];
     const chips = (it.presets || []).map((p) =>
-      '<button class="chip' + (p.value === it.value ? " on" : "") + '" data-apply="' + it.id + ":" + p.value + '">' + fa(p.shown) + "</button>"
+      '<button class="chip' + (p.value === it.value ? " on" : "") + (it.id === "apc" && p.value === 0 ? " danger" : "") + '" data-apply="' + it.id + ":" + p.value + '" aria-pressed="' + (p.value === it.value) + '">' + fa(p.shown) + "</button>"
     ).join("");
     const custom = it.clock
-      ? '<div class="inline-num"' + (chips ? "" : ' style="margin-top:0"') + '><input type="time" class="text-input" dir="ltr" value="' + minutesToClock(it.value) + '" data-clock-apply="' + it.id + '" data-clock-value="' + it.value + '" aria-label="' + esc(it.label) + '" /></div>'
+      ? '<div class="inline-num"' + (chips ? "" : ' style="margin-top:0"') + '><input type="time" class="text-input" dir="ltr" value="' + minutesToClock(it.value) + '" data-clock-apply="' + it.id + '" data-clock-value="' + it.value + '" aria-label="' + esc(fieldLabel(it)) + '" /></div>'
       : "";
     const numChip = it.clock
       ? ""
-      : '<input type="number" class="chip-input" inputmode="numeric" enterkeyhint="done" min="' + it.range[0] + '" max="' + it.range[1] + '" value="' + ((it.presets || []).some((p) => p.value === it.value) ? "" : it.value) + '" data-number-apply="' + it.id + '" data-value="' + it.value + '" placeholder="دلخواه" aria-label="مقدار دلخواه ' + esc(it.label) + '" />';
-    return '<div class="field"' + (standalone ? ' style="padding-top:0"' : "") + '><div class="fl"><span>' + (it.icon ? icon(it.icon, 14) + " " : "") + (it.clock ? it.label.split("،")[0] : it.label) + "</span><b>" + fa(it.shown) + "</b></div>" +
-      '<div class="chips">' + chips + numChip + "</div>" + custom + "</div>";
+      : '<input type="number" class="chip-input" inputmode="numeric" enterkeyhint="done" min="' + it.range[0] + '" max="' + it.range[1] + '" value="' + ((it.presets || []).some((p) => p.value === it.value) ? "" : it.value) + '" data-number-apply="' + it.id + '" data-value="' + it.value + '" placeholder="' + (unit ? "دلخواه، " + unit : "دلخواه") + '" aria-label="' + esc("مقدار دلخواه " + fieldLabel(it) + (unit ? " به " + unit : "")) + '" />';
+    const plain = /^\d+$/.test(String(it.shown));
+    return '<div class="field"' + (standalone ? ' style="padding-top:0"' : "") + '><div class="fl"><span>' + (it.icon ? icon(it.icon, 14) + " " : "") + fieldLabel(it) + "</span><b>" + fa(it.shown) + (plain && unit ? " " + unit : "") + "</b></div>" +
+      '<div class="chips">' + chips + numChip + "</div>" + custom + (f[2] ? '<div class="hint start">' + f[2] + "</div>" : "") + "</div>";
   }
 
   function renderPickField(it) {
@@ -2170,7 +2662,7 @@
     S.palette = null;
     if (S.dash) render();
     else {
-      app.innerHTML = '<aside id="rail"></aside><div id="view">' + renderTop(true) + '<div id="main" class="nobar"></div></div>' + renderOverlays();
+      app.innerHTML = '<aside id="rail"></aside><div id="view">' + renderTop(true) + '<div id="main" class="nobar">' + pickPrompt() + "</div></div>" + renderOverlays();
       document.body.classList.add("nobar");
       openSheetAnimation();
     }
@@ -2180,21 +2672,24 @@
   function pickerHtml() {
     const q = fold(S.groupQuery);
     const groups = S.groups || [];
-    return '<div class="handle"></div><div class="sheet-head"><span class="rico on">' + icon("users", 22) + '</span><div style="flex:1;min-width:0"><div class="t">گروه های شما</div><div class="s">' + fa(groups.length) + " گروه که در آن ادمین هستید</div></div>" +
+    return '<div class="handle"></div><div class="sheet-head"><span class="rico on">' + icon("users", 22) + '</span><div style="flex:1;min-width:0"><div class="t" id="sheet-t">گروه های شما</div><div class="s">' + fa(groups.length) + " گروه که در آن ادمین هستید</div></div>" +
       '<button class="ibtn sheet-close" data-close aria-label="بستن">' + icon("x", 20) + "</button></div>" +
       (groups.length > 6 ? '<div style="margin-bottom:10px">' + searchBox("group-search", "جستجوی گروه…", S.groupQuery) + "</div>" : "") +
       '<div class="list">' +
       groups.map((g) => {
         const current = g.id === S.chat;
         const hide = q && !fold(decode(g.title)).includes(q);
-        return '<button class="row tap" data-pick-group="' + g.id + '"' + (g.known ? "" : " disabled") + (hide ? " hidden" : "") + ' style="min-height:62px' + (g.known ? "" : ";opacity:.55") + '">' +
+        const add = !g.known && addToGroupLink();
+        return '<button class="row tap' + (g.known ? "" : " gone") + '" ' + (g.known ? 'data-pick-group="' + g.id + '"' : add ? 'data-open-link="' + esc(add) + '"' : "disabled") + (hide ? " hidden" : "") + ' style="min-height:62px">' +
           '<span class="avatar lg" style="' + avatarStyle(g.id) + '">' + esc(initial(g.title)) + "</span>" +
-          '<span class="rt"><span class="t">' + g.title + '</span><span class="s">' + (g.is_owner ? "مالک" : "ادمین") + (g.known ? "" : " · ربات در دسترس نیست") + "</span></span>" +
-          (current ? '<span class="pill accent">' + icon("check", 12, 3) + " فعلی</span>" : g.known ? CHEV : '<span class="pill bad">بدون دسترسی</span>') +
+          '<span class="rt"><span class="t">' + bdi(g.title) + '</span><span class="s">' + (g.is_owner ? "مالک" : "ادمین") + (g.known ? "" : " · ربات در این گروه نیست" + (add ? "؛ برای افزودن دوباره بزنید" : "")) + "</span></span>" +
+          (current ? '<span class="pill accent">' + icon("check", 12, 3) + " فعلی</span>" : g.known ? CHEV : '<span class="pill warn">' + icon("plus", 11, 2.6) + " افزودن</span>") +
           "</button>";
       }).join("") +
       "</div>" +
-      '<div class="note mute" style="margin-top:12px">' + icon("info", 16) + "<span>گروه دیگری دارید؟ ربات را در آن ادمین کنید تا اینجا اضافه شود.</span></div>";
+      (addToGroupLink()
+        ? '<div class="list" style="margin-top:12px"><button class="row" data-open-link="' + esc(addToGroupLink()) + '"><span class="rico on">' + icon("plus", 18, 2.4) + '</span><span class="rt"><span class="t">افزودن به گروه دیگر</span><span class="s">ادمینش کنید تا اینجا اضافه شود</span></span>' + CHEV + "</button></div>"
+        : '<div class="note mute" style="margin-top:12px">' + icon("info", 16) + "<span>گروه دیگری دارید؟ ربات را در آن ادمین کنید تا اینجا اضافه شود.</span></div>");
   }
 
   const PALETTE_PAGES = [
@@ -2227,7 +2722,7 @@
       const [title, ic, desc] = LIST_KINDS[kind];
       items.push({ group: "لیست ها", icon: ic, title, sub: desc || "لیست", go: () => pushRoot("list:" + kind) });
     });
-    TABS.forEach(([id, ic, label]) => items.push({ group: "صفحه ها", icon: ic, title: label, sub: "زبانه", go: () => goTab(id) }));
+    TABS.forEach(([id, ic, label]) => items.push({ group: "صفحه ها", icon: ic, title: label, sub: "زبانه", go: () => leaveTo(() => goTab(id)) }));
     S.dash.sections.forEach((s) => {
       s.settings.forEach((it) => {
         if (it.kind !== "flag" || featureFlags.has(it.id)) return;
@@ -2246,9 +2741,15 @@
   function paletteResults() {
     const q = fold(S.palette.q);
     let items = paletteItems();
-    if (q) items = items.filter((it) => fold(decode(it.title) + " " + decode(it.sub)).includes(q));
-    else items = items.filter((it) => it.group === "صفحه ها" || it.group === "امکانات").slice(0, 16);
-    return items.slice(0, 40);
+    const seen = new Set();
+    items = items.filter((it) => {
+      const key = fold(decode(it.title));
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    if (q) return items.filter((it) => fold(decode(it.title) + " " + decode(it.sub)).includes(q)).slice(0, 40);
+    return items.filter((it) => it.group === "صفحه ها").concat(items.filter((it) => it.group === "امکانات"));
   }
 
   function renderPaletteResults() {
@@ -2278,7 +2779,8 @@
   }
 
   function openPalette() {
-    if (!S.dash) return;
+    if (!S.dash || (S.confirm && S.confirm.busy)) return;
+    flushField();
     S.palette = { q: "", idx: 0 };
     S.sheet = null;
     S.confirm = null;
@@ -2318,13 +2820,30 @@
   }
 
   function goTab(id) {
+    if (S.confirm && S.confirm.busy) return;
+    flushField();
     S.tab = id;
     S.stack = [];
     S.barSel = null;
     S.sheet = null;
+    S.confirm = null;
+    S.palette = null;
+    setClosingConfirmation(false);
     if (id === "members" && !S.admins) loadAdmins();
+    if ((id === "members" || id === "settings") && !S.joinGate) loadJoinGate();
     render();
     window.scrollTo(0, 0);
+  }
+
+  async function loadJoinGate() {
+    const chat = S.chat;
+    try {
+      const d = await api("/join-gate");
+      if (S.chat === chat) S.joinGate = d;
+    } catch (e) {
+      if (S.chat === chat) S.joinGate = "error";
+    }
+    rerenderIfIdle(["members", "settings"]);
   }
 
   function thenReload(d) {
@@ -2363,26 +2882,110 @@
       const kind = key.slice(6);
       const d = S.lists && S.lists[kind];
       const n = d ? d.entries.length : 0;
+      const many = d && d.truncated ? "همه موارد (بیش از " + fa(n) + ")" : "همه " + fa(n) + " مورد";
       return {
-        title: "همه " + fa(n) + " مورد از «" + LIST_KINDS[kind][0] + "» حذف شود؟",
-        sub: "برگشت ندارد." + (kind === "ban" ? " کسانی که بن شده اند می توانند دوباره بیایند." : ""),
-        label: "حذف همه",
+        title: many + " از «" + LIST_KINDS[kind][0] + "» حذف شود؟",
+        sub: kind === "ban" ? "همه از بن درمی آیند و می توانند دوباره به گروه بیایند. برگشت ندارد."
+          : kind === "mute" ? "سکوت همه برداشته می شود و دوباره می توانند پیام بدهند. برگشت ندارد."
+          : "برگشت ندارد.",
+        label: kind === "ban" ? "رفع بن همه" : kind === "mute" ? "رفع سکوت همه" : "حذف همه",
         run: () => api("/lists/" + kind, { method: "DELETE" }).then(thenReload),
       };
     }
+    if (key === "locks-on") {
+      return { title: "همه قفل ها روشن شود؟", sub: "متن فارسی و انگلیسی، لینک، عکس و همه چیز دیگر برای اعضای عادی بسته می شود؛ فقط ادمین ها و کاربران ویژه می توانند بفرستند.", label: "روشن کردن همه", quiet: true, run: () => setAllLocks(true).then((sure) => sure && toast("همه قفل ها روشن شد.", "ok")) };
+    }
     if (key === "locks-off") {
-      return { title: "همه قفل ها خاموش شود؟", sub: "هر چیزی دوباره در گروه فرستاده می شود تا قفل ها را برگردانید.", label: "خاموش کردن همه", quiet: true, run: () => setAllLocks(false).then(() => toast("همه قفل ها خاموش شد.", "ok")) };
+      return { title: "همه قفل ها خاموش شود؟", sub: "هر چیزی دوباره در گروه فرستاده می شود تا قفل ها را برگردانید.", label: "خاموش کردن همه", quiet: true, run: () => setAllLocks(false).then((sure) => sure && toast("همه قفل ها خاموش شد.", "ok")) };
+    }
+    if (key.startsWith("lock-group:")) {
+      const title = key.slice(11);
+      return { title: "همه قفل های «" + title + "» روشن شود؟", sub: "در میان آن ها قفل متن فارسی و انگلیسی هم هست؛ اعضای عادی دیگر نمی توانند چیزی بنویسند.", label: "روشن کردن همه", quiet: true, run: () => lockGroupOn(title) };
     }
     if (key === "rights-close") {
-      return { title: "گروه بسته شود؟", sub: "هیچ عضو عادی نمی تواند چیزی بفرستد؛ ادمین ها می توانند. هر وقت خواستید با همین دکمه باز کنید.", label: "بستن گروه", quiet: true, run: () => setAllRights(false) };
+      return { title: "گروه بسته شود؟", sub: "هیچ عضو عادی نمی تواند چیزی بفرستد؛ ادمین ها می توانند. دسترسی هایی که تنظیم کرده اید دست نمی خورد و با باز کردن گروه همان ها برمی گردد.", label: "بستن گروه", quiet: true, run: () => setGroupLock(true) };
+    }
+    if (key === "rights-close-all") {
+      return { title: "همه دسترسی ها بسته شود؟", sub: "هر دسترسی جداگانه بسته می شود. برای بستن موقت گروه «بستن گروه» بهتر است، چون باز کردنش تنظیم ها را برمی گرداند.", label: "بستن همه", quiet: true, run: () => setAllRights(false) };
+    }
+    if (key === "apc-all") {
+      return { title: "هر روز همه پیام های گروه پاک شود؟", sub: "در ساعت پاکسازی، همه تاریخچه گروه حذف می شود، نه فقط پیام های اخیر. پیام حذف شده برنمی گردد.", label: "پاک کردن همه", quiet: true, run: () => applySetting("apc:0") };
+    }
+    if (key === "report-test") {
+      return { tone: "accent", title: "گزارش امروز در گروه فرستاده شود؟", sub: "همه اعضا آن را می بینند.", label: "ارسال", quiet: true, run: sendTestReport };
+    }
+    if (key === "case-delete") {
+      return { title: "پیام گزارش شده حذف شود؟", sub: "پیام از گروه پاک می شود و پرونده بسته می شود. پیام حذف شده برنمی گردد.", label: "حذف پیام", quiet: true, run: () => runCaseAction("delete") };
+    }
+    if (key === "case-reverse") {
+      const page = currentPage();
+      const c = page && page.data && page.data.detail;
+      const what = c ? caseAction(c.action) : "برخورد";
+      return { title: "«" + what + "» لغو شود؟", sub: "محدودیت این کاربر برداشته می شود و در تاریخچه پرونده ثبت می شود.", label: "لغو " + what, quiet: true, run: () => runCaseAction("reverse") };
+    }
+    if (key === "doc-revert") {
+      return { title: "تغییرات کنار گذاشته شود؟", sub: "متن به آخرین نسخه ذخیره شده برمی گردد.", label: "کنار گذاشتن", quiet: true, run: async () => {
+        const page = currentPage();
+        if (page) page.draft = page.saved;
+        setClosingConfirmation(false);
+      } };
     }
     return null;
   }
 
-  function confirmAdmin(id, name) {
+  function lockGroupOn(title) {
+    const page = currentPage();
+    if (!page || !page.data) return;
+    const grp = lockGroups(page.data.plain).find(([t]) => t === title);
+    if (grp) return setLocks(grp[1].filter((l) => !l.on).map((l) => l.key), true);
+  }
+
+  async function sendTestReport() {
+    const ok = await write(() => api("/report/test", { method: "POST" }));
+    if (ok) {
+      haptic("ok");
+      toast("گزارش آزمایشی در گروه فرستاده شد.", "ok");
+    }
+  }
+
+  async function runCaseAction(action) {
+    const page = currentPage();
+    if (!page || !page.data || !page.data.detail) return;
+    const id = page.data.detail.id;
+    return guarded("case:" + id, async () => {
+      const note = ((document.getElementById("case-note") || {}).value || "").trim();
+      const path = action === "reverse" ? "/cases/" + id + "/reverse" : "/cases/" + id + "/resolve";
+      const body = action === "reverse" ? (note ? { note } : {}) : (note ? { action, note } : { action });
+      S.caseBusy = action;
+      render();
+      let d = null;
+      const ok = await write(async () => {
+        d = await api(path, { method: "POST", body });
+        page.data.detail = await api("/cases/" + id);
+      });
+      S.caseBusy = null;
+      page.listStale = true;
+      if (ok) S.dropTyped = true;
+      render();
+      if (!ok) return;
+      const msg = String((d && d.message) || "");
+      if (msg.startsWith("✓")) {
+        haptic("ok");
+        toast(msg.replace(/^✓\s*/, ""), "ok");
+      } else if (msg) {
+        haptic("warn");
+        toast(msg, "warn");
+      }
+      api("/cases?status=open&limit=5").then((c) => { S.openCases = c; }).catch(() => {});
+    });
+  }
+
+  function confirmAdmin(id) {
+    const ad = S.admins && S.admins !== "error" ? S.admins.admins.find((a) => String(a.id) === String(id)) : null;
+    const name = ad ? decode(ad.name) : "این ادمین";
     return {
-      title: "«" + decode(name) + "» عزل شود؟",
-      sub: "از ادمینی گروه و ربات برداشته می شود. ربات فقط ادمین هایی را می تواند عزل کند که خودش اضافه کرده.",
+      title: "«" + name + "» عزل شود؟",
+      sub: "از ادمینی گروه و ربات برداشته می شود و دیگر به تنظیمات دسترسی ندارد.",
       label: "عزل",
       run: () => api("/admins/" + id, { method: "DELETE" }).then((d) => loadAdmins().then(() => d)),
     };
@@ -2391,7 +2994,8 @@
   function renderConfirm() {
     const c = S.confirm;
     if (!c) return "";
-    return '<div id="confirm-dim" data-confirm-cancel></div><div class="confirm" role="alertdialog" aria-modal="true"><div class="ci">' + icon("alert", 22) + '</div><div class="t">' + esc(c.title) + '</div><div class="s">' + esc(c.sub) + '</div><div class="b"><button class="btn ghost" data-confirm-cancel>انصراف</button><button class="btn danger" data-confirm-run>' + esc(c.label) + "</button></div></div>";
+    const accent = c.tone === "accent";
+    return '<div id="confirm-dim" data-confirm-cancel></div><div class="confirm' + (accent ? " accent" : "") + '" role="alertdialog" aria-modal="true" aria-labelledby="confirm-t" aria-describedby="confirm-s"><div class="ci">' + icon(accent ? "send" : "alert", 22) + '</div><div class="t" id="confirm-t">' + esc(c.title) + '</div><div class="s" id="confirm-s">' + esc(c.sub) + '</div><div class="b"><button class="btn ghost" data-confirm-cancel' + (c.busy ? " disabled" : "") + '>انصراف</button><button class="btn ' + (accent ? "" : "danger") + (c.busy ? " busy" : "") + '" data-confirm-run' + (c.busy ? " disabled" : "") + ">" + (c.busy ? '<span class="spinner"></span>' : "") + esc(c.label) + "</button></div></div>";
   }
 
   async function reloadTopPage() {
@@ -2413,7 +3017,8 @@
       if (String(it.value) === val) return null;
       const preset = (it.presets || []).find((p) => String(p.value) === val);
       const shownVal = it.clock ? minutesToClock(val) : preset ? preset.shown : val;
-      return { msg: it.label + " ← " + fa(shownVal), undo: id + ":" + it.value };
+      const unit = (FIELDS[id] || [])[1];
+      return { msg: fieldLabel(it) + " ← " + fa(shownVal) + (/^\d+$/.test(String(shownVal)) && unit ? " " + unit : ""), undo: id + ":" + it.value };
     }
     for (const s of S.dash.sections) {
       for (const p of s.settings) {
@@ -2453,13 +3058,15 @@
   async function applySetting(action, opts) {
     return guarded("set:" + action, async () => {
       const change = describeChange(action);
+      let sure = false;
       const ok = await write(async () => {
-        await takeDash(await api("/settings/apply", { method: "POST", body: { action } }));
+        sure = await takeDash(await api("/settings/apply", { method: "POST", body: { action } }));
       });
+      if (ok && /^ng[ft]:/.test(action)) loadRights();
       redraw();
       if (!ok) return false;
       haptic("sel");
-      if (change && !(opts && opts.quiet)) {
+      if (sure && change && !(opts && opts.quiet)) {
         toast(change.msg, "ok", change.undo ? { label: "برگرداندن", run: () => applySetting(change.undo, { quiet: true }) } : null);
       }
       return true;
@@ -2526,15 +3133,17 @@
   async function toggleLock(key, opts) {
     return guarded("lock:" + key, async () => {
       const l = lockLabel(key);
+      let sure = false;
       const ok = await write(async () => {
-        await takeDash(await api("/locks/" + encodeURIComponent(key) + "/toggle", { method: "POST" }));
+        sure = await takeDash(await api("/locks/" + encodeURIComponent(key) + "/toggle", { method: "POST" }));
       });
       if (!ok) return redraw();
       haptic("sel");
-      setLockCaches([key], (x) => !x.on);
+      if (sure && l) setLockCaches([key], !l.on);
+      else refreshLocks();
       redraw();
       if (S.palette) drawPalette();
-      if (l && !(opts && opts.quiet)) {
+      if (sure && l && !(opts && opts.quiet)) {
         toast("قفل " + decode(l.label) + (l.on ? " روشن شد" : " خاموش شد"), "ok", { label: "برگرداندن", run: () => toggleLock(key, { quiet: true }) });
       }
     });
@@ -2543,56 +3152,118 @@
   async function setLocks(keys, on, opts) {
     if (!keys.length) return;
     return guarded("locks:" + keys.join(","), async () => {
+      let sure = false;
       const ok = await write(async () => {
-        await takeDash(await api("/locks/set", { method: "POST", body: { keys, on } }));
+        sure = await takeDash(await api("/locks/set", { method: "POST", body: { keys, on } }));
       });
       if (!ok) return render();
       haptic("ok");
-      setLockCaches(keys, on);
+      if (sure) setLockCaches(keys, on);
+      else refreshLocks();
       render();
-      if (!(opts && opts.quiet)) {
+      if (sure && !(opts && opts.quiet)) {
         toast(fa(keys.length) + " قفل " + (on ? "روشن شد" : "خاموش شد"), "ok", { label: "برگرداندن", run: () => setLocks(keys, !on, { quiet: true }) });
       }
     });
   }
 
   async function setAllLocks(on) {
+    let sure = false;
     const ok = await write(async () => {
-      await takeDash(await api("/locks/all", { method: "POST", body: { on } }));
+      sure = await takeDash(await api("/locks/all", { method: "POST", body: { on } }));
     });
-    if (!ok) return;
+    if (!ok) return false;
     haptic("ok");
     S.lockCache = null;
     await reloadTopPage();
     if (!S.lockCache) api("/locks").then((d) => { S.lockCache = d; }).catch(() => {});
+    return sure;
   }
 
   function rightsData() {
     const page = currentPage();
     if (page && page.id === "rights" && page.data) return page.data;
-    return S.rights && S.rights !== "error" ? S.rights : null;
+    return S.rights && S.rights !== "error" && S.rights !== "unseeded" ? S.rights : null;
+  }
+
+  function takeRights(d) {
+    if (!d || !Array.isArray(d.rights)) return false;
+    S.rights = d;
+    const page = currentPage();
+    if (page && page.id === "rights") page.data = d;
+    return true;
+  }
+
+  async function setGroupLock(on, opts) {
+    return guarded("group-lock", async () => {
+      S.lockBusy = on ? "closing" : "opening";
+      redraw();
+      let d = null;
+      const ok = await write(async () => {
+        d = await api("/rights/lock", { method: "POST", body: { on } });
+      });
+      S.lockBusy = null;
+      const was = groupState();
+      const sure = ok && !unsure(d) && takeRights(d);
+      if (ok && !sure) {
+        if (d && d.pending) toast("ثبت شد؛ کمی بعد در تلگرام اعمال می شود.", "warn");
+        await loadRights();
+        const page = currentPage();
+        if (page && page.id === "rights") await loadPage(page);
+      }
+      redraw();
+      if (!sure) return false;
+      haptic("ok");
+      const now = groupState();
+      if (!(opts && opts.quiet)) {
+        const text = on ? "گروه بسته شد؛ فقط ادمین ها می توانند پیام بدهند." : now && now.closed ? "قفل گروه برداشته شد؛ گروه هنوز " + groupStateText(now) + "." : "گروه باز شد.";
+        const undoable = on || (was && was.manual && !was.until);
+        toast(text, "ok", undoable ? { label: "برگرداندن", run: () => setGroupLock(!on, { quiet: true }) } : null);
+      }
+      return true;
+    });
   }
 
   async function setAllRights(open) {
     const data = rightsData();
     if (!data) return;
-    const targets = data.rights.filter((r) => r.open !== open);
-    let queued = false;
-    for (const r of targets) {
-      let d = null;
-      const ok = await write(async () => {
-        d = await api("/rights/" + encodeURIComponent(r.key) + "/toggle", { method: "POST" });
-      });
-      if (!ok) break;
-      if (d && d.accepted) queued = true;
-    }
-    haptic("ok");
-    if (queued) toast("ثبت شد؛ کمی بعد در تلگرام اعمال می شود.", "warn");
-    else toast(open ? "گروه باز شد." : "گروه بسته شد.", "ok");
-    await loadRights();
-    const page = currentPage();
-    if (page && page.id === "rights") await loadPage(page);
-    else render();
+    return guarded("rights-all", async () => {
+      let state = data.rights;
+      const total = state.filter((r) => r.open !== open).length;
+      let done = 0;
+      let queued = false;
+      let failed = false;
+      S.rightsBusy = true;
+      render();
+      for (let i = 0; i < 32; i++) {
+        const r = state.find((x) => x.open !== open);
+        if (!r) break;
+        let d = null;
+        const ok = await write(async () => {
+          d = await api("/rights/" + encodeURIComponent(r.key) + "/toggle", { method: "POST" });
+        });
+        if (!ok) {
+          failed = true;
+          break;
+        }
+        done++;
+        if (d && Array.isArray(d.rights)) state = d.rights;
+        else {
+          queued = true;
+          break;
+        }
+      }
+      S.rightsBusy = false;
+      await loadRights();
+      const page = currentPage();
+      if (page && page.id === "rights") await loadPage(page);
+      else render();
+      if (failed && !done) return;
+      haptic(failed ? "warn" : "ok");
+      if (failed) toast(fa(done) + " از " + fa(total) + " دسترسی " + (open ? "باز" : "بسته") + " شد؛ بقیه انجام نشد.", "warn");
+      else if (queued) toast("ثبت شد؛ کمی بعد در تلگرام اعمال می شود.", "warn");
+      else toast(open ? "همه دسترسی ها باز شد." : "همه دسترسی ها بسته شد.", "ok");
+    });
   }
 
   async function powerFeature(fid) {
@@ -2600,28 +3271,36 @@
     if (!f || !f.enabled) return;
     return guarded("power:" + fid, async () => {
       const wasOn = sectionEnabled(f.enabled);
+      const restore = f.onAction();
+      let sure = false;
       const ok = await write(async () => {
         const d = wasOn
           ? await api(f.off, { method: "POST" })
-          : await api("/settings/apply", { method: "POST", body: { action: f.onAction() } });
-        await takeDash(d);
+          : await api("/settings/apply", { method: "POST", body: { action: restore } });
+        sure = await takeDash(d);
       });
+      if (fid === "ng") loadRights();
       redraw();
       if (!ok) return;
       haptic("sel");
-      toast(f.title + (wasOn ? " خاموش شد" : " روشن شد"), "ok", { label: "برگرداندن", run: () => powerFeature(fid) });
+      const undo = wasOn ? () => applySetting(restore, { quiet: true }) : () => powerFeature(fid);
+      if (sure) toast(f.title + (wasOn ? " خاموش شد" : " روشن شد"), "ok", { label: "برگرداندن", run: undo });
     });
   }
 
   async function removeEntry(kind, key) {
     const page = currentPage();
     const entry = page && page.data && page.data.entries ? page.data.entries.find((e) => e.key === key) : null;
-    const ok = await write(() => api("/lists/" + kind + "/" + encodeURIComponent(key), { method: "DELETE" }));
+    let d = null;
     S.pending = null;
+    const ok = await write(async () => {
+      d = await api("/lists/" + kind + "/" + encodeURIComponent(key), { method: "DELETE" });
+    });
     if (!ok) {
       render();
       return;
     }
+    if (unsure(d)) return reloadTopPage();
     haptic();
     if (kind === "imgf") {
       toast("موضوع حذف شد.", "ok");
@@ -2629,14 +3308,15 @@
     }
     if (page && page.data) {
       page.data.entries = page.data.entries.filter((e) => e.key !== key);
-      if (S.lists) S.lists[kind] = page.data;
+      if (S.lists && !page.remoteQ) S.lists[kind] = page.data;
     }
     render();
     if (kind === "filter" && entry) {
       const word = decode(entry.name);
       toast("«" + word + "» حذف شد", "ok", { label: "برگرداندن", run: () => addFilterWord(word) });
     } else {
-      toast("حذف شد.", "ok");
+      const who = entry ? "«" + decode(entry.name) + "» " : "";
+      toast(kind === "ban" ? who + "از بن درآمد." : kind === "mute" ? "سکوت " + who + "برداشته شد." : who + "از لیست حذف شد.", "ok");
     }
   }
 
@@ -2649,10 +3329,151 @@
     });
     if (!ok) return false;
     haptic("ok");
+    S.dropTyped = true;
     if (d && d.accepted && d.error) toast(d.error, "warn");
     else toast(d && d.added === false ? "«" + word + "» از قبل در لیست بود." : "«" + word + "» اضافه شد.", "ok");
     await reloadTopPage();
     return true;
+  }
+
+  function refreshLocks() {
+    const chat = S.chat;
+    api("/locks").then((d) => {
+      if (S.chat !== chat) return;
+      S.lockCache = d;
+      const page = currentPage();
+      if (page && page.id === "locks" && page.data) {
+        d.botOptions = page.data.botOptions;
+        d.allowedBots = page.data.allowedBots;
+        page.data = d;
+      }
+      redraw();
+    }).catch(() => {});
+  }
+
+  const TEXT_LOCKS = ["persian", "english"];
+
+  async function setSlow(seconds) {
+    const ok = await write(async () => {
+      const d = await api("/slow", { method: "POST", body: { seconds } });
+      if (d && typeof d.seconds === "number") {
+        S.slow = d;
+        if (S.sheet && S.sheet.id === "sl") S.sheet.data = d;
+      }
+    });
+    if (ok) haptic("sel");
+    redraw();
+  }
+
+  async function allowBot(username) {
+    const page = currentPage();
+    let d = null;
+    const ok = await write(async () => {
+      d = await api("/allowed-bots", { method: "POST", body: { username } });
+      if (page && page.data && d && d.bots) page.data.allowedBots = d;
+    });
+    if (ok) {
+      if (!unsure(d)) {
+        haptic("ok");
+        S.dropTyped = true;
+        toast(username + " مجاز شد.", "ok");
+      }
+      render();
+    }
+  }
+
+  async function addVoiceWord(word) {
+    const page = currentPage();
+    const ok = await write(async () => {
+      const d = await api("/voice/words", { method: "POST", body: { word } });
+      if (page && page.id === "voice" && d && d.words) page.data = d;
+    });
+    if (ok) {
+      haptic("ok");
+      S.dropTyped = true;
+      render();
+    }
+    return ok;
+  }
+
+  async function addAnswer(trigger, text) {
+    return guarded("answer-add", async () => {
+      let d = null;
+      const ok = await write(async () => {
+        d = await api("/answers", { method: "POST", body: { trigger, text } });
+      });
+      if (!ok) return;
+      haptic("ok");
+      S.dropTyped = true;
+      toast(d && d.accepted && d.error ? d.error : "پاسخ «" + decode((d && d.trigger) || trigger.trim()) + "» ذخیره شد.", d && d.accepted ? "warn" : "ok");
+      const t = document.getElementById("answer-trigger");
+      const b = document.getElementById("answer-text");
+      if (t) t.value = "";
+      if (b) b.value = "";
+      await reloadTopPage();
+    });
+  }
+
+  async function toggleImageFilter(key, el) {
+    const page = currentPage();
+    const entry = page && page.data ? page.data.entries.find((x) => x.key === key) : null;
+    const wasLive = entry ? !entry.name.endsWith(" ~") : null;
+    const label = entry ? decode(wasLive ? entry.name : entry.name.slice(0, -2)) : "";
+    return guarded("imgf:" + key, async () => {
+      if (el) optimistic(el);
+      const ok = await write(() => api("/filters/" + encodeURIComponent(key) + "/toggle", { method: "POST" }));
+      await reloadTopPage();
+      if (!ok || wasLive == null) return;
+      haptic("sel");
+      toast("«" + label + "» " + (wasLive ? "فقط بررسی می کند؛ عکسی حذف نمی شود." : "فعال شد؛ عکس های نزدیک به آن حذف می شود."), "ok",
+        { label: "برگرداندن", run: () => toggleImageFilter(key) });
+    });
+  }
+
+  async function loadCases(page, status, user) {
+    return guarded("cases-load", async () => {
+      S.casesLoading = status;
+      render();
+      await write(async () => {
+        const data = await api("/cases?status=" + status + (user ? "&user_id=" + encodeURIComponent(user) : ""));
+        data.status = status;
+        data.user = user || "";
+        page.data = data;
+      });
+      S.casesLoading = null;
+      page.listStale = false;
+      render();
+    });
+  }
+
+  function searchCases(page, value) {
+    const user = String(value || "").trim().replace(/[۰-۹]/g, (d) => String(FA_DIGITS.indexOf(d)));
+    if (user && !/^-?\d+$/.test(user)) return toast("شناسه کاربر فقط عدد است، مثل 123456789.", "warn");
+    if (!page || !page.data) return;
+    return loadCases(page, page.data.status || "open", user);
+  }
+
+  function leaveTo(next) {
+    if (S.confirm && S.confirm.busy) return;
+    flushField();
+    const page = S.stack.find((p) => DOCS[p.id] && docDirty(p));
+    if (page) {
+      S.palette = null;
+      S.confirm = {
+        title: "تغییرات ذخیره نشده کنار گذاشته شود؟",
+        sub: "متنی که نوشته اید ذخیره نشده است.",
+        label: "کنار گذاشتن",
+        quiet: true,
+        run: async () => {
+          page.draft = page.saved;
+          setClosingConfirmation(false);
+          next();
+        },
+      };
+      render();
+      return;
+    }
+    next();
   }
 
   function optimistic(el) {
@@ -2701,6 +3522,15 @@
     let el;
 
     if (hit("[data-reboot]")) return start();
+    if ((el = hit("[data-site-theme]"))) {
+      store(THEME_KEY, el.dataset.siteTheme);
+      applyTheme();
+      const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+      el.dataset.siteTheme = next;
+      el.innerHTML = icon(next === "light" ? "sun" : "moon", 18);
+      return;
+    }
+    if ((el = hit("[data-open-link]"))) return openLink(el.dataset.openLink);
     if (hit("[data-retry-chat]") && S.chat != null) return loadChat(S.chat);
 
     if (S.palette) {
@@ -2710,6 +3540,10 @@
 
     if ((el = hit("[data-apply]"))) {
       if (S.busy.has("set:" + el.dataset.apply)) return;
+      if (el.dataset.apply === "apc:0" && setting("apc") && setting("apc").value !== 0) {
+        S.confirm = confirmFor("apc-all");
+        return render();
+      }
       optimistic(el);
       await applySetting(el.dataset.apply);
       if (S.palette) drawPalette();
@@ -2725,7 +3559,10 @@
       return toggleLock(el.dataset.lock);
     }
 
-    if ((el = hit("[data-tab]"))) return goTab(el.dataset.tab);
+    if ((el = hit("[data-tab]"))) {
+      const id = el.dataset.tab;
+      return leaveTo(() => goTab(id));
+    }
     if (hit("[data-back]")) return back();
     if (hit("[data-close]")) {
       if (S.sheet) closeSheet();
@@ -2736,10 +3573,11 @@
     if (hit("[data-picker]")) return openPicker();
     if ((el = hit("[data-pick-group]"))) {
       const id = Number(el.dataset.pickGroup);
-      S.sheet = null;
-      if (id !== S.chat) loadChat(id);
-      else closeSheet();
-      return;
+      if (id === S.chat) return closeSheet();
+      return leaveTo(() => {
+        S.sheet = null;
+        loadChat(id);
+      });
     }
     if ((el = hit("[data-push-root]"))) return pushRoot(el.dataset.pushRoot);
     if ((el = hit("[data-push]"))) return pushPage(el.dataset.push);
@@ -2768,6 +3606,12 @@
       if (S.health && S.health !== "error") toast(S.health.issues.length ? fa(S.health.issues.length) + " مورد هنوز مانده." : "همه چیز درست است.", S.health.issues.length ? "warn" : "ok");
       return;
     }
+    if (hit("[data-reload-cases]")) {
+      S.openCases = null;
+      render();
+      api("/cases?status=open&limit=5").then((d) => { S.openCases = d; }, (e) => { S.openCases = e && e.status === 403 ? "denied" : "error"; }).then(() => rerenderIfIdle());
+      return;
+    }
     if (hit("[data-reload-activity]")) {
       S.activity = null;
       render();
@@ -2778,6 +3622,15 @@
       S.admins = null;
       render();
       return loadAdmins();
+    }
+    if (hit("[data-sheet-retry]")) {
+      const f = S.sheet && (feature(S.sheet.id) || EXTRA_SHEETS[S.sheet.id]);
+      if (f && f.load) {
+        S.sheet.data = null;
+        drawSheet();
+        loadSheetData(f.load);
+      }
+      return;
     }
     if (hit("[data-retry-page]")) {
       const page = currentPage();
@@ -2824,6 +3677,10 @@
       const grp = lockGroups(page.data.plain).find(([title]) => title === el.dataset.lockGroup);
       if (!grp) return;
       const on = el.dataset.on === "1";
+      if (on && grp[1].some((l) => !l.on && TEXT_LOCKS.includes(l.key))) {
+        S.confirm = confirmFor("lock-group:" + grp[0]);
+        return render();
+      }
       return setLocks(grp[1].filter((l) => l.on !== on).map((l) => l.key), on);
     }
     if ((el = hit("[data-theme-set]"))) {
@@ -2844,63 +3701,58 @@
       return applyPolicy({ action: "reset" });
     }
     if ((el = hit("[data-tmed-kind]"))) {
+      const path = "/tempmedia/" + encodeURIComponent(el.dataset.tmedKind) + "/toggle";
+      if (S.busy.has(path)) return;
       optimistic(el);
-      return sheetWrite("/tempmedia/" + encodeURIComponent(el.dataset.tmedKind) + "/toggle");
+      return guarded(path, () => sheetWrite(path));
     }
     if ((el = hit("[data-cause]"))) {
+      const path = "/strict-causes/" + encodeURIComponent(el.dataset.cause) + "/toggle";
+      if (S.busy.has(path)) return;
       optimistic(el);
-      return sheetWrite("/strict-causes/" + encodeURIComponent(el.dataset.cause) + "/toggle");
+      return guarded(path, () => sheetWrite(path));
     }
     if ((el = hit("[data-cap]"))) {
+      const path = "/limits/" + encodeURIComponent(el.dataset.cap) + "/toggle";
+      if (S.busy.has(path)) return;
       optimistic(el);
-      return sheetWrite("/limits/" + encodeURIComponent(el.dataset.cap) + "/toggle");
+      return guarded(path, () => sheetWrite(path));
     }
     if ((el = hit("[data-slow]"))) {
       const seconds = Number(el.dataset.slow);
+      const before = S.slow && S.slow !== "error" ? S.slow.seconds : null;
+      if (seconds === before) return;
       optimistic(el);
       const ok = await sheetWrite("/slow", { body: { seconds } }, (d) => { S.slow = d; });
-      if (ok) toast(seconds ? "اسلوموشن: " + slowLabel(seconds) : "اسلوموشن خاموش شد.", "ok");
+      if (ok) {
+        const undo = before == null ? null : { label: "برگرداندن", run: () => setSlow(before) };
+        toast(seconds ? "اسلوموشن: " + slowLabel(seconds) : "اسلوموشن خاموش شد.", "ok", undo);
+      }
       return;
     }
     if (hit("[data-report-test]")) {
-      el = hit("[data-report-test]");
-      el.disabled = true;
-      const ok = await write(() => api("/report/test", { method: "POST" }));
-      el.disabled = false;
-      if (ok) {
-        haptic("ok");
-        toast("گزارش آزمایشی در گروه فرستاده شد.", "ok");
-      }
-      return;
+      S.confirm = confirmFor("report-test");
+      return render();
     }
     if (hit("[data-allow-bot]")) {
       const input = document.getElementById("allow-bot");
       const username = input.value.trim();
       if (!username) return input.focus();
-      const page = currentPage();
-      let d = null;
-      const ok = await write(async () => {
-        d = await api("/allowed-bots", { method: "POST", body: { username } });
-        if (page && page.data && d && d.bots) page.data.allowedBots = d;
-      });
-      if (ok) {
-        if (!unsure(d)) {
-          haptic("ok");
-          toast(username + " مجاز شد.", "ok");
-        }
-        render();
-      }
-      return;
+      return allowBot(username);
     }
     if ((el = hit("[data-disallow-bot]"))) {
       const page = currentPage();
+      const id = el.dataset.disallowBot;
+      const was = page && page.data && page.data.allowedBots ? page.data.allowedBots.bots.find((b) => String(b.id) === id) : null;
+      const name = was && was.name ? decode(was.name) : "";
       const ok = await write(async () => {
-        const d = await api("/allowed-bots/" + encodeURIComponent(el.dataset.disallowBot), { method: "DELETE" });
+        const d = await api("/allowed-bots/" + encodeURIComponent(id), { method: "DELETE" });
         if (page && page.data && d && d.bots) page.data.allowedBots = d;
       });
       if (ok) {
         haptic();
-        toast("از ربات های مجاز حذف شد.", "ok");
+        const back = /^@?[A-Za-z0-9_]{5,}$/.test(name) ? { label: "برگرداندن", run: () => allowBot(name) } : null;
+        toast((name ? name + " " : "") + "از ربات های مجاز حذف شد.", "ok", back);
         render();
       }
       return;
@@ -2928,8 +3780,7 @@
       return;
     }
     if ((el = hit("[data-locks-all]"))) {
-      if (el.dataset.locksAll === "1") return setAllLocks(true);
-      S.confirm = confirmFor("locks-off");
+      S.confirm = confirmFor(el.dataset.locksAll === "1" ? "locks-on" : "locks-off");
       render();
       return;
     }
@@ -2955,7 +3806,15 @@
       });
     }
     if ((el = hit("[data-rights-all]"))) {
+      if (S.rightsBusy) return;
       if (el.dataset.rightsAll === "1") return setAllRights(true);
+      S.confirm = confirmFor("rights-close-all");
+      render();
+      return;
+    }
+    if ((el = hit("[data-group-lock]"))) {
+      if (S.lockBusy) return;
+      if (el.dataset.groupLock === "0") return setGroupLock(false);
       S.confirm = confirmFor("rights-close");
       render();
       return;
@@ -2996,6 +3855,7 @@
           if (page) loadPage(page);
         } else {
           haptic("ok");
+          S.dropTyped = true;
           toast("کانال لاگ وصل شد.", "ok");
         }
         loadHealth();
@@ -3009,24 +3869,26 @@
       return;
     }
     if ((el = hit("[data-remove-admin]"))) {
-      S.confirm = confirmAdmin(el.dataset.removeAdmin, el.dataset.name);
+      S.confirm = confirmAdmin(el.dataset.removeAdmin);
       render();
       return;
     }
     if (hit("[data-confirm-cancel]")) {
+      if (S.confirm && S.confirm.busy) return;
       S.confirm = null;
       render();
       return;
     }
     if (hit("[data-confirm-run]")) {
       const c = S.confirm;
-      if (!c) return;
-      S.confirm = null;
+      if (!c || c.busy) return;
+      c.busy = true;
       render();
       let d = null;
       const ok = await write(async () => {
         d = await c.run();
       });
+      if (S.confirm === c) S.confirm = null;
       if (ok) {
         if (unsure(d)) {
           render();
@@ -3036,8 +3898,8 @@
           haptic("ok");
           toast("انجام شد.", "ok");
         }
-        render();
       }
+      render();
       return;
     }
     if ((el = hit("[data-remove]"))) {
@@ -3057,7 +3919,7 @@
       }, 3000);
       return;
     }
-    if (S.pending && !hit("[data-remove]")) {
+    if (S.pending && !hit("[data-remove], [data-voice-remove]")) {
       S.pending = null;
       render();
     }
@@ -3078,16 +3940,17 @@
       return;
     }
     if (hit("[data-doc-revert]")) {
-      const page = currentPage();
-      if (!page) return;
-      page.draft = page.saved;
-      render();
-      return;
+      S.confirm = confirmFor("doc-revert");
+      return render();
     }
     if (hit("[data-doc-save]")) {
       const page = currentPage();
       if (!page || !DOCS[page.id]) return;
       const text = page.draft || "";
+      if (!text.trim() && page.data && (page.data.text || page.data.has_media)) {
+        S.confirm = confirmFor(DOCS[page.id].off);
+        return render();
+      }
       el = hit("[data-doc-save]");
       el.disabled = true;
       let d = null;
@@ -3098,6 +3961,7 @@
       if (ok && !unsure(d)) {
         haptic("ok");
         page.saved = text;
+        page.draft = text;
         setClosingConfirmation(false);
         toast("ذخیره شد.", "ok");
         reloadTopPage();
@@ -3105,11 +3969,7 @@
       return;
     }
     if ((el = hit("[data-filter-toggle]"))) {
-      optimistic(el);
-      const ok = await write(() => api("/filters/" + encodeURIComponent(el.dataset.filterToggle) + "/toggle", { method: "POST" }));
-      if (ok) haptic("sel");
-      reloadTopPage();
-      return;
+      return toggleImageFilter(el.dataset.filterToggle, el);
     }
     if (hit("[data-filter-add]")) {
       const input = document.getElementById("filter-phrase");
@@ -3124,7 +3984,8 @@
       el.disabled = false;
       if (ok) {
         haptic("ok");
-        toast((reply && reply.notice) || "موضوع اضافه شد؛ برای حذف کردن، کلیدش را روشن کنید.", "ok");
+        toast((reply && reply.notice) || "«" + phrase + "» اضافه شد و فعلا فقط بررسی می کند؛ برای حذف عکس ها، کلیدش را روشن کنید.", "ok");
+        input.value = "";
         reloadTopPage();
       }
       return;
@@ -3139,18 +4000,32 @@
       const body = document.getElementById("answer-text");
       if (!trig.value.trim()) return trig.focus();
       if (!body.value.trim()) return body.focus();
-      el = hit("[data-answer-add]");
-      el.disabled = true;
-      let d = null;
-      const ok = await write(async () => {
-        d = await api("/answers", { method: "POST", body: { trigger: trig.value, text: body.value } });
-      });
-      el.disabled = false;
-      if (ok) {
-        haptic("ok");
-        toast(d && d.accepted && d.error ? d.error : "پاسخ «" + decode((d && d.trigger) || trig.value.trim()) + "» ذخیره شد.", d && d.accepted ? "warn" : "ok");
-        reloadTopPage();
+      const trigger = trig.value;
+      const text = body.value;
+      const page = currentPage();
+      const same = page && page.data ? page.data.entries.find((x) => fold(decode(x.name)) === fold(trigger)) : null;
+      if (same) {
+        S.confirm = {
+          title: "«" + decode(same.name) + "» از قبل پاسخ دارد؛ جایگزین شود؟",
+          sub: (same.media ? "پاسخ قبلی و رسانه همراهش با این متن عوض می شود." : "پاسخ قبلی با این متن عوض می شود.") + (same.formatted ? " قالب بندی آن (پررنگ، لینک) هم از بین می رود؛ برای نگه داشتنش از داخل گروه ویرایش کنید." : ""),
+          label: "جایگزین کن",
+          quiet: true,
+          run: () => addAnswer(trigger, text),
+        };
+        return render();
       }
+      return addAnswer(trigger, text);
+    }
+    if ((el = hit("[data-answer-edit]"))) {
+      const page = currentPage();
+      const entry = page && page.data ? page.data.entries.find((x) => x.key === el.dataset.answerEdit) : null;
+      const trig = document.getElementById("answer-trigger");
+      const body = document.getElementById("answer-text");
+      if (!entry || !trig || !body) return;
+      trig.value = decode(entry.name);
+      body.value = decode(entry.text != null ? entry.text : entry.preview || "");
+      body.focus();
+      body.scrollIntoView({ block: "center", behavior: "smooth" });
       return;
     }
     if ((el = hit("[data-word-exact]"))) {
@@ -3168,28 +4043,40 @@
       const input = document.getElementById("voice-word");
       const word = input.value.trim();
       if (!word) return input.focus();
-      const page = currentPage();
-      const ok = await write(async () => {
-        const d = await api("/voice/words", { method: "POST", body: { word } });
-        if (page && d && d.words) page.data = d;
-      });
-      if (ok) {
-        haptic("ok");
-        render();
+      if (await addVoiceWord(word)) {
         const again = document.getElementById("voice-word");
         if (again) again.focus();
       }
       return;
     }
     if ((el = hit("[data-voice-remove]"))) {
-      const page = currentPage();
-      const ok = await write(async () => {
-        const d = await api("/voice/words/" + encodeURIComponent(el.dataset.voiceRemove), { method: "DELETE" });
-        if (page && d && d.words) page.data = d;
-      });
-      if (ok) {
+      const key = el.dataset.voiceRemove;
+      const tag = "voice:" + key;
+      if (S.pending !== tag) {
+        S.pending = tag;
         haptic();
         render();
+        clearTimeout(onClick.pendingTimer);
+        onClick.pendingTimer = setTimeout(() => {
+          if (S.pending === tag) {
+            S.pending = null;
+            render();
+          }
+        }, 3000);
+        return;
+      }
+      S.pending = null;
+      const page = currentPage();
+      const was = page && page.data ? page.data.words.find((w) => w.key === key) : null;
+      const ok = await write(async () => {
+        const d = await api("/voice/words/" + encodeURIComponent(key), { method: "DELETE" });
+        if (page && d && d.words) page.data = d;
+      });
+      render();
+      if (ok) {
+        haptic();
+        const word = was ? decode(was.word) : "";
+        toast(word ? "«" + word + "» حذف شد" : "حذف شد.", "ok", word ? { label: "برگرداندن", run: () => addVoiceWord(word) } : null);
       }
       return;
     }
@@ -3217,51 +4104,46 @@
     }
     if ((el = hit("[data-case-filter]"))) {
       const page = currentPage();
-      if (!page) return;
-      const status = el.dataset.caseFilter;
-      const user = page.data && page.data.user;
-      await write(async () => {
-        const data = await api("/cases?status=" + status + (user ? "&user_id=" + encodeURIComponent(user) : ""));
-        data.status = status;
-        data.user = user || "";
-        page.data = data;
-      });
-      render();
+      if (!page || !page.data) return;
+      return loadCases(page, el.dataset.caseFilter, page.data.user || "");
+    }
+    if (hit("[data-case-clear]")) {
+      const page = currentPage();
+      if (page && page.data) loadCases(page, page.data.status || "open", "");
+      return;
+    }
+    if (hit("[data-case-search]")) {
+      const page = currentPage();
+      const input = document.getElementById("case-user");
+      if (page && input) searchCases(page, input.value);
       return;
     }
     if ((el = hit("[data-case-more]"))) {
       const page = currentPage();
       if (!page || !page.data) return;
-      const status = page.data.status || "open";
-      const user = page.data.user ? "&user_id=" + encodeURIComponent(page.data.user) : "";
-      await write(async () => {
-        const data = await api("/cases?status=" + status + "&before_id=" + el.dataset.caseMore + user);
-        page.data.cases = page.data.cases.concat(data.cases || []);
-        page.data.has_more = data.has_more;
+      const before = el.dataset.caseMore;
+      return guarded("cases-more", async () => {
+        const status = page.data.status || "open";
+        const user = page.data.user ? "&user_id=" + encodeURIComponent(page.data.user) : "";
+        S.casesMore = true;
+        render();
+        await write(async () => {
+          const data = await api("/cases?status=" + status + "&before_id=" + before + user);
+          const seen = new Set(page.data.cases.map((c) => c.id));
+          page.data.cases = page.data.cases.concat((data.cases || []).filter((c) => !seen.has(c.id)));
+          page.data.has_more = data.has_more;
+        });
+        S.casesMore = false;
+        render();
       });
-      render();
-      return;
     }
     if ((el = hit("[data-case-action]"))) {
-      const page = currentPage();
-      if (!page || !page.data || !page.data.detail) return;
-      const id = page.data.detail.id;
-      const note = ((document.getElementById("case-note") || {}).value || "").trim();
       const action = el.dataset.caseAction;
-      const path = action === "reverse" ? "/cases/" + id + "/reverse" : "/cases/" + id + "/resolve";
-      const body = action === "reverse" ? (note ? { note } : {}) : (note ? { action, note } : { action });
-      const ok = await write(async () => {
-        const d = await api(path, { method: "POST", body });
-        page.data.detail = await api("/cases/" + id);
-        toast((d && d.message) || "پرونده به روز شد.", "ok");
-      });
-      if (ok) {
-        haptic("ok");
-        render();
-        api("/cases?status=open&limit=5").then((d) => { S.openCases = d; }).catch(() => {});
-      }
-      return;
+      if (action === "none") return runCaseAction("none");
+      S.confirm = confirmFor(action === "reverse" ? "case-reverse" : "case-delete");
+      return render();
     }
+    if ((el = hit("[data-case-open]"))) return openLink(el.dataset.caseOpen);
     if (hit("[data-case-note]")) {
       const page = currentPage();
       if (!page || !page.data || !page.data.detail) return;
@@ -3269,28 +4151,36 @@
       const note = input.value.trim();
       if (!note) return input.focus();
       const id = page.data.detail.id;
-      const ok = await write(async () => {
-        await api("/cases/" + id + "/notes", { method: "POST", body: { note } });
-        page.data.detail = await api("/cases/" + id);
+      return guarded("case-note:" + id, async () => {
+        const ok = await write(async () => {
+          await api("/cases/" + id + "/notes", { method: "POST", body: { note } });
+          page.data.detail = await api("/cases/" + id);
+        });
+        if (ok) {
+          toast("یادداشت ثبت شد.", "ok");
+          S.dropTyped = true;
+          render();
+        }
       });
-      if (ok) {
-        toast("یادداشت ثبت شد.", "ok");
-        render();
-      }
-      return;
     }
     if (hit("[data-joingate-save]")) {
-      const channel = document.getElementById("join-gate-input").value.trim();
-      if (!channel) return document.getElementById("join-gate-input").focus();
+      const input = document.getElementById("join-gate-input");
+      const channel = input.value.trim();
+      if (!channel) return input.focus();
+      el = hit("[data-joingate-save]");
+      el.disabled = true;
       let d = null;
       const ok = await write(async () => {
         d = await api("/join-gate", { method: "POST", body: { channel } });
       });
+      el.disabled = false;
       if (ok) {
         if (!unsure(d)) {
           haptic("ok");
-          toast("ذخیره شد.", "ok");
+          S.dropTyped = true;
+          toast("عضویت اجباری روشن شد؛ تا عضو کانال نشوند پیام نمی دهند.", "ok");
         }
+        S.joinGate = null;
         reloadTopPage();
       }
       return;
@@ -3302,6 +4192,7 @@
       });
       if (ok) {
         if (!unsure(d)) toast("عضویت اجباری خاموش شد.", "ok");
+        S.joinGate = null;
         reloadTopPage();
       }
       return;
@@ -3309,10 +4200,12 @@
   }
 
   function quick(what) {
-    if (what !== "close") return;
-    const closed = groupClosed();
-    if (closed == null) return pushPage("rights");
-    if (closed) return setAllRights(true);
+    if (what !== "close" || S.lockBusy) return;
+    const g = groupState();
+    if (!g) return pushPage("rights");
+    if (g.manual || g.until) return setGroupLock(false);
+    if (g.night) return openSheet("ng");
+    if (g.allClosed) return pushPage("rights");
     S.confirm = confirmFor("rights-close");
     render();
   }
@@ -3325,11 +4218,6 @@
 
   function onKeydown(e) {
     const t = e.target;
-    if ((e.key === "Enter" || e.key === " ") && t.matches && t.matches(".row.tap[data-open]")) {
-      e.preventDefault();
-      openSheet(t.dataset.open);
-      return;
-    }
     if (t.id === "palette-input") {
       const results = (S.palette && S.palette.results) || [];
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -3369,24 +4257,14 @@
       if (save) save.click();
     }
     if (t.id === "case-user") {
-      const page = currentPage();
-      const user = t.value.trim();
-      if (!page || (user && !/^-?\d+$/.test(user))) {
-        if (user) toast("شناسه باید عدد باشد.", "warn");
-        return;
-      }
-      const status = page.data.status || "open";
-      api("/cases?status=" + status + (user ? "&user_id=" + encodeURIComponent(user) : "")).then((data) => {
-        data.status = status;
-        data.user = user;
-        page.data = data;
-        render();
-      }).catch(report);
+      e.preventDefault();
+      searchCases(currentPage(), t.value);
     }
   }
 
   function onGlobalKey(e) {
     const typing = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA");
+    if (!S.dash) return;
     if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
       e.preventDefault();
       if (S.palette) closePalette();
@@ -3407,7 +4285,11 @@
   }
 
   function onFocusOut(e) {
-    const num = e.target.closest && e.target.closest("[data-number-apply]");
+    commitField(e.target);
+  }
+
+  function commitField(target) {
+    const num = target && target.closest && target.closest("[data-number-apply]");
     if (num) {
       const value = num.value.trim();
       if (value === "" || value === num.dataset.value) return;
@@ -3419,15 +4301,26 @@
         num.value = num.defaultValue;
         return;
       }
+      num.dataset.value = String(n);
+      if (num.dataset.numberApply === "apc" && n === 0) {
+        S.confirm = confirmFor("apc-all");
+        return render();
+      }
       applySetting(num.dataset.numberApply + ":" + n);
       return;
     }
-    const clock = e.target.closest && e.target.closest("[data-clock-apply]");
+    const clock = target && target.closest && target.closest("[data-clock-apply]");
     if (!clock) return;
     const minutes = clockToMinutes(clock.value);
     if (minutes === null) return;
     if (String(minutes) === String(clock.dataset.clockValue)) return;
+    clock.dataset.clockValue = String(minutes);
     applySetting(clock.dataset.clockApply + ":" + minutes);
+  }
+
+  function flushField() {
+    const el = document.activeElement;
+    if (el && el.matches && el.matches("[data-number-apply], [data-clock-apply]")) commitField(el);
   }
 
   function onInput(e) {
@@ -3438,12 +4331,19 @@
       drawPalette();
     } else if (t.id === "feature-search") {
       S.featureQuery = t.value;
-      render();
+      const box = document.getElementById("feat-results");
+      if (box) box.innerHTML = featureResults();
+      if (t.value && !S.lockCache) api("/locks").then((d) => { S.lockCache = d; const b = document.getElementById("feat-results"); if (b) b.innerHTML = featureResults(); }).catch(() => {});
     } else if (t.id === "lock-search") {
       S.lockQuery = t.value;
       render();
     } else if (t.id === "list-search") {
       S.listQuery = t.value;
+      const page = currentPage();
+      const kind = page && page.id.startsWith("list:") ? page.id.slice(5) : null;
+      if ((kind === "ban" || kind === "mute") && page.data && (page.data.truncated || page.remoteQ)) {
+        return searchListRemote(page, kind, t.value);
+      }
       const q = fold(t.value);
       document.querySelectorAll("#main .list .row").forEach((row) => {
         const name = row.querySelector(".t");
@@ -3469,7 +4369,7 @@
     if (e.touches.length !== 1) return;
     const y = e.touches[0].clientY;
     const sheetEl = e.target.closest && e.target.closest("#sheet");
-    if (sheetEl && S.sheet && sheetEl.scrollTop <= 0 && !e.target.closest("input, textarea")) {
+    if (sheetEl && S.sheet && !WIDE.matches && sheetEl.scrollTop <= 0 && !e.target.closest("input, textarea")) {
       drag = { kind: "sheet", y, dy: 0, el: sheetEl };
       return;
     }
@@ -3531,7 +4431,11 @@
   }
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && S.dash && Date.now() - S.loadedAt > 60000) refreshAll(true);
+    if (document.visibilityState !== "visible" || !S.dash || Date.now() - S.loadedAt <= 60000) return;
+    const page = currentPage();
+    const typing = Array.from(app.querySelectorAll("#main input, #main textarea")).some((el) => el.value !== el.defaultValue && el.type !== "search" && el.type !== "time");
+    if (typing || S.confirm || S.sheet || (page && page.id === "cases" && page.data && page.data.detail) || (page && DOCS[page.id] && docDirty(page))) return;
+    refreshAll(true);
   });
   function onMedia(query, run) {
     if (query.addEventListener) query.addEventListener("change", run);

@@ -69,9 +69,16 @@ const LINKS: &[(&str, &str, Option<super::premium::Icon>)] = &[
 ];
 
 pub(super) struct ConfiguredLink {
+    name: &'static str,
     label: &'static str,
     url: String,
     icon: Option<super::premium::Icon>,
+}
+
+impl ConfiguredLink {
+    pub(super) fn named(&self) -> (&'static str, &str) {
+        (self.name, &self.url)
+    }
 }
 
 #[derive(Default)]
@@ -91,6 +98,7 @@ impl ConfiguredLinks {
             let url = normalize_link(&value)
                 .ok_or_else(|| format!("{name} is not a Telegram handle or HTTP(S) URL"))?;
             links.push(ConfiguredLink {
+                name,
                 label,
                 url,
                 icon: *icon,

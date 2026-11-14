@@ -191,6 +191,22 @@ pub async fn snapshot(ctx: &Ctx, chat: i64) -> Result<Option<RightsSnapshot>, De
     ctx.settings.default_rights(chat).await
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LockState {
+    pub manual: bool,
+    pub until: Option<i64>,
+    pub night: bool,
+}
+
+pub fn lock_state(snapshot: &RightsSnapshot, now: i64) -> LockState {
+    let minute = u16::try_from(now.rem_euclid(86_400) / 60).unwrap_or(0);
+    LockState {
+        manual: snapshot.manual_lock,
+        until: snapshot.timed_until.filter(|until| *until > now),
+        night: snapshot.night.is_some_and(|window| window.contains(minute)),
+    }
+}
+
 fn build(effective: EffectiveRights) -> tl::types::ChatBannedRights {
     let shut = |bit| effective.force_all || effective.base.contains(bit);
     let (photos, videos, rounds) = (shut(1), shut(2), shut(3));
@@ -947,6 +963,63 @@ mod tests {
         assert!(!rights.view_messages);
         assert!(!rights.change_info && !rights.invite_users && !rights.pin_messages);
         assert_eq!(rights.until_date, 1_800);
+    }
+
+    #[test]
+    fn lock_state_names_exactly_what_forces_the_group_closed() {
+        let snapshot = |manual_lock, timed_until, night| RightsSnapshot {
+            chat: -100,
+            base: RightsMask::empty(),
+            seeded: true,
+            manual_lock,
+            timed_until,
+            night,
+            intent_revision: 0,
+            applied_revision: 0,
+            applied_fingerprint: None,
+            remote_unknown: false,
+            attempts: 0,
+            last_error: None,
+            retry_at: 0,
+            next_transition_at: None,
+        };
+        let day = 20_000 * 86_400_i64;
+        let night = crate::state::NightWindow::new(23 * 60, 7 * 60);
+        for now in [day + 3 * 3_600, day + 12 * 3_600, day + 23 * 3_600 + 30 * 60] {
+            for manual in [false, true] {
+                for timed in [None, Some(now - 60), Some(now), Some(now + 600)] {
+                    for window in [None, night] {
+                        let snapshot = snapshot(manual, timed, window);
+                        let state = lock_state(&snapshot, now);
+                        assert_eq!(
+                            state.manual || state.until.is_some() || state.night,
+                            snapshot.effective_at(now).force_all,
+                            "manual {manual}, timed {timed:?}, night {window:?}, at {now}"
+                        );
+                    }
+                }
+            }
+        }
+        let late = day + 23 * 3_600 + 30 * 60;
+        let state = lock_state(&snapshot(false, Some(late + 600), night), late);
+        assert_eq!(
+            state,
+            LockState {
+                manual: false,
+                until: Some(late + 600),
+                night: true
+            }
+        );
+        let noon = day + 12 * 3_600;
+        let state = lock_state(&snapshot(true, Some(noon - 1), night), noon);
+        assert_eq!(
+            state,
+            LockState {
+                manual: true,
+                until: None,
+                night: false
+            }
+        );
     }
 
     #[test]

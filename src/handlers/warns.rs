@@ -274,6 +274,103 @@ pub async fn handle(ctx: &Ctx, message: &Message, view: &super::locks::View<'_>)
     true
 }
 
+pub enum Given {
+    Counted { count: u32, limit: u32 },
+    Punished { limit: u32, ban: bool },
+    Unpunished { limit: u32, told: String },
+}
+
+pub async fn give(
+    ctx: &Ctx,
+    chat_ref: PeerRef,
+    user: i64,
+    name: &str,
+    actor: Option<(i64, &str)>,
+) -> Result<Given, &'static str> {
+    let Some(chat) = chat_ref.id.bot_api_dialog_id() else {
+        return Err("گروه در دسترس نیست.");
+    };
+    let Some(target) = PeerId::user(user).map(PeerId::to_ambient_ref) else {
+        return Err("کاربر پیدا نشد.");
+    };
+    let limit = limit(ctx, chat);
+    let penalty = if bans(ctx, chat) {
+        WarningPenalty::Ban
+    } else {
+        WarningPenalty::Mute
+    };
+    let increment = match ctx
+        .settings
+        .increment_warning(chat, user, limit, penalty)
+        .await
+    {
+        Ok(increment) => increment,
+        Err(error) => {
+            eprintln!("warns: {chat}/{user}: could not store warning: {error}");
+            return Err("اخطار ذخیره نشد؛ دوباره تلاش کنید.");
+        }
+    };
+    if increment.added {
+        ctx.bump(chat, super::stats::WARNED);
+        super::log::write(
+            ctx,
+            chat,
+            "log_warn",
+            super::log::Entry {
+                title: "اخطار",
+                target: Some((user, name)),
+                actor,
+                reason: Some("گزارش عضو"),
+                extra: vec![("شماره", format!("{} از {limit}", increment.count))],
+            },
+        )
+        .await;
+    }
+    if increment.pending.is_none() {
+        return Ok(Given::Counted {
+            count: increment.count,
+            limit,
+        });
+    }
+    let now = unix_now();
+    let claimed = match ctx
+        .settings
+        .claim_warning_action(chat, user, now, now.saturating_add(ACTION_LEASE_SECS))
+        .await
+    {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            eprintln!("warns: {chat}/{user}: could not claim punishment: {error}");
+            None
+        }
+    };
+    let Some(claimed) = claimed else {
+        return Ok(Given::Unpunished {
+            limit,
+            told: "مجازات در صف اجراست.".to_owned(),
+        });
+    };
+    let case = super::cases::CaseContext {
+        source: "report",
+        rule: "manual_warn",
+        reason: "سقف اخطار",
+        evidence: None,
+    };
+    Ok(
+        match execute_claimed(ctx, &claimed, chat_ref, target, name, actor, &case).await {
+            WarningExecution::Applied { .. } => Given::Punished {
+                limit,
+                ban: claimed.penalty == WarningPenalty::Ban,
+            },
+            WarningExecution::Failed { told } => Given::Unpunished { limit, told },
+            WarningExecution::Superseded => Given::Counted {
+                count: increment.count,
+                limit,
+            },
+        },
+    )
+}
+
 async fn punish(
     ctx: &Ctx,
     message: &Message,

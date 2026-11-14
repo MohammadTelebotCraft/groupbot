@@ -40,13 +40,46 @@ pub const TO_PRIVATE: &[&str] = &[
     "/pmpanel",
 ];
 
-const ROOT_TITLE: &str = "<b>پنل مدیریت</b>\n\nبخشی را باز کنید.";
+fn root_title(ctx: &Ctx, chat: i64) -> String {
+    let on = |key: &str| ctx.settings.is_locked(chat, key);
+    let locks = plain().filter(|lock| on(lock.key)).count();
+    let watching = ai_keys().filter(|key| on(key)).count();
+    let guards: Vec<&str> = [
+        (on(flood::MODE), "ضد رگبار"),
+        (on(raid::MODE), "ضد هجوم"),
+        (on(captcha::MODE), "احراز هویت"),
+        (on(betrayal::MODE), "ضد خیانت"),
+        (biolink::is_locked(ctx, chat), "لینک در بایو"),
+        (join::channel(ctx, chat).is_some(), "عضویت اجباری"),
+        (join::required_adds(ctx, chat) > 0, "اد اجباری"),
+    ]
+    .into_iter()
+    .filter_map(|(armed, name)| armed.then_some(name))
+    .collect();
+    format!(
+        "<b>پنل مدیریت</b>\n\n\
+         قفل ها · <b>{locks} از {}</b>\n\
+         نگهبان هوشمند · <b>{}</b>\n\
+         امنیت · <b>{}</b>\n\
+         حالت سختگیرانه · <b>{}</b>\n\n\
+         <i>بخشی را باز کنید.</i>",
+        plain().count(),
+        match watching {
+            0 => "خاموش".to_owned(),
+            n => format!("{n} روشن"),
+        },
+        match guards.is_empty() {
+            true => "هیچ کدام".to_owned(),
+            false => guards.join("، "),
+        },
+        if on(strict::MODE) { "روشن" } else { "خاموش" },
+    )
+}
 
-const PER_PAGE: usize = 10;
 const LISTS_TITLE: &str = "<b>پنل مدیریت</b> › <b>لیست ها</b>\n\n\
      هر لیست را باز کنید؛ با زدن روی هر مورد حذف می شود.";
 const ADVANCED_TITLE: &str = "<b>پنل مدیریت</b> › <b>تنظیمات پیشرفته</b>\n\n\
-     بخشی را باز کنید.";
+     تنظیم هایی که معمولاً یک بار، هنگام راه اندازی گروه، انجام می شوند.";
 fn strict_title(ctx: &Ctx, chat: i64) -> String {
     format!(
         "<b>پنل مدیریت</b> › <b>حالت سختگیرانه</b>\n\n\
@@ -82,7 +115,7 @@ async fn to_private(ctx: &Ctx, message: &Message) -> bool {
             user,
             super::premium::icon_html(
                 Some(super::premium::Icon::Settings),
-                breadcrumb(ctx, chat, true, ROOT_TITLE.to_owned()),
+                breadcrumb(ctx, chat, true, root_title(ctx, chat)),
             )
             .reply_markup(root_markup(ctx, chat, opener, true)),
         )
@@ -251,10 +284,6 @@ fn breadcrumb(ctx: &Ctx, chat: i64, private: bool, title: String) -> String {
     }
 }
 
-fn bare_label(label: &str) -> &str {
-    label.split('،').next().unwrap_or(label).trim()
-}
-
 pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
     let text = message.text().trim();
     if super::commands::contains(TO_PRIVATE, text) {
@@ -285,7 +314,7 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
         ctx,
         message,
         response::ResponseKind::SettingsView,
-        super::premium::icon_html(Some(super::premium::Icon::Settings), ROOT_TITLE)
+        super::premium::icon_html(Some(super::premium::Icon::Settings), root_title(ctx, chat))
             .reply_markup(root_markup(ctx, chat, opener, false)),
     )
     .await;
@@ -316,10 +345,19 @@ async fn open_lists(ctx: &Ctx, message: &Message) -> bool {
     true
 }
 
-fn custom_row(opener: i64, chat: i64, id: &str, current: impl std::fmt::Display) -> Vec<Button> {
-    vec![Button::data(
-        format!("✎  عدد دلخواه · {current}"),
-        payload(opener, chat, &format!("in:{id}")),
+fn custom_row(
+    opener: i64,
+    chat: i64,
+    id: &str,
+    label: &str,
+    current: impl std::fmt::Display,
+) -> Vec<Button> {
+    vec![super::premium::decorate(
+        Button::data(
+            format!("{label} · {current}  ✎"),
+            payload(opener, chat, &format!("in:{id}")),
+        ),
+        setting::number_icon(id),
     )]
 }
 
@@ -382,7 +420,7 @@ pub async fn typed_number(ctx: &Ctx, message: &Message, view: &super::locks::Vie
                     setting::number_icon(found.id).or(Some(super::premium::Icon::Success)),
                     format!(
                         "✓ {} · {}{}",
-                        bare_label(found.label),
+                        setting::bare_label(found.label),
                         setting::shown(ctx, target_chat, found)
                             .await
                             .unwrap_or_else(|_| "ذخیره شد".to_owned()),
@@ -527,6 +565,20 @@ async fn edit_callback(
     }
 }
 
+async fn toast(query: &CallbackQuery, ephemeral_origin: bool, text: &str) {
+    if ephemeral_origin || query.is_from_inline() {
+        return;
+    }
+    let _ = query.answer().text(text).send().await;
+}
+
+fn switched(on: bool, what: &str) -> String {
+    match on {
+        true => format!("✓ {what} روشن شد"),
+        false => format!("✗ {what} خاموش شد"),
+    }
+}
+
 async fn night_for_panel(
     ctx: &Ctx,
     query: &CallbackQuery,
@@ -570,6 +622,9 @@ pub fn back_row(opener: i64, chat: i64, back: &str, here: &str) -> Vec<Button> {
         Button::data("بازگشت", payload(opener, chat, back)),
         Some(super::premium::Icon::Back),
     )];
+    if back != "root" {
+        row.push(Button::data("🏠  خانه", payload(opener, chat, "root")));
+    }
     if help::find(here).is_some() {
         row.push(super::premium::decorate(
             Button::data("راهنما", help_topic(opener, chat, true, here)),
@@ -768,7 +823,7 @@ pub async fn on_callback(
             .answer()
             .alert(format!(
                 "{} · {range}\n\nدر دو دقیقه آینده همین جا بفرستید.",
-                bare_label(found.label)
+                setting::bare_label(found.label)
             ))
             .send()
             .await;
@@ -795,7 +850,11 @@ pub async fn on_callback(
     let action = match setting::apply(ctx, chat, action).await {
         Ok(Some((section, status))) => {
             match status {
-                setting::ApplyStatus::Applied => {}
+                setting::ApplyStatus::Applied => {
+                    if let Some(text) = setting::confirmation(ctx, chat, action).await {
+                        toast(query, ephemeral_origin, &text).await;
+                    }
+                }
                 setting::ApplyStatus::PendingRetry => {
                     let _ = query
                         .answer()
@@ -877,7 +936,7 @@ pub async fn on_callback(
     }
 
     let (title, markup): (String, ReplyMarkup) = match action {
-        "root" => (ROOT_TITLE.to_owned(), root_markup(ctx, chat, opener, private)),
+        "root" => (root_title(ctx, chat), root_markup(ctx, chat, opener, private)),
         picker if picker == "grp" || picker.starts_with("grp:") => match groups_page(
             ctx,
             opener,
@@ -919,7 +978,7 @@ pub async fn on_callback(
                 return;
             }
         },
-        "locks" => (locks_title(0), locks_markup(ctx, chat, opener, 0)),
+        "locks" => (locks_title(ctx, chat, 0), locks_markup(ctx, chat, opener, 0)),
         "ai" => (ai_title(ctx, chat), ai_markup(ctx, chat, opener)),
         "nsw" => (nsfw_title(ctx, chat), nsfw_markup(ctx, chat, opener)),
         "cq" => (
@@ -1055,6 +1114,11 @@ pub async fn on_callback(
                         .await;
                     return;
                 }
+                let text = match keep {
+                    true => format!("✗ {} دیگر حذف نمی شود", kind.label),
+                    false => format!("✓ {} موقت شد", kind.label),
+                };
+                toast(query, ephemeral_origin, &text).await;
             }
             (
                 temp_media_title(ctx, chat),
@@ -1078,6 +1142,11 @@ pub async fn on_callback(
                         .await;
                     return;
                 }
+                let text = match deny {
+                    true => format!("✗ {} برای مدیران بسته شد", cap.label),
+                    false => format!("✓ {} برای مدیران باز شد", cap.label),
+                };
+                toast(query, ephemeral_origin, &text).await;
             }
             (limits_title(ctx, chat), limits_markup(ctx, chat, opener))
         }
@@ -1131,7 +1200,9 @@ pub async fn on_callback(
             match super::extras::set_night(ctx, chat, window.is_none().then_some((23 * 60, 7 * 60)))
                 .await
             {
-                Ok(super::rights::DeliveryOutcome::Applied) => {}
+                Ok(super::rights::DeliveryOutcome::Applied) => {
+                    toast(query, ephemeral_origin, &switched(window.is_none(), "قفل شب")).await;
+                }
                 Ok(
                     super::rights::DeliveryOutcome::PendingRetry { .. }
                     | super::rights::DeliveryOutcome::Superseded,
@@ -1257,7 +1328,10 @@ pub async fn on_callback(
         step if step.starts_with("sl:") => {
             if let Ok(seconds) = step[3..].parse::<u32>() {
                 match super::extras::apply_slow(ctx, chat, seconds).await {
-                    Ok(Some(_)) => {}
+                    Ok(Some(_)) => {
+                        let text = format!("✓ اسلوموشن · {}", super::extras::slow_label(seconds));
+                        toast(query, ephemeral_origin, &text).await;
+                    }
                     Ok(None) => {
                         let _ = query
                             .answer()
@@ -1425,6 +1499,7 @@ pub async fn on_callback(
                     .await;
                 return;
             }
+            toast(query, ephemeral_origin, &switched(now_on, "پاکسازی خودکار")).await;
             (auto_title(ctx, chat), auto_markup(ctx, chat, opener))
         }
 
@@ -1449,6 +1524,7 @@ pub async fn on_callback(
                     .await;
                 return;
             }
+            toast(query, ephemeral_origin, &switched(now_on, "گزارش روزانه")).await;
             (report_title(ctx, chat), report_markup(ctx, chat, opener))
         }
 
@@ -1489,7 +1565,7 @@ pub async fn on_callback(
         }
         part if part.starts_with("lg:") => {
             let key = &part[3..];
-            if log::KINDS.iter().any(|(k, _)| *k == key) {
+            if let Some((_, label)) = log::KINDS.iter().find(|(k, _)| *k == key) {
                 let now_on = !ctx.settings.is_locked(chat, key);
                 if let Err(error) = ctx.settings.try_set(chat, key, now_on).await {
                     ::log::warn!("panel: log toggle for {chat}/{key} failed: {error}");
@@ -1504,6 +1580,7 @@ pub async fn on_callback(
                         .await;
                     return;
                 }
+                toast(query, ephemeral_origin, &switched(now_on, &format!("لاگ {label}"))).await;
             }
             (log::status(ctx, chat), log_markup(ctx, chat, opener))
         }
@@ -1604,7 +1681,7 @@ pub async fn on_callback(
                     .await;
                 return;
             }
-            (locks_title(0), locks_markup(ctx, chat, opener, 0))
+            (locks_title(ctx, chat, 0), locks_markup(ctx, chat, opener, 0))
         }
         "close" => {
             edit_callback(
@@ -1630,7 +1707,7 @@ pub async fn on_callback(
 
         page if page.starts_with("page:") => {
             let page = page[5..].parse::<usize>().unwrap_or(0).min(last_page());
-            (locks_title(page), locks_markup(ctx, chat, opener, page))
+            (locks_title(ctx, chat, page), locks_markup(ctx, chat, opener, page))
         }
         key => {
             let (key, from) = key.split_once(':').unwrap_or((key, ""));
@@ -1652,6 +1729,12 @@ pub async fn on_callback(
                     .await;
                 return;
             }
+            toast(
+                query,
+                ephemeral_origin,
+                &switched(now_on, &format!("قفل {}", lock.names[0])),
+            )
+            .await;
             if from == "nsw" {
                 (nsfw_title(ctx, chat), nsfw_markup(ctx, chat, opener))
             } else if from == "cq" {
@@ -1660,7 +1743,7 @@ pub async fn on_callback(
                 (ai_title(ctx, chat), ai_markup(ctx, chat, opener))
             } else {
                 let page = page.min(last_page());
-                (locks_title(page), locks_markup(ctx, chat, opener, page))
+                (locks_title(ctx, chat, page), locks_markup(ctx, chat, opener, page))
             }
         }
     };
@@ -1846,44 +1929,38 @@ fn miniapp_button(ctx: &Ctx, chat: i64) -> Option<Button> {
 }
 
 fn root_markup(ctx: &Ctx, chat: i64, opener: i64, private: bool) -> ReplyMarkup {
-    let active = plain()
-        .filter(|lock| ctx.settings.is_locked(chat, lock.key))
-        .count();
-    let watching = ai_keys()
-        .filter(|key| ctx.settings.is_locked(chat, key))
-        .count();
+    use super::premium::Icon;
+    let open = |label: &str, action: &str, icon: Icon| {
+        super::premium::decorate(
+            Button::data(format!("{label}  ›"), payload(opener, chat, action)),
+            Some(icon),
+        )
+    };
+    let watching = ai_keys().any(|key| ctx.settings.is_locked(chat, key));
     let mut rows = vec![
-        vec![super::premium::decorate(
-            Button::data(
-                format!("قفل ها  ({active} از {})  ›", plain().count()),
-                payload(opener, chat, "locks"),
+        vec![
+            open("قفل ها", "locks", Icon::Locked),
+            section("🤖  نگهبان هوشمند", payload(opener, chat, "ai"), watching),
+        ],
+        vec![
+            open("امنیت و ورود", "sec", Icon::Locked),
+            open("پیام و پاسخ", "msg", Icon::Chat),
+        ],
+        vec![
+            open("پاکسازی و زمان", "tm", Icon::Timer),
+            super::premium::decorate(
+                section(
+                    "حالت سختگیرانه",
+                    payload(opener, chat, "s"),
+                    ctx.settings.is_locked(chat, strict::MODE),
+                ),
+                Some(Icon::ModerationHammer),
             ),
-            Some(super::premium::Icon::Locked),
-        )],
-        vec![Button::data(
-            if watching == 0 {
-                "🤖  نگهبان هوشمند  ›".to_owned()
-            } else {
-                format!("🤖  نگهبان هوشمند  ({watching} روشن)  ›")
-            },
-            payload(opener, chat, "ai"),
-        )],
-        vec![super::premium::decorate(
-            section(
-                "حالت سختگیرانه",
-                payload(opener, chat, "s"),
-                ctx.settings.is_locked(chat, strict::MODE),
-            ),
-            Some(super::premium::Icon::ModerationHammer),
-        )],
-        vec![super::premium::decorate(
-            Button::data("تنظیمات پیشرفته  ›", payload(opener, chat, "adv")),
-            Some(super::premium::Icon::Settings),
-        )],
-        vec![super::premium::decorate(
-            Button::data("لیست ها  ›", payload(opener, chat, "ls")),
-            Some(super::premium::Icon::ArchiveHistory),
-        )],
+        ],
+        vec![
+            open("لیست ها", "ls", Icon::ArchiveHistory),
+            open("تنظیمات پیشرفته", "adv", Icon::Settings),
+        ],
     ];
     if let Some(button) = miniapp_button(ctx, chat) {
         rows.push(vec![button]);
@@ -1955,7 +2032,7 @@ fn raid_title(ctx: &Ctx, chat: i64) -> String {
     format!(
         "<b>پنل مدیریت</b> › <b>ضد هجوم</b>\n\n\
          اگر بیش از <b>{}</b> نفر در <b>{}</b> ثانیه وارد شوند، تازه واردها <b>{}</b> سکوت می شوند.\n\n\
-         <i>برای عدد دلخواه دکمه پایین هر ردیف را بزنید.</i>",
+         <i>برای عدد دلخواه، دکمه ✎ بالای هر ردیف را بزنید.</i>",
         raid::limit(ctx, chat),
         raid::window(ctx, chat),
         strict::time_label(raid::minutes(ctx, chat)),
@@ -2233,11 +2310,14 @@ fn clock_markup(
             })
             .collect(),
     );
-    rows.push(custom_row(opener, chat, key, super::extras::clock(current)));
-    rows.push(vec![super::premium::decorate(
-        Button::data("بازگشت", payload(opener, chat, "ng")),
-        Some(super::premium::Icon::Back),
-    )]);
+    rows.push(custom_row(
+        opener,
+        chat,
+        key,
+        "زمان دلخواه",
+        super::extras::clock(current),
+    ));
+    rows.push(back_row(opener, chat, "ng", "ng"));
     super::premium::buttons(&rows)
 }
 
@@ -2361,7 +2441,6 @@ fn auto_title(ctx: &Ctx, chat: i64) -> String {
 
 fn auto_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
     let at = super::purge::auto_at(ctx, chat);
-    let count = super::purge::auto_count(ctx, chat);
     let mut rows = vec![vec![toggle(
         match at {
             Some(at) => format!("✓  روشن · هر روز {}", super::extras::clock(at)),
@@ -2370,10 +2449,13 @@ fn auto_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
         payload(opener, chat, "ap_toggle"),
         at.is_some(),
     )]];
-    rows.push(vec![Button::data(
+    rows.push(custom_row(
+        opener,
+        chat,
+        "apt",
         "ساعت پاکسازی",
-        payload(opener, chat, "ap"),
-    )]);
+        at.map_or_else(|| "✗".to_owned(), super::extras::clock),
+    ));
     rows.extend(super::purge::AUTO_AT_PRESETS.chunks(3).map(|chunk| {
         chunk
             .iter()
@@ -2386,29 +2468,7 @@ fn auto_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             })
             .collect()
     }));
-    rows.push(custom_row(
-        opener,
-        chat,
-        "apt",
-        at.map_or_else(|| "✗".to_owned(), super::extras::clock),
-    ));
-    rows.push(vec![Button::data(
-        "چند پیام هر بار",
-        payload(opener, chat, "ap"),
-    )]);
-    rows.extend(super::purge::AUTO_COUNT_PRESETS.chunks(3).map(|chunk| {
-        chunk
-            .iter()
-            .map(|&value| {
-                choice(
-                    value.to_string(),
-                    payload(opener, chat, &format!("apc:{value}")),
-                    count == value,
-                )
-            })
-            .collect()
-    }));
-    rows.push(custom_row(opener, chat, "apc", count));
+    rows.extend(rows_for(ctx, chat, opener, "apc"));
     rows.push(back_row(opener, chat, "tm", "ap"));
     super::premium::buttons(&rows)
 }
@@ -2430,7 +2490,13 @@ fn report_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
         payload(opener, chat, "dr_toggle"),
         current.is_some(),
     )]];
-
+    rows.push(custom_row(
+        opener,
+        chat,
+        "dr",
+        "ساعت گزارش",
+        current.map_or_else(|| "✗".to_owned(), super::extras::clock),
+    ));
     rows.extend(super::stats::REPORT_PRESETS.chunks(3).map(|chunk| {
         chunk
             .iter()
@@ -2443,15 +2509,6 @@ fn report_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             })
             .collect()
     }));
-    rows.push(custom_row(
-        opener,
-        chat,
-        "dr",
-        match current {
-            Some(at) => super::extras::clock(at),
-            None => "✗".to_owned(),
-        },
-    ));
     rows.push(vec![Button::data(
         "📤  ارسال آزمایشی",
         payload(opener, chat, "dr_now"),
@@ -2672,18 +2729,6 @@ fn section(label: &str, target: Vec<u8>, on: bool) -> Button {
 fn advanced_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
     let mut rows = vec![
         vec![super::premium::decorate(
-            Button::data("امنیت و ورود  ›", payload(opener, chat, "sec")),
-            Some(super::premium::Icon::Locked),
-        )],
-        vec![super::premium::decorate(
-            Button::data("پیام و پاسخ  ›", payload(opener, chat, "msg")),
-            Some(super::premium::Icon::Chat),
-        )],
-        vec![super::premium::decorate(
-            Button::data("پاکسازی و زمان  ›", payload(opener, chat, "tm")),
-            Some(super::premium::Icon::Timer),
-        )],
-        vec![super::premium::decorate(
             Button::data("اختیارات گروه  ›", payload(opener, chat, "gr")),
             Some(super::premium::Icon::Locked),
         )],
@@ -2762,78 +2807,63 @@ fn limits_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
 }
 
 fn security_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
+    use super::premium::Icon;
+    let guard = |label: &str, action: &str, on: bool, icon: Icon| {
+        super::premium::decorate(section(label, payload(opener, chat, action), on), Some(icon))
+    };
+    let flag = |id: &str| {
+        rows_for(ctx, chat, opener, id)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    };
+    let on = |key: &str| ctx.settings.is_locked(chat, key);
     let adds = join::required_adds(ctx, chat);
     super::premium::buttons(&[
-        vec![super::premium::decorate(
-            section(
+        vec![
+            guard("ضد رگبار", "fl", on(flood::MODE), Icon::Timer),
+            guard("ضد هجوم", "rd", on(raid::MODE), Icon::Locked),
+        ],
+        vec![
+            guard("احراز هویت", "cp", on(captcha::MODE), Icon::Locked),
+            guard("ضد خیانت ادمین", "bt", on(betrayal::MODE), Icon::Locked),
+        ],
+        vec![
+            guard(
                 "عضویت اجباری",
-                payload(opener, chat, "jn"),
+                "jn",
                 join::channel(ctx, chat).is_some(),
+                Icon::Locked,
             ),
-            Some(super::premium::Icon::Locked),
-        )],
-        vec![super::premium::decorate(
-            toggle(
-                format!(
-                    "اد اجباری  ›  {}",
-                    match adds {
-                        0 => "✗".to_owned(),
-                        n => format!("✓ {n}"),
-                    }
+            super::premium::decorate(
+                toggle(
+                    format!(
+                        "اد اجباری  ›  {}",
+                        match adds {
+                            0 => "✗".to_owned(),
+                            n => format!("✓ {n}"),
+                        }
+                    ),
+                    payload(opener, chat, "ad"),
+                    adds > 0,
                 ),
-                payload(opener, chat, "ad"),
-                adds > 0,
+                Some(Icon::Group),
             ),
-            Some(super::premium::Icon::Group),
-        )],
-        vec![super::premium::decorate(
-            section(
-                "احراز هویت",
-                payload(opener, chat, "cp"),
-                ctx.settings.is_locked(chat, captcha::MODE),
-            ),
-            Some(super::premium::Icon::Locked),
-        )],
-        rows_for(ctx, chat, opener, "lb_on")
-            .into_iter()
-            .next()
-            .unwrap_or_default(),
-        vec![super::premium::decorate(
-            section(
-                "ضد رگبار",
-                payload(opener, chat, "fl"),
-                ctx.settings.is_locked(chat, flood::MODE),
-            ),
-            Some(super::premium::Icon::Timer),
-        )],
-        vec![super::premium::decorate(
-            section(
-                "ضد هجوم",
-                payload(opener, chat, "rd"),
-                ctx.settings.is_locked(chat, raid::MODE),
-            ),
-            Some(super::premium::Icon::Locked),
-        )],
-        vec![super::premium::decorate(
-            section(
-                "ضد خیانت ادمین",
-                payload(opener, chat, "bt"),
-                ctx.settings.is_locked(chat, betrayal::MODE),
-            ),
-            Some(super::premium::Icon::Locked),
-        )],
-        vec![super::premium::decorate(
-            section(
+        ],
+        vec![
+            guard(
                 "لینک در بایو",
-                payload(opener, chat, "bl"),
+                "bl",
                 biolink::is_locked(ctx, chat),
+                Icon::Locked,
             ),
-            Some(super::premium::Icon::Locked),
-        )],
-        rows_for(ctx, chat, opener, "vm_on")
-            .into_iter()
-            .next()
-            .unwrap_or_default(),
+            super::premium::decorate(
+                Button::data("اخطار  ›", payload(opener, chat, "wn")),
+                Some(Icon::Warning),
+            ),
+        ],
+        flag("lb_on"),
+        flag("vm_on"),
         vec![super::premium::decorate(
             Button::data(
                 format!(
@@ -2842,47 +2872,41 @@ fn security_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
                 ),
                 payload(opener, chat, "vw"),
             ),
-            Some(super::premium::Icon::Voice),
+            Some(Icon::Voice),
         )],
-        vec![super::premium::decorate(
-            Button::data("اخطار  ›", payload(opener, chat, "wn")),
-            Some(super::premium::Icon::Warning),
-        )],
-        rows_for(ctx, chat, opener, "wp_ban")
-            .into_iter()
-            .next()
-            .unwrap_or_default(),
-        rows_for(ctx, chat, opener, "wp_mute")
-            .into_iter()
-            .next()
-            .unwrap_or_default(),
-        back_row(opener, chat, "adv", "sec"),
+        flag("wp_ban"),
+        flag("wp_mute"),
+        back_row(opener, chat, "root", "sec"),
     ])
 }
 
 fn messages_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
     let greets = welcome_on(ctx, chat);
     super::premium::buttons(&[
-        vec![super::premium::decorate(
-            section("خوشامد", payload(opener, chat, "wc"), greets),
-            Some(super::premium::Icon::Welcome),
-        )],
-        vec![super::premium::decorate(
-            section(
-                "اعلان حذف",
-                payload(opener, chat, "nt"),
-                ctx.settings.is_locked(chat, notice::MODE),
+        vec![
+            super::premium::decorate(
+                section("خوشامد", payload(opener, chat, "wc"), greets),
+                Some(super::premium::Icon::Welcome),
             ),
-            Some(super::premium::Icon::Chat),
-        )],
-        vec![super::premium::decorate(
-            Button::data("پاسخ خودکار  ›", payload(opener, chat, "an")),
-            Some(super::premium::Icon::Chat),
-        )],
-        vec![super::premium::decorate(
-            Button::data("پیام های ربات  ›", payload(opener, chat, "response")),
-            Some(super::premium::Icon::Chat),
-        )],
+            super::premium::decorate(
+                section(
+                    "اعلان حذف",
+                    payload(opener, chat, "nt"),
+                    ctx.settings.is_locked(chat, notice::MODE),
+                ),
+                Some(super::premium::Icon::Chat),
+            ),
+        ],
+        vec![
+            super::premium::decorate(
+                Button::data("پاسخ خودکار  ›", payload(opener, chat, "an")),
+                Some(super::premium::Icon::Chat),
+            ),
+            super::premium::decorate(
+                Button::data("پیام های ربات  ›", payload(opener, chat, "response")),
+                Some(super::premium::Icon::Chat),
+            ),
+        ],
         vec![toggle(
             format!(
                 "🏅  مقام خودکار  ·  {}",
@@ -2895,7 +2919,7 @@ fn messages_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             payload(opener, chat, "rk_on"),
             ctx.settings.is_locked(chat, super::stats::RANKS),
         )],
-        back_row(opener, chat, "adv", "msg"),
+        back_row(opener, chat, "root", "msg"),
     ])
 }
 
@@ -2969,22 +2993,24 @@ fn timing_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
                 Some(super::premium::Icon::Timer),
             ),
         ],
-        vec![super::premium::decorate(
-            section(
-                "پاکسازی خودکار",
-                payload(opener, chat, "ap"),
-                super::purge::auto_at(ctx, chat).is_some(),
+        vec![
+            super::premium::decorate(
+                section(
+                    "پاکسازی خودکار",
+                    payload(opener, chat, "ap"),
+                    super::purge::auto_at(ctx, chat).is_some(),
+                ),
+                Some(super::premium::Icon::Delete),
             ),
-            Some(super::premium::Icon::Delete),
-        )],
-        vec![super::premium::decorate(
-            section(
-                "گزارش روزانه",
-                payload(opener, chat, "dr"),
-                super::stats::report_at(ctx, chat).is_some(),
+            super::premium::decorate(
+                section(
+                    "گزارش روزانه",
+                    payload(opener, chat, "dr"),
+                    super::stats::report_at(ctx, chat).is_some(),
+                ),
+                Some(super::premium::Icon::DocumentActivity),
             ),
-            Some(super::premium::Icon::DocumentActivity),
-        )],
+        ],
         vec![super::premium::decorate(
             section(
                 "رسانه موقت",
@@ -2993,7 +3019,7 @@ fn timing_markup(ctx: &Ctx, chat: i64, opener: i64) -> ReplyMarkup {
             ),
             Some(super::premium::Icon::Timer),
         )],
-        back_row(opener, chat, "adv", "tm"),
+        back_row(opener, chat, "root", "tm"),
     ])
 }
 
@@ -3283,47 +3309,64 @@ async fn image_filters_page(
 }
 
 fn last_page() -> usize {
-    plain().count().div_ceil(PER_PAGE) - 1
+    super::locks::GROUPS.len() - 1
 }
 
-fn locks_title(page: usize) -> String {
+fn tab_locks(page: usize) -> impl Iterator<Item = &'static super::locks::Lock> {
+    super::locks::GROUPS[page.min(last_page())]
+        .1
+        .iter()
+        .filter_map(|key| plain().find(|lock| lock.key == *key))
+}
+
+fn locks_title(ctx: &Ctx, chat: i64, page: usize) -> String {
+    let page = page.min(last_page());
+    let armed = |lock: &&super::locks::Lock| ctx.settings.is_locked(chat, lock.key);
     format!(
-        "<b>پنل مدیریت</b> › <b>قفل ها</b> (صفحه {} از {})\n\nهر مورد را برای تغییر بزنید.",
-        page + 1,
-        last_page() + 1
+        "<b>پنل مدیریت</b> › <b>قفل ها</b> › <b>{}</b>\n\n\
+         این بخش · <b>{} از {}</b>\n\
+         همه قفل ها · <b>{} از {}</b>\n\n\
+         <i>هر قفل را برای روشن یا خاموش کردن بزنید.</i>",
+        super::locks::GROUPS[page].0,
+        tab_locks(page).filter(armed).count(),
+        tab_locks(page).count(),
+        plain().filter(armed).count(),
+        plain().count(),
     )
 }
 
 fn locks_markup(ctx: &Ctx, chat: i64, opener: i64, page: usize) -> ReplyMarkup {
-    let start = page * PER_PAGE;
-    let grid: Vec<&super::locks::Lock> = plain().collect();
-    let shown = &grid[start..(start + PER_PAGE).min(grid.len())];
-
-    let mut rows: Vec<Vec<Button>> = shown
-        .chunks(2)
-        .map(|pair| {
-            pair.iter()
-                .map(|lock| lock_button(ctx, chat, lock, opener, page))
+    let page = page.min(last_page());
+    let tabs: Vec<usize> = (0..=last_page()).collect();
+    let mut rows: Vec<Vec<Button>> = tabs
+        .chunks(4)
+        .map(|block| {
+            block
+                .iter()
+                .map(|&tab| {
+                    let name = super::locks::GROUPS[tab].0;
+                    let on = tab_locks(tab)
+                        .filter(|lock| ctx.settings.is_locked(chat, lock.key))
+                        .count();
+                    choice(
+                        match on {
+                            0 => name.to_owned(),
+                            n => format!("{name} ({n})"),
+                        },
+                        payload(opener, chat, &format!("page:{tab}")),
+                        tab == page,
+                    )
+                })
                 .collect()
         })
         .collect();
 
-    let mut paging = Vec::new();
-    if page > 0 {
-        paging.push(super::premium::decorate(
-            Button::data("قبلی", payload(opener, chat, &format!("page:{}", page - 1))),
-            Some(super::premium::Icon::Back),
-        ));
-    }
-    if page < last_page() {
-        paging.push(Button::data(
-            "بعدی ›",
-            payload(opener, chat, &format!("page:{}", page + 1)),
-        ));
-    }
-    if !paging.is_empty() {
-        rows.push(paging);
-    }
+    let shown: Vec<&super::locks::Lock> = tab_locks(page).collect();
+    rows.extend(shown.chunks(2).map(|pair| {
+        pair.iter()
+            .map(|lock| lock_button(ctx, chat, lock, opener, page))
+            .collect()
+    }));
 
     let watching = ai_keys()
         .filter(|key| ctx.settings.is_locked(chat, key))
@@ -3486,9 +3529,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_deep_page_offers_the_root() {
+        let actions = |back: &str| -> Vec<String> {
+            let mut out = Vec::new();
+            collect_data(&super::super::premium::buttons(&[back_row(7, -7, back, "fl")]), &mut out);
+            out
+        };
+        let deep = actions("sec");
+        assert_eq!(deep[0], "p:7:-7:sec", "بازگشت comes first");
+        assert!(deep.contains(&"p:7:-7:root".to_owned()), "{deep:?}");
+        let shallow = actions("root");
+        assert_eq!(
+            shallow.iter().filter(|data| *data == "p:7:-7:root").count(),
+            1,
+            "{shallow:?}"
+        );
+    }
+
+    #[test]
     fn a_label_example_is_said_once() {
-        assert_eq!(bare_label("ساعت شروع، مثل 23:37"), "ساعت شروع");
-        assert_eq!(bare_label("ساعت پاکسازی"), "ساعت پاکسازی");
+        assert_eq!(setting::bare_label("ساعت شروع، مثل 23:37"), "ساعت شروع");
+        assert_eq!(setting::bare_label("ساعت پاکسازی"), "ساعت پاکسازی");
     }
 
     #[test]
@@ -3788,10 +3849,10 @@ mod render_tests {
         let (c, o) = (CHAT, OPENER);
         let response = response_page(ctx, c, o, "response");
         let mut out: Vec<(String, String, ReplyMarkup)> = vec![
-            ("root".into(), ROOT_TITLE.into(), root_markup(ctx, c, o, false)),
+            ("root".into(), root_title(ctx, c), root_markup(ctx, c, o, false)),
             (
                 "root-private".into(),
-                breadcrumb(ctx, c, true, ROOT_TITLE.into()),
+                breadcrumb(ctx, c, true, root_title(ctx, c)),
                 root_markup(ctx, c, o, true),
             ),
             ("ls".into(), LISTS_TITLE.into(), lists_markup(c, o)),
@@ -3838,7 +3899,7 @@ mod render_tests {
             out.push(("ngt".into(), night_title(window), clock_markup(window, c, o, false)));
         }
         for page in 0..=last_page() {
-            out.push((format!("locks:{page}"), locks_title(page), locks_markup(ctx, c, o, page)));
+            out.push((format!("locks:{page}"), locks_title(ctx, c, page), locks_markup(ctx, c, o, page)));
         }
         out
     }
@@ -3970,11 +4031,12 @@ mod render_tests {
             .await
             .unwrap();
 
-        let crumb = breadcrumb(&ctx, CHAT, true, ROOT_TITLE.to_owned());
+        let root = root_title(&ctx, CHAT);
+        let crumb = breadcrumb(&ctx, CHAT, true, root.clone());
         if !crumb.contains("<b>Tom &amp; &lt;Jerry&gt;</b>") {
             problems.push(format!("breadcrumb: {crumb}"));
         }
-        if breadcrumb(&ctx, CHAT, false, ROOT_TITLE.to_owned()) != ROOT_TITLE {
+        if breadcrumb(&ctx, CHAT, false, root.clone()) != root {
             problems.push("breadcrumb: added in the group itself".to_owned());
         }
         if !welcome_title(&ctx, CHAT).contains("سلام &amp; &lt;خوش آمدید&gt;") {

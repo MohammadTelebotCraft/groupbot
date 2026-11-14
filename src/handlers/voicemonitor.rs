@@ -20,7 +20,7 @@ use super::{Ctx, locks, notice, stats};
 
 pub const MODE: &str = "voice_monitor";
 pub const WORDS_PREFIX: &str = "voice_word:";
-const DISABLED_DEFAULT_PREFIX: &str = "voice_disabled:";
+pub(crate) const DISABLED_DEFAULT_PREFIX: &str = "voice_disabled:";
 
 pub const ADD_COMMANDS: &[&str] = &[
     "فیلتر ویس کلمه",

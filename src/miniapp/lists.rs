@@ -1,13 +1,15 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
 use serde_json::json;
 
-use crate::handlers::{Ctx, limits, lists};
+use crate::handlers::{Ctx, answers, esc, limits, lists};
 
 use super::auth::AdminGate;
 
@@ -34,10 +36,30 @@ fn too_many_requests() -> Response {
         .into_response()
 }
 
+const SEARCH_MAX_CHARS: usize = 64;
+
+const ANSWER_PREVIEW_CHARS: usize = 80;
+
+#[derive(Deserialize)]
+pub struct ListQuery {
+    q: Option<String>,
+}
+
+fn search_text(q: Option<&str>) -> String {
+    q.map(str::trim)
+        .unwrap_or_default()
+        .chars()
+        .take(SEARCH_MAX_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
 pub async fn list(
     State(ctx): State<Arc<Ctx>>,
     gate: AdminGate,
     Path(kind_name): Path<String>,
+    Query(query): Query<ListQuery>,
 ) -> Response {
     let Some(kind) = lists::Kind::from_action(&kind_name) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -49,7 +71,10 @@ pub async fn list(
         Ok(chat_ref) => chat_ref,
         Err(status) => return status.into_response(),
     };
-    let all = match lists::entries(&ctx, chat_ref, gate.chat, kind, MINIAPP_LIST_CAP).await {
+    let q = search_text(query.q.as_deref());
+    let all = match lists::entries_matching(&ctx, chat_ref, gate.chat, kind, MINIAPP_LIST_CAP, &q)
+        .await
+    {
         Ok(entries) => entries,
         Err(error) => {
             ::log::warn!(
@@ -65,10 +90,30 @@ pub async fn list(
         }
     };
     let truncated = all.len() >= MINIAPP_LIST_CAP;
-    let entries: Vec<_> = all
-        .iter()
-        .map(|entry| json!({ "key": entry.key, "name": entry.name }))
-        .collect();
+    let entries: Vec<_> = if kind == lists::Kind::Answer {
+        let previews: HashMap<String, answers::Preview> =
+            answers::previews(&ctx, gate.chat, ANSWER_PREVIEW_CHARS)
+                .into_iter()
+                .map(|(trigger, preview)| (lists::word_id(&trigger), preview))
+                .collect();
+        all.iter()
+            .map(|entry| {
+                let preview = previews.get(&entry.key);
+                json!({
+                    "key": entry.key,
+                    "name": entry.name,
+                    "preview": preview.map(|preview| esc(&preview.text)).unwrap_or_default(),
+                    "text": preview.map(|preview| esc(&preview.full)).unwrap_or_default(),
+                    "media": preview.is_some_and(|preview| preview.media),
+                    "formatted": preview.is_some_and(|preview| preview.formatted),
+                })
+            })
+            .collect()
+    } else {
+        all.iter()
+            .map(|entry| json!({ "key": entry.key, "name": entry.name }))
+            .collect()
+    };
     Json(json!({
         "kind": kind_name,
         "title": kind.title(),
@@ -167,5 +212,21 @@ pub async fn clear(
             };
             (status, Json(json!({ "error": message }))).into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SEARCH_MAX_CHARS, search_text};
+
+    #[test]
+    fn a_search_is_trimmed_and_cut_before_it_reaches_telegram() {
+        assert_eq!(search_text(None), "");
+        assert_eq!(search_text(Some("   ")), "");
+        assert_eq!(search_text(Some("  علی رضا ")), "علی رضا");
+        let long = "ب".repeat(SEARCH_MAX_CHARS + 10);
+        assert_eq!(search_text(Some(&long)).chars().count(), SEARCH_MAX_CHARS);
+        let spaced = format!("{} x", "a".repeat(SEARCH_MAX_CHARS - 1));
+        assert_eq!(search_text(Some(&spaced)), "a".repeat(SEARCH_MAX_CHARS - 1));
     }
 }

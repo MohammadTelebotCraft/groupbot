@@ -8,8 +8,8 @@ use grammers_client::session::types::{PeerKind, PeerRef};
 use crate::state::{ChatSettings, SettingMutation, Settings, SettingsWriteError};
 
 pub const MODE_KEY: &str = "response:mode";
-const CATEGORY_PREFIX: &str = "response:category:";
-const KIND_PREFIX: &str = "response:kind:";
+pub(crate) const CATEGORY_PREFIX: &str = "response:category:";
+pub(crate) const KIND_PREFIX: &str = "response:kind:";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]

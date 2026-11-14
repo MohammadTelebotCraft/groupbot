@@ -36,6 +36,8 @@ EVAL = HERE / "data" / "intent_eval.tsv"
 BATTERY = HERE / "data" / "intent_battery.tsv"
 CONTEXT = HERE / "data" / "intent_context.tsv"
 FLEET = HERE / "data" / "intent_fleet.tsv"
+FRESH = HERE / "data" / "intent_fresh.tsv"
+EVASION = HERE / "data" / "intent_evasion.tsv"
 
 SEED = 4711
 # Per template family, how many slot combinations are sampled. Families multiply out to far
@@ -563,7 +565,7 @@ def trigrams(text: str) -> set[str]:
 
 def held_out_grams() -> set[str]:
     grams: set[str] = set()
-    for path in (EVAL, BATTERY, CONTEXT):
+    for path in (EVAL, BATTERY, CONTEXT, FRESH, EVASION):
         if not path.exists():
             continue
         for line in path.read_text(encoding="utf-8").splitlines():

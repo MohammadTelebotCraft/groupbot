@@ -35,6 +35,7 @@ pub const KINDS: &[(&str, &str)] = &[
     ("log_warn", "اخطارها"),
     ("log_admin", "تغییر ادمین ها"),
     ("log_join", "ورود و خروج"),
+    (super::report::LOG, "گزارش ها"),
 ];
 
 pub const SET: &[&str] = &[

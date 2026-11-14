@@ -85,6 +85,9 @@ class Classifier:
         self.backbone = AutoModel.from_pretrained(name)
         self.backbone.embeddings.word_embeddings.weight.requires_grad_(False)
         self.head = torch.nn.Linear(self.backbone.config.hidden_size, frames)
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.backbone.to(self.device)
+        self.head.to(self.device)
 
     def parameters(self):
         return [p for p in self.backbone.parameters() if p.requires_grad] + list(self.head.parameters())
@@ -102,7 +105,7 @@ class Classifier:
             truncation=True,
             max_length=tokens,
             return_tensors="pt",
-        )
+        ).to(self.device)
         hidden = self.backbone(**batch).last_hidden_state
         mask = batch["attention_mask"].unsqueeze(-1).to(hidden.dtype)
         pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
@@ -131,9 +134,11 @@ def judge_on_eval(model: Classifier, sell_ids, safe_ids, constants: ev.Constants
     model.train(False)
     with torch.no_grad():
         for at in range(0, len(texts), 64):
-            raw.append(score_of(model.logits(texts[at : at + 64], EVAL_TOKENS), sell_ids, safe_ids).numpy())
+            raw.append(score_of(model.logits(texts[at : at + 64], EVAL_TOKENS), sell_ids, safe_ids).cpu().numpy())
     raw = np.concatenate(raw)
-    live = caught & ~terse
+    # The runtime judges unmarked text too, so every non-terse negative holds the boundary.
+    live = ~terse
+    del caught
     negatives = raw[live & (labels != "sell")]
     boundary = float(negatives.max()) if len(negatives) else 0.0
     sells = raw[labels == "sell"]
@@ -177,9 +182,8 @@ def main() -> None:
     # Class weights per frame, square-root damped: a frame with forty rows is not fifty
     # times as important as one with two thousand, but it is not to be drowned either.
     weights = np.sqrt(counts.sum() / (len(FRAMES) * np.maximum(counts, 1)))
-    weights = torch.tensor(weights / weights.mean(), dtype=torch.float32)
-
     model = Classifier(MODELS[args.model], len(FRAMES), args.seed)
+    weights = torch.tensor(weights / weights.mean(), dtype=torch.float32, device=model.device)
     steps = args.epochs * ((len(data) + args.batch - 1) // args.batch)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     warmup = max(1, steps // 16)
@@ -202,8 +206,8 @@ def main() -> None:
         for at in range(0, len(data), args.batch):
             chunk = data[at : at + args.batch]
             texts = [t for _, _, t in chunk]
-            target = torch.tensor([frame_id.get(f, -1) for _, f, _ in chunk])
-            is_sell = torch.tensor([1.0 if l == "sell" else 0.0 for l, _, _ in chunk])
+            target = torch.tensor([frame_id.get(f, -1) for _, f, _ in chunk], device=model.device)
+            is_sell = torch.tensor([1.0 if l == "sell" else 0.0 for l, _, _ in chunk], device=model.device)
             logits = model.logits(texts, TRAIN_TOKENS)
             score = score_of(logits, sell_ids, safe_ids)
             # The frame loss teaches the classes; the score loss teaches the one number the

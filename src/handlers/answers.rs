@@ -71,6 +71,47 @@ pub fn triggers(ctx: &Ctx, chat: i64) -> Vec<String> {
     found
 }
 
+pub struct Preview {
+    pub text: String,
+    pub full: String,
+    pub media: bool,
+    pub formatted: bool,
+}
+
+pub fn previews(ctx: &Ctx, chat: i64, chars: usize) -> Vec<(String, Preview)> {
+    ctx.settings
+        .values_with_prefix(chat, PREFIX)
+        .into_iter()
+        .map(|(trigger, stored)| (trigger, preview(&stored, chars)))
+        .collect()
+}
+
+fn preview(stored: &str, chars: usize) -> Preview {
+    let Some(answer) = StoredAnswer::decode(stored) else {
+        return Preview {
+            text: String::new(),
+            full: String::new(),
+            media: false,
+            formatted: false,
+        };
+    };
+    let folded = answer.body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = if folded.chars().count() > chars {
+        let mut cut: String = folded.chars().take(chars).collect();
+        cut.truncate(cut.trim_end().len());
+        cut.push('…');
+        cut
+    } else {
+        folded
+    };
+    Preview {
+        text,
+        media: !answer.media.is_empty(),
+        formatted: answer.formatted(),
+        full: answer.body,
+    }
+}
+
 fn key(trigger: &str) -> String {
     format!("{PREFIX}{trigger}")
 }
@@ -522,6 +563,34 @@ mod tests {
                 "«{command}» would silently claim ordinary speech"
             );
         }
+    }
+
+    #[test]
+    fn a_preview_is_the_start_of_the_reply_and_whether_media_goes_with_it() {
+        let source = "پاسخ سلام  خوش\nآمدی";
+        let body = &source["پاسخ ".len()..];
+        let stored = StoredAnswer::capture(String::new(), source, body, &[], false).encode();
+        let shown = preview(&stored, 80);
+        assert_eq!(shown.text, "سلام خوش آمدی");
+        assert!(!shown.media);
+
+        let shown = preview(&StoredAnswer::media_only("0a0b".to_owned()).encode(), 80);
+        assert_eq!(shown.text, "");
+        assert!(shown.media);
+
+        let shown = preview("0a0b|<b>قوانین</b> گروه", 80);
+        assert_eq!(shown.text, "قوانین گروه");
+        assert!(shown.media);
+        let shown = preview("|متن ساده", 80);
+        assert_eq!(shown.text, "متن ساده");
+        assert!(!shown.media);
+
+        let long = "a ".repeat(100);
+        let shown = preview(&format!("|{long}"), 80);
+        assert_eq!(shown.text.chars().count(), 80);
+        assert!(shown.text.ends_with("a…"));
+        let shown = preview("|۱۲۳۴۵۶", 3);
+        assert_eq!(shown.text, "۱۲۳…");
     }
 
     #[tokio::test]

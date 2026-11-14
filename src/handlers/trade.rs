@@ -41,13 +41,6 @@ fn deletes(margin: f32, limit: u32, _marked: bool, terse: bool) -> bool {
     !terse && margin.is_finite() && over(margin, limit)
 }
 
-const ESCALATE_FROM: f32 = -20.0;
-const ESCALATE_UNDER: u32 = 60;
-
-fn undecided(margin: f32) -> bool {
-    margin * 1000.0 >= ESCALATE_FROM && !over(margin, ESCALATE_UNDER)
-}
-
 fn transactional_frame(frame: &str) -> bool {
     matches!(
         frame,
@@ -98,19 +91,28 @@ fn authored(text: &str) -> String {
 }
 
 fn text_key(text: &str) -> u64 {
-    intent::text_key(&format!("trade-v3\0{text}\0authored\0{}", authored(text)))
+    intent::text_key(&format!("trade-v5\0{text}\0authored\0{}", authored(text)))
 }
+
+const ABSTAINED: intent::Scored = intent::Scored {
+    margin: f32::NAN,
+    frame: 0,
+};
 
 fn outcome_score(outcome: intent::ScoreOutcome) -> Option<intent::Scored> {
     match outcome {
         intent::ScoreOutcome::Scored(scored) => Some(scored),
-        intent::ScoreOutcome::Unavailable | intent::ScoreOutcome::Abstained(_) => None,
+        intent::ScoreOutcome::Abstained(_) => Some(ABSTAINED),
+        intent::ScoreOutcome::Unavailable => None,
     }
 }
 
+const AGREE_FROM: f32 = 0.005;
+const AGREE_SCALE: f32 = 2.0;
+
 fn try_judge(text: &str) -> Result<Option<intent::Scored>, super::nsfw::ModelError> {
     if authored(text).is_empty() {
-        return Ok(None);
+        return Ok(Some(ABSTAINED));
     }
     let clean = intent::descramble(text).0;
     let expanded = language::proposition(&clean);
@@ -118,29 +120,31 @@ fn try_judge(text: &str) -> Result<Option<intent::Scored>, super::nsfw::ModelErr
     let Some(small) = outcome_score(intent::score(input)?) else {
         return Ok(None);
     };
-    let mut scored = small;
-    if undecided(scored.margin) {
-        if !intent::big_available() {
-            return Ok(None);
-        }
-        let Some(escalated) = outcome_score(intent::score_big(input)?) else {
-            return Ok(None);
-        };
-        scored = escalated;
-        if language::corroborated(input)
-            && transactional_frame(intent::frame_name(small.frame))
-            && transactional_frame(intent::frame_name(scored.frame))
-            && small.margin >= 0.020
-            && scored.margin >= 0.020
-            && small.margin > scored.margin
-        {
-            scored = small;
-        }
+    if !small.margin.is_finite() {
+        return Ok(Some(ABSTAINED));
     }
-    if !transactional_frame(intent::frame_name(scored.frame)) {
-        scored.margin = scored.margin.min(0.0);
+    if !transactional_frame(intent::frame_name(small.frame)) || small.margin < AGREE_FROM {
+        return Ok(Some(intent::Scored {
+            margin: small.margin.min(0.0),
+            ..small
+        }));
     }
+    let Some(mut scored) = outcome_score(intent::score_big(input)?) else {
+        return Ok(None);
+    };
+    if !scored.margin.is_finite() {
+        return Ok(Some(ABSTAINED));
+    }
+    scored.margin = if transactional_frame(intent::frame_name(scored.frame)) {
+        agreed(small.margin, scored.margin)
+    } else {
+        scored.margin.min(0.0)
+    };
     Ok(Some(scored))
+}
+
+fn agreed(small: f32, big: f32) -> f32 {
+    LIMIT_RANGE.0 as f32 / 1000.0 + (small.min(big) - AGREE_FROM) * AGREE_SCALE
 }
 
 #[cfg(test)]
@@ -165,7 +169,7 @@ fn try_judge_followup(
     let Some(kind) = context::followup(&clean) else {
         return Ok(None);
     };
-    let Some(anchor) = try_judge(parent)? else {
+    let Some(anchor) = try_judge(parent)?.filter(|anchor| anchor.margin.is_finite()) else {
         return Ok(None);
     };
     let parent = intent::descramble(&authored(parent)).0;
@@ -211,6 +215,18 @@ pub struct Reading {
     pub suspicious: bool,
     pub listing: bool,
     pub terse: bool,
+    #[cfg(test)]
+    pub tampered: bool,
+    #[cfg(test)]
+    pub priced: bool,
+    #[cfg(test)]
+    pub contact: bool,
+    #[cfg(test)]
+    pub call: bool,
+    #[cfg(test)]
+    pub hedged: bool,
+    #[cfg(test)]
+    pub quoted: bool,
 }
 
 pub fn read(lowered: &str, digits: &str) -> Reading {
@@ -235,7 +251,88 @@ pub fn read(lowered: &str, digits: &str) -> Reading {
         suspicious,
         listing,
         terse,
+        #[cfg(test)]
+        tampered,
+        #[cfg(test)]
+        priced: priced(&super::digits(&scrubbed)),
+        #[cfg(test)]
+        contact: contact(&scrubbed, digits),
+        #[cfg(test)]
+        call: CALLS.iter().any(|call| scrubbed.contains(call))
+            || ["pv", "dm", "pm"]
+                .iter()
+                .any(|call| standalone(&scrubbed, call).is_some()),
+        #[cfg(test)]
+        hedged: rhetorical(&scrubbed) || quotative(&scrubbed, scrubbed.len()),
+        #[cfg(test)]
+        quoted: own != lowered.trim(),
     }
+}
+
+#[cfg(test)]
+const CALLS: &[&str] = &[
+    "پیوی",
+    "پی وی",
+    "دایرکت",
+    "خصوصی",
+    "پیام بد",
+    "تماس بگیر",
+    "زنگ بز",
+];
+
+#[cfg(test)]
+const CURRENCIES: &[&str] = &[
+    "تومن", "تومان", "تومنی", "ریال", "دلار", "دلاری", "میلیون", "میل", "هزار", "toman", "t",
+    "usd", "usdt", "milion", "mil",
+];
+
+#[cfg(test)]
+fn priced(digits: &str) -> bool {
+    let unit = |word: &str| {
+        let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+        CURRENCIES.contains(&word)
+    };
+    let words: Vec<&str> = digits.split_whitespace().collect();
+    words.iter().enumerate().any(|(at, word)| {
+        word.chars().any(|c| c.is_ascii_digit())
+            && (word.contains('$')
+                || unit(word.trim_start_matches(|c: char| c.is_ascii_digit() || ".,/".contains(c)))
+                || words.get(at + 1).is_some_and(|next| unit(next))
+                || (at > 0 && ["قیمت", "price", "gheymat"].contains(&words[at - 1])))
+    })
+}
+
+#[cfg(test)]
+fn contact(text: &str, digits: &str) -> bool {
+    let phone = digits.match_indices("09").any(|(at, _)| {
+        !digits[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_digit())
+            && digits[at..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .count()
+                == 11
+    });
+    phone
+        || has_card_number(digits)
+        || text.split_whitespace().any(|word| {
+            (word.len() > 1 && word.contains('@')) || word.contains("t.me/") || word.contains("://")
+        })
+}
+
+fn rhetorical(text: &str) -> bool {
+    standalone(text, "مگه").is_some()
+        || ["گزارش", "کلاهبردار", "اسکم", "بلاکش", "پولشویی"]
+            .iter()
+            .any(|word| text.contains(word))
+}
+
+fn quotative(text: &str, upto: usize) -> bool {
+    ["میگه", "گفت", "میگفت", "نوشته", "زده", "فرستاده", "گفته"]
+        .iter()
+        .any(|q| text[..upto].split_whitespace().any(|w| w == *q))
 }
 
 pub struct Armed {
@@ -461,15 +558,8 @@ fn standalone(text: &str, word: &str) -> Option<usize> {
 }
 
 fn listing_in(text: &str, digits: &str) -> bool {
-    let rhetorical = standalone(text, "مگه").is_some()
-        || ["گزارش", "کلاهبردار", "اسکم", "بلاکش", "پولشویی"]
-            .iter()
-            .any(|word| text.contains(word));
-    let reported = |upto: usize| {
-        ["میگه", "گفت", "میگفت", "نوشته", "زده", "فرستاده", "گفته"]
-            .iter()
-            .any(|q| text[..upto].split_whitespace().any(|w| w == *q))
-    };
+    let rhetorical = rhetorical(text);
+    let reported = |upto: usize| quotative(text, upto);
     if !rhetorical {
         for word in LISTING_WORDS {
             if let Some(end) = standalone(text, word) {
@@ -621,18 +711,22 @@ pub async fn watch(ctx: &Arc<Ctx>, message: &Message, chat: i64, view: &View<'_>
         reply_id,
         &text,
     );
-    if text.is_empty() {
+    if text.is_empty()
+        || (text.len() > intent::MAX_CHARS
+            && intent::descramble(&text).0.chars().count() > intent::MAX_CHARS)
+    {
         return;
     }
     let followup = context::followup(&intent::descramble(&authored(&text)).0).is_some();
     let contextual = followup && (parent.is_some() || reply_id.is_some());
     let reading = read(&text, view.digits());
-    if !reading.suspicious && !contextual {
+    if !reading.suspicious && reading.terse && !contextual {
         return;
     }
     let key = text_key(&text);
     let known = (!contextual).then(|| ctx.known_intent(key)).flatten();
-    if known.is_none() && !intent::available() {
+    if known.is_some_and(|margin| !margin.is_finite()) || (known.is_none() && !intent::available())
+    {
         return;
     }
     if super::is_exempt(ctx, message).await {
@@ -678,7 +772,9 @@ pub async fn watch(ctx: &Arc<Ctx>, message: &Message, chat: i64, view: &View<'_>
     let text = text.into_owned();
     let reply_message = contextual.then(|| message.clone());
     let ctx = Arc::clone(ctx);
-    let task_slot = ctx.intent_task_slot().await;
+    let Some(task_slot) = ctx.try_intent_task_slot() else {
+        return;
+    };
     Arc::clone(&ctx).spawn_owned(async move {
         let _task_slot = task_slot;
         let parent = if contextual && parent.is_none() {
@@ -701,7 +797,7 @@ pub async fn watch(ctx: &Arc<Ctx>, message: &Message, chat: i64, view: &View<'_>
         } else {
             parent
         };
-        let _slot = ctx.nsfw_slot().await;
+        let _slot = ctx.intent_slot().await;
         let started = std::time::Instant::now();
         let original = text.clone();
         let judged = tokio::task::spawn_blocking(
@@ -740,6 +836,10 @@ pub async fn watch(ctx: &Arc<Ctx>, message: &Message, chat: i64, view: &View<'_>
         let margin = scored.margin;
         if !contextual {
             ctx.remember_intent(key, margin);
+        }
+        if !margin.is_finite() {
+            log::info!("trade: chat {chat} text {key:016x} abstained");
+            return;
         }
         if !ctx
             .trade_history
@@ -1153,6 +1253,7 @@ mod tests {
     #[test]
     #[ignore = "needs intent.onnx, intent_big.onnx, intent_vocab.txt and intent_frames.txt"]
     fn the_battery_holds_in_the_real_pipeline() {
+        nsfw::configure_model_tests().expect("model test configuration");
         assert!(
             intent::available() && intent::big_available(),
             "both shipped models are required"
@@ -1171,7 +1272,7 @@ mod tests {
                 parts.next().unwrap().trim(),
             );
             let reading = read(&body.to_lowercase(), &super::super::digits(body));
-            let verdict = reading.suspicious.then(|| judge(body)).flatten();
+            let verdict = judge(body);
             for (index, limit) in [DEFAULT_LIMIT, LIMIT_RANGE.0].into_iter().enumerate() {
                 let deleted = verdict.is_some_and(|scored| {
                     deletes(scored.margin, limit, reading.listing, reading.terse)
@@ -1215,6 +1316,7 @@ mod tests {
     #[test]
     #[ignore = "needs shipped intent models; evaluates standalone and contextual regression corpus"]
     fn contextual_regression_corpus() {
+        nsfw::configure_model_tests().expect("model test configuration");
         assert!(intent::available(), "small intent model must be installed");
         assert!(
             intent::big_available(),
@@ -1231,11 +1333,7 @@ mod tests {
             let parent = fields.get(3).copied().unwrap_or("");
             let reading = read(text, &super::super::digits(text));
             let result = if parent.is_empty() {
-                reading
-                    .suspicious
-                    .then(|| judge(text))
-                    .flatten()
-                    .map(|score| (score, reading))
+                judge(text).map(|score| (score, reading))
             } else {
                 judge_followup(text, parent)
             };
@@ -1287,6 +1385,7 @@ mod tests {
             return;
         };
         let output = std::env::var("TRADE_EVAL_OUTPUT").expect("output path");
+        nsfw::configure_model_tests().expect("model test configuration");
         assert!(
             intent::available() && intent::big_available(),
             "both shipped models are required"
@@ -1303,11 +1402,7 @@ mod tests {
             };
             let reading = read(body, &super::super::digits(body));
             let result = if parent.is_empty() {
-                reading
-                    .suspicious
-                    .then(|| judge(body))
-                    .flatten()
-                    .map(|s| (s, reading))
+                judge(body).map(|s| (s, reading))
             } else {
                 judge_followup(body, parent)
             };
@@ -1316,15 +1411,74 @@ mod tests {
                     .as_ref()
                     .is_some_and(|(s, r)| deletes(s.margin, limit, r.listing, r.terse))
             };
+            let r = read(body, &super::super::digits(body));
+            let signals = serde_json::json!({
+                "listing": r.listing, "tampered": r.tampered, "priced": r.priced,
+                "contact": r.contact, "call": r.call, "hedged": r.hedged, "quoted": r.quoted,
+            });
             rows.push(serde_json::json!({
                 "label": label, "kind": kind, "text": body, "parent": parent,
                 "normalized": intent::descramble(body).0,
                 "margin": result.as_ref().map(|(s, _)| s.margin),
                 "frame": result.as_ref().map(|(s, _)| intent::frame_name(s.frame)),
                 "deleted": deleted(DEFAULT_LIMIT), "deleted_at_minimum": deleted(LIMIT_RANGE.0),
+                "suspicious": read(body, &super::super::digits(body)).suspicious,
+                "terse": read(body, &super::super::digits(body)).terse,
+                "tiers": parent.is_empty().then(|| both_tiers(body)).flatten(),
+                "signals": signals,
             }));
         }
         std::fs::write(output, serde_json::to_vec_pretty(&rows).unwrap()).expect("write report");
+    }
+
+    fn both_tiers(text: &str) -> Option<serde_json::Value> {
+        if authored(text).is_empty() {
+            return None;
+        }
+        let clean = intent::descramble(text).0;
+        let expanded = language::proposition(&clean);
+        let input = expanded.as_deref().unwrap_or(&clean);
+        let small = outcome_score(intent::score(input).ok()?)?;
+        let big = outcome_score(intent::score_big(input).ok()?)?;
+        if !small.margin.is_finite() || !big.margin.is_finite() {
+            return None;
+        }
+        Some(serde_json::json!([
+            small.margin,
+            intent::frame_name(small.frame),
+            big.margin,
+            intent::frame_name(big.frame),
+        ]))
+    }
+
+    #[test]
+    fn agreement_follows_the_weaker_reading() {
+        assert!(deletes(agreed(AGREE_FROM, 0.040), LIMIT_RANGE.0, false, false));
+        assert!(!deletes(agreed(0.004, 0.040), LIMIT_RANGE.0, false, false));
+        assert!(!deletes(agreed(0.040, -0.011), LIMIT_RANGE.0, false, false));
+        assert!(deletes(agreed(0.020, 0.020), LIMIT_RANGE.1, false, false));
+        assert!(!deletes(agreed(0.019, 0.040), LIMIT_RANGE.1, false, false));
+    }
+
+    #[test]
+    fn abstentions_are_verdicts_that_never_delete() {
+        let abstained = outcome_score(intent::ScoreOutcome::Abstained(
+            intent::AbstainReason::TooLong,
+        ))
+        .expect("an abstention is cached");
+        assert!(!abstained.margin.is_finite());
+        assert!(!deletes(abstained.margin, LIMIT_RANGE.0, true, false));
+        assert!(outcome_score(intent::ScoreOutcome::Unavailable).is_none());
+    }
+
+    #[test]
+    fn evidence_is_read_off_the_text() {
+        let read = |text: &str| read(text, &super::super::digits(text));
+        assert!(read("گوشی ۲۵ تومن").priced && read("قیمت ۴۵۰").priced && read("15$ each").priced);
+        assert!(!read("ساعت ۱۰ میام").priced && !read("۲۵ نفر بودیم").priced);
+        assert!(read("شماره من 09121234567").contact && read("بیا @seller_x").contact);
+        assert!(!read("ساعت 0912 بود").contact && !read("سلام @").contact);
+        assert!(read("بیا پیوی").call && read("pv bede").call && !read("pvc pipe").call);
     }
 
     #[test]

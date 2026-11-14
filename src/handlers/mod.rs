@@ -55,6 +55,7 @@ pub mod restrict;
 pub mod rich;
 pub mod rights;
 pub mod setting;
+pub mod settings_copy;
 pub mod stats;
 pub mod strict;
 pub mod style;
@@ -136,7 +137,9 @@ pub struct ChatState {
     temp_media: std::sync::Mutex<VecDeque<(Instant, i32)>>,
     said: std::sync::Mutex<VecDeque<(i64, i32)>>,
     roots: std::sync::Mutex<HashMap<i32, (Instant, Root)>>,
+    reports: report::Cards,
     swept_bots: AtomicBool,
+    calls: bots::Calls,
     tag_run: AtomicU64,
     member_clear: AtomicBool,
     joined: std::sync::Mutex<HashMap<i32, Vec<Joined>>>,
@@ -757,6 +760,7 @@ pub struct Ctx {
     intents: RwLock<HashMap<u64, (Instant, f32)>>,
 
     intent_tasks: OnceLock<Arc<tokio::sync::Semaphore>>,
+    intent_slots: tokio::sync::Semaphore,
     trade_history: std::sync::Mutex<trade::context::History>,
 
     samples: RwLock<Vec<Box<[f32]>>>,
@@ -1032,6 +1036,10 @@ mod kind {
     pub const ADMIN_LIST: u8 = 23;
     pub const PURGE_RUN: u8 = 24;
     pub const LEFT_BACK_EXPORT: u8 = 25;
+    pub const SETTINGS_COPY: u8 = 26;
+    pub const BOT_LOCK_RIGHTS: u8 = 27;
+    pub const BOT_POST_LOG: u8 = 28;
+    pub const BOT_CALL: u8 = 29;
 
     #[cfg(test)]
     pub const ALL: &[(&str, u8)] = &[
@@ -1060,6 +1068,10 @@ mod kind {
         ("ADMIN_LIST", ADMIN_LIST),
         ("PURGE_RUN", PURGE_RUN),
         ("LEFT_BACK_EXPORT", LEFT_BACK_EXPORT),
+        ("SETTINGS_COPY", SETTINGS_COPY),
+        ("BOT_LOCK_RIGHTS", BOT_LOCK_RIGHTS),
+        ("BOT_POST_LOG", BOT_POST_LOG),
+        ("BOT_CALL", BOT_CALL),
     ];
 }
 
@@ -1394,6 +1406,8 @@ async fn media_buffer_slot(
 const NSFW_TASKS: usize = 32;
 
 const INTENT_TASKS: usize = 16;
+
+const INTENT_SLOTS: usize = 1;
 
 #[derive(Clone, Copy, Debug)]
 struct CachedAdvert {
@@ -1767,6 +1781,7 @@ impl Ctx {
             custom: RwLock::new(HashMap::new()),
             intents: RwLock::new(HashMap::new()),
             intent_tasks: OnceLock::new(),
+            intent_slots: tokio::sync::Semaphore::new(INTENT_SLOTS),
             trade_history: std::sync::Mutex::new(trade::context::History::default()),
             samples: RwLock::new(Vec::new()),
             sample_at: AtomicUsize::new(0),
@@ -1794,6 +1809,10 @@ impl Ctx {
 
     fn start_links(&self) -> &[config::ConfiguredLink] {
         self.runtime_config.start_links.as_slice()
+    }
+
+    pub fn public_links(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        self.start_links().iter().map(config::ConfiguredLink::named)
     }
 
     pub fn miniapp_link(&self) -> Option<&str> {
@@ -2316,16 +2335,21 @@ impl Ctx {
         chat: i64,
     ) -> Result<Arc<Vec<imgfilter::Filter>>, sqlx::Error> {
         let slot = (chat as u64 % 256) as usize;
+        let cached = || {
+            let cache = self.image_filters.read().unwrap();
+            cache
+                .get(&chat)
+                .filter(|(at, _)| at.elapsed() < FILTERS_TTL)
+                .map(|(_, filters)| Arc::clone(filters))
+        };
+        if let Some(filters) = cached() {
+            return Ok(filters);
+        }
         let _loading = self.filter_loads[slot].lock().await;
         loop {
             let generation = self.filter_versions[slot].load(Ordering::Acquire);
-            {
-                let cache = self.image_filters.read().unwrap();
-                if let Some((at, filters)) = cache.get(&chat)
-                    && at.elapsed() < FILTERS_TTL
-                {
-                    return Ok(Arc::clone(filters));
-                }
+            if let Some(filters) = cached() {
+                return Ok(filters);
             }
             let filters: Vec<imgfilter::Filter> = self
                 .settings
@@ -2375,15 +2399,21 @@ impl Ctx {
         intents.insert(key, (Instant::now(), margin));
     }
 
-    pub async fn intent_task_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
+    pub fn try_intent_task_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         Arc::clone(self.intent_tasks.get_or_init(|| {
             Arc::new(tokio::sync::Semaphore::new(
                 self.runtime_config.intent_tasks,
             ))
         }))
-        .acquire_owned()
-        .await
-        .expect("the intent task semaphore is never closed")
+        .try_acquire_owned()
+        .ok()
+    }
+
+    pub async fn intent_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.intent_slots
+            .acquire()
+            .await
+            .expect("the intent semaphore is never closed")
     }
 
     pub(crate) fn known_custom(&self, file: i64, print: u64, source: &VisionSource) -> Option<f32> {
@@ -2566,6 +2596,19 @@ impl Ctx {
         match self.bot_session.peer(PeerId::user(user)?).await.ok().flatten()? {
             grammers_client::session::types::PeerInfo::User { bot, .. } => bot,
             _ => None,
+        }
+    }
+
+    pub async fn with_session_auth(&self, peer: PeerRef) -> PeerRef {
+        use grammers_client::session::types::{PeerAuth, PeerInfo};
+        if peer.auth != PeerAuth::default() || peer.id.kind() != PeerKind::User {
+            return peer;
+        }
+        match self.bot_session.peer(peer.id).await {
+            Ok(Some(PeerInfo::User {
+                auth: Some(auth), ..
+            })) => PeerRef { id: peer.id, auth },
+            _ => peer,
         }
     }
 
@@ -3178,6 +3221,10 @@ impl Ctx {
         )
     }
 
+    pub fn claim_settings_copy(&self, chat: i64) -> bool {
+        self.throttle(kind::SETTINGS_COPY, chat, 0, Duration::from_secs(10))
+    }
+
     pub fn may_export_left_back_invite(&self, chat: i64) -> bool {
         self.peek(chat).is_none_or(|state| {
             state
@@ -3261,6 +3308,18 @@ impl Ctx {
 
     pub fn claim_bot_removal(&self, chat: i64, user: i64) -> bool {
         self.throttle(kind::BOT_REMOVAL, chat, user, Duration::from_secs(60))
+    }
+
+    pub fn claim_bot_lock_rights_notice(&self, chat: i64) -> bool {
+        self.throttle(kind::BOT_LOCK_RIGHTS, chat, 0, Duration::from_secs(6 * 3600))
+    }
+
+    pub fn claim_bot_post_log(&self, chat: i64, user: i64) -> bool {
+        self.throttle(kind::BOT_POST_LOG, chat, user, Duration::from_secs(600))
+    }
+
+    pub fn claim_bot_call(&self, chat: i64, user: i64) -> bool {
+        self.throttle(kind::BOT_CALL, chat, user, Duration::from_secs(60))
     }
 
     pub fn claim_comment_sign(&self, chat: i64, post: i32) -> bool {
@@ -3776,6 +3835,9 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
                 };
                 let _slot = _state.slot().await;
                 let view = locks::View::new(&message);
+                if bots::on_bot_post(ctx, &message, &view).await {
+                    return;
+                }
                 locks::on_edit(ctx, &message, &view).await;
                 nsfw::watch(ctx, &message, chat, &view).await;
                 trade::watch(ctx, &message, chat, &view).await;
@@ -3936,7 +3998,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
             let ctx = Arc::clone(ctx);
             Arc::clone(&ctx).spawn_owned(async move {
                 let _permit = permit;
-                bots::sweep(&ctx, chat).await;
+                bots::sweep(&ctx, chat, true).await;
             });
         } else {
             state.swept_bots.store(false, Ordering::Relaxed);
@@ -3945,7 +4007,11 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
 
     let view = locks::View::new(message);
 
-    stats::count(&state, message, &view);
+    let bot_authored = bot_authored(message);
+
+    if !bot_authored {
+        stats::count(&state, message, &view);
+    }
     if matches!(
         message.action(),
         Some(grammers_client::tl::enums::MessageAction::ChatDeleteUser(_))
@@ -3969,7 +4035,11 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         }
         raid::check(ctx, message, chat).await;
     }
-    if flood::check(ctx, message).await {
+    if bots::on_bot_post(ctx, message, &view).await {
+        return;
+    }
+    bots::note_call(ctx, &state, chat, message).await;
+    if !bot_authored && flood::check(ctx, message).await {
         return;
     }
 
@@ -3994,7 +4064,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         return;
     }
 
-    if join::enforce(ctx, message).await {
+    if !bot_authored && join::enforce(ctx, message).await {
         return;
     }
 
@@ -4003,8 +4073,6 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
         locks::service(ctx, message).await;
         return;
     }
-
-    let bot_authored = bot_authored(message);
 
     let _ = locks::handle(ctx, message, &view).await
         || cleaner::on_join(ctx, message).await
@@ -4016,6 +4084,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, update: Update) {
                 && restrict::handle_custom(ctx, message, &view).await)
                 || welcome::handle(ctx, message).await
                 || config::handle(ctx, message).await
+                || settings_copy::handle(ctx, message, &view).await
                 || ephemeral::handle(ctx, message).await
                 || panel::handle(ctx, message).await
                 || setting::command(ctx, message).await
@@ -4663,6 +4732,7 @@ pub struct AdminEntry {
     pub name: String,
     pub is_creator: bool,
     pub is_bot: bool,
+    pub removable: bool,
 }
 
 pub async fn admin_entries(ctx: &Ctx, chat: PeerRef) -> Vec<AdminEntry> {
@@ -4671,6 +4741,7 @@ pub async fn admin_entries(ctx: &Ctx, chat: PeerRef) -> Vec<AdminEntry> {
         .iter_participants(chat)
         .filter(grammers_client::tl::enums::ChannelParticipantsFilter::ChannelParticipantsAdmins);
     let mut found = Vec::new();
+    let supergroup = chat.id.kind() == PeerKind::Channel;
     while let Ok(Some(participant)) = participants.next().await {
         if !holds_the_group(&participant) {
             continue;
@@ -4686,13 +4757,20 @@ pub async fn admin_entries(ctx: &Ctx, chat: PeerRef) -> Vec<AdminEntry> {
             continue;
         };
         let user = participant.user();
+        let is_creator = matches!(&participant.role, grammers_client::peer::Role::Creator(_));
+        let is_bot = user.is_some_and(|user| user.is_bot());
+        let removable = supergroup
+            && !is_creator
+            && !is_bot
+            && matches!(&participant.role, grammers_client::peer::Role::Admin(admin) if admin.can_edit());
         found.push(AdminEntry {
             id,
             name: user
                 .map(|user| esc(&user.full_name()))
                 .unwrap_or_else(|| id.to_string()),
-            is_creator: matches!(&participant.role, grammers_client::peer::Role::Creator(_)),
-            is_bot: user.is_some_and(|user| user.is_bot()),
+            is_creator,
+            is_bot,
+            removable,
         });
     }
     found
@@ -5865,6 +5943,7 @@ mod tests {
             include_str!("invite.rs"),
             include_str!("trade.rs"),
             include_str!("voicemonitor.rs"),
+            include_str!("settings_copy.rs"),
         ] {
             assert!(!file.contains('\u{200c}'), "found U+200C in a handler");
         }
@@ -6000,7 +6079,7 @@ mod tests {
         before(
             include_str!("bots.rs"),
             "pub async fn on_participant_update(",
-            "ctx.known_bot(user).await == Some(false)",
+            "ctx.known_bot(user).await",
             "ctx.client.resolve_peer(peer)",
         );
         before(
@@ -6038,6 +6117,38 @@ mod tests {
             "if super::commands::contains(CONFIG, text) {",
             "super::can_manage(ctx, message)",
             "sender_is_creator(ctx, message)",
+        );
+    }
+
+    #[test]
+    fn a_bots_post_meets_the_bot_lock_before_anything_that_deletes_it() {
+        let source = include_str!("mod.rs");
+        let body = source.split_once("pub async fn dispatch(").unwrap().1;
+        let body = body.split_once("\n}\n").unwrap().0;
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("{needle} in dispatch"))
+        };
+        let judged = at("bots::on_bot_post(ctx, message, &view)");
+        let noted = at("bots::note_call(ctx, &state, chat, message)");
+        for deleter in [
+            "flood::check(ctx, message)",
+            "join::enforce(ctx, message)",
+            "locks::moderate(ctx, message, chat, &view)",
+            "locks::handle(ctx, message, &view)",
+        ] {
+            assert!(judged < at(deleter), "the bot lock judges a bot's post before {deleter}");
+            assert!(noted < at(deleter), "the tag that calls a bot is noted before {deleter}");
+        }
+        for skipped in [
+            "!bot_authored && flood::check(ctx, message)",
+            "!bot_authored && join::enforce(ctx, message)",
+        ] {
+            at(skipped);
+        }
+        assert!(
+            at("bots::on_bot_post(ctx, &message, &view)") < at("locks::on_edit(ctx, &message, &view)"),
+            "and an edited one before the edit locks"
         );
     }
 

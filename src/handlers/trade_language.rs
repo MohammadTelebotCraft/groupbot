@@ -52,38 +52,6 @@ pub fn proposition(text: &str) -> Option<String> {
     None
 }
 
-pub fn corroborated(text: &str) -> bool {
-    if context::object(text).is_none() {
-        return false;
-    }
-    let price = text.chars().any(|c| c.is_numeric())
-        && ["$", "تومن", "تومان", "دلار", "usdt", "قیمت"]
-            .iter()
-            .any(|w| text.contains(w));
-    let owns = [
-        "my account",
-        "my phone",
-        "my skin",
-        "اکانتم",
-        "این اکانت",
-        "این گوشی",
-    ]
-    .iter()
-    .any(|w| text.contains(w));
-    let active = [
-        "میفروشم",
-        "خریدارم",
-        "selling",
-        "sell my",
-        "trading my",
-        "معاوضه میکنم",
-    ]
-    .iter()
-    .any(|w| text.contains(w));
-    let exchange = text.contains("trading my") && text.contains(" for ");
-    active && owns && (price || exchange)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,7 +70,5 @@ mod tests {
             assert!(proposition(&format!("«{text}»")).is_none());
         }
         assert!(proposition("برای این اکانت ۲ تومن نمیخوام").is_none());
-        assert!(!corroborated("فقط نازتو خریدارم"));
-        assert!(!corroborated("قیمت اکانت ۵۰۰ تومن"));
     }
 }

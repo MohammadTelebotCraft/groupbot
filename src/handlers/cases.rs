@@ -387,7 +387,12 @@ pub async fn record_warning(
     .await
 }
 
-pub async fn create_report(ctx: &Ctx, command: &Message, reported: &Message) -> Option<i64> {
+pub async fn create_report(
+    ctx: &Ctx,
+    command: &Message,
+    reported: &Message,
+    reason: &str,
+) -> Option<i64> {
     let chat = command.peer_id().bot_api_dialog_id()?;
     let reporter = command.sender_id().and_then(PeerId::bare_id);
     let proof = evidence(reported);
@@ -395,11 +400,14 @@ pub async fn create_report(ctx: &Ctx, command: &Message, reported: &Message) -> 
         ctx,
         NewModerationCase {
             chat,
-            subject: reported.sender_id().and_then(PeerId::bare_id),
+            subject: reported
+                .sender_id()
+                .filter(|peer| peer.kind() == grammers_client::session::types::PeerKind::User)
+                .and_then(PeerId::bare_id),
             subject_name: name_of(reported),
             source: "report".to_owned(),
             rule: "member_report".to_owned(),
-            reason: "گزارش عضو".to_owned(),
+            reason: reason.to_owned(),
             message: proof.message,
             media_kind: proof.media_kind,
             evidence: proof.text,
@@ -711,17 +719,12 @@ pub async fn on_callback(ctx: &Ctx, query: &CallbackQuery, payload: &str, chat: 
         .sender_id()
         .bare_id()
         .map(|id| (id, actor_name.as_str()));
-    if action == "d"
-        && actor.is_some_and(|(id, _)| !super::limits::permits(ctx, chat, id, super::limits::CLEAN))
-    {
-        super::limits::refuse(query, super::limits::CLEAN).await;
-        return;
-    }
     let answer = match action {
-        "k" => resolve(ctx, chat, id, actor, None).await,
-        "d" => resolve_delete(ctx, chat, id, actor).await,
         "u" => reverse(ctx, chat, id, actor, None).await,
-        _ => return,
+        _ => {
+            super::report::on_card(ctx, query, action, id, chat).await;
+            return;
+        }
     };
     if let Err(error) = crate::response::send_callback(
         &ctx.client,
@@ -747,7 +750,7 @@ pub async fn resolve(
     if let Err(message) = valid_note(note) {
         return message.to_owned();
     }
-    transition_case(
+    let (closed, answer) = transition(
         ctx,
         ModerationCaseTransition {
             chat,
@@ -760,7 +763,16 @@ pub async fn resolve(
             note,
         },
     )
-    .await
+    .await;
+    if closed {
+        settle_card(ctx, chat, id, "بدون اقدام بسته شد", actor).await;
+    }
+    answer
+}
+
+async fn settle_card(ctx: &Ctx, chat: i64, id: i64, outcome: &str, actor: Option<(i64, &str)>) {
+    let by = actor.map_or("ادمین", |(_, name)| name);
+    super::report::settled_elsewhere(ctx, chat, id, outcome, by).await;
 }
 
 pub async fn resolve_delete(ctx: &Ctx, chat: i64, id: i64, actor: Option<(i64, &str)>) -> String {
@@ -797,7 +809,7 @@ pub async fn resolve_delete(ctx: &Ctx, chat: i64, id: i64, actor: Option<(i64, &
             .await;
         return "حذف پیام انجام نشد.".to_owned();
     }
-    transition_case(
+    let (closed, answer) = transition(
         ctx,
         ModerationCaseTransition {
             chat,
@@ -810,7 +822,11 @@ pub async fn resolve_delete(ctx: &Ctx, chat: i64, id: i64, actor: Option<(i64, &
             note: None,
         },
     )
-    .await
+    .await;
+    if closed {
+        settle_card(ctx, chat, id, "پیام حذف شد", actor).await;
+    }
+    answer
 }
 
 pub async fn reverse(
@@ -937,20 +953,30 @@ pub async fn reverse(
     .await
 }
 
-async fn transition_case(ctx: &Ctx, transition: ModerationCaseTransition<'_>) -> String {
+async fn transition_case(ctx: &Ctx, change: ModerationCaseTransition<'_>) -> String {
+    transition(ctx, change).await.1
+}
+
+async fn transition(ctx: &Ctx, transition: ModerationCaseTransition<'_>) -> (bool, String) {
     let case_id = transition.case_id;
     let to = transition.to;
     match ctx.settings.transition_moderation_case(transition).await {
-        Ok(true) => if to == "reversed" {
-            "✓ پرونده لغو شد."
-        } else {
-            "✓ پرونده بسته شد."
-        }
-        .to_owned(),
-        Ok(false) => "این پرونده قبلا تغییر کرده یا پیدا نشد.".to_owned(),
+        Ok(true) => (
+            true,
+            if to == "reversed" {
+                "✓ پرونده لغو شد."
+            } else {
+                "✓ پرونده بسته شد."
+            }
+            .to_owned(),
+        ),
+        Ok(false) => (false, "این پرونده قبلا تغییر کرده یا پیدا نشد.".to_owned()),
         Err(error) => {
             log::warn!("case {case_id} transition failed: {error}");
-            "تغییر پرونده ذخیره نشد. کمی بعد دوباره امتحان کنید.".to_owned()
+            (
+                false,
+                "تغییر پرونده ذخیره نشد. کمی بعد دوباره امتحان کنید.".to_owned(),
+            )
         }
     }
 }

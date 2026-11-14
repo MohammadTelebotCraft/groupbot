@@ -5,7 +5,7 @@ use image::RgbImage;
 
 use super::nsfw::{self, ModelError, SessionPool};
 
-const DETECT: &[u8] = include_bytes!("../../assets/face_detect.onnx");
+pub(super) const DETECT: &[u8] = include_bytes!("../../assets/face_detect.onnx");
 const EMBED: &[u8] = include_bytes!("../../assets/face_embed.onnx");
 
 pub const WIDTH: usize = 128;

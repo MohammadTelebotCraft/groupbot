@@ -1079,6 +1079,7 @@ dependencies = [
  "grammers-session",
  "hmac 0.12.1",
  "image",
+ "libloading 0.8.9",
  "log",
  "ort",
  "qrcode",

@@ -542,6 +542,10 @@ impl ChatSettings<'_> {
             .filter(|value| !value.is_empty())
     }
 
+    pub fn rows(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0.into_iter().flat_map(ChatRows::iter)
+    }
+
     pub fn parsed<T: std::str::FromStr>(
         &self,
         key: &str,
@@ -5004,6 +5008,31 @@ impl Settings {
         Ok(rows.iter().map(moderation_case_from_row).collect())
     }
 
+    pub async fn unbanned_case_subjects(
+        &self,
+        chat: i64,
+        since: i64,
+        rule: &str,
+        limit: i64,
+    ) -> Result<Vec<(i64, String)>> {
+        let rows = sqlx::query(
+            "SELECT subject_user_id, (array_agg(subject_name ORDER BY created_at DESC, id DESC))[1]
+             FROM moderation_cases
+             WHERE chat_id = $1 AND created_at >= $2 AND subject_user_id IS NOT NULL
+             GROUP BY subject_user_id
+             HAVING NOT bool_or(rule_key = $3 AND primary_action = 'ban' AND status = 'resolved')
+             ORDER BY max(created_at) DESC
+             LIMIT $4",
+        )
+        .bind(chat)
+        .bind(since)
+        .bind(rule)
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|row| (row.get(0), row.get(1))).collect())
+    }
+
     pub async fn moderation_cases_open_first(
         &self,
         chat: i64,
@@ -5101,6 +5130,48 @@ impl Settings {
             .bind(chat)
             .bind(case_id)
             .bind(event_kind)
+            .bind(actor.map(|value| value.0))
+            .bind(actor.map_or("", |value| value.1))
+            .bind(action)
+            .bind(note)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(changed)
+    }
+
+    pub async fn settle_report_case(
+        &self,
+        chat: i64,
+        case_id: i64,
+        action: &str,
+        actor: Option<(i64, &str)>,
+        note: Option<&str>,
+    ) -> Result<bool> {
+        let now = unix_now();
+        let mut tx = self.pool.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE moderation_cases SET status = 'resolved', primary_action = $1, updated_at = $2
+             WHERE chat_id = $3 AND id = $4 AND status = 'open' AND source = 'report'",
+        )
+        .bind(action)
+        .bind(now)
+        .bind(chat)
+        .bind(case_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        if changed {
+            sqlx::query(
+                "INSERT INTO moderation_case_events
+                 (chat_id, case_id, kind, actor_id, actor_name, action, note, created_at)
+                 VALUES ($1, $2, 'resolved', $3, $4, $5, $6, $7)",
+            )
+            .bind(chat)
+            .bind(case_id)
             .bind(actor.map(|value| value.0))
             .bind(actor.map_or("", |value| value.1))
             .bind(action)
@@ -7713,6 +7784,69 @@ mod tests {
         assert_eq!(settings.warns_of(chat, 12_345).await.unwrap(), 0);
 
         sqlx::query(wipe)
+            .bind(chat)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated PostgreSQL moderation-case query test"]
+    async fn the_log_names_whom_no_bot_lock_ban_reached() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let settings = Settings::connect(&url).await.unwrap();
+        let chat = -999_999_999_960;
+        admit_test_chats(&settings, &[chat]).await;
+        sqlx::query("DELETE FROM moderation_cases WHERE chat_id = $1")
+            .bind(chat)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+        let case = |subject: i64, name: &str, rule: &str, action: &str, status: &str| {
+            NewModerationCase {
+                chat,
+                subject: Some(subject),
+                subject_name: name.to_owned(),
+                source: "automatic".to_owned(),
+                rule: rule.to_owned(),
+                reason: "r".to_owned(),
+                message: None,
+                media_kind: None,
+                evidence: None,
+                evidence_hash: None,
+                action: action.to_owned(),
+                action_until: None,
+                status: status.to_owned(),
+                actor: None,
+                actor_name: String::new(),
+                event_kind: "action_succeeded".to_owned(),
+                event_note: None,
+            }
+        };
+        for draft in [
+            case(1, "old", "join_gate", "delete", "resolved"),
+            case(1, "new", "bot", "ban", "open"),
+            case(2, "b", "join_gate", "delete", "resolved"),
+            case(2, "b", "bot", "ban", "resolved"),
+            case(3, "c", "links", "ban", "resolved"),
+            case(4, "stale", "join_gate", "delete", "resolved"),
+        ] {
+            settings.create_moderation_case(draft).await.unwrap();
+        }
+        sqlx::query("UPDATE moderation_cases SET created_at = 1 WHERE chat_id = $1 AND subject_user_id = 4")
+            .bind(chat)
+            .execute(&settings.pool)
+            .await
+            .unwrap();
+
+        let mut found = settings
+            .unbanned_case_subjects(chat, 1_000, "bot", 10)
+            .await
+            .unwrap();
+        found.sort();
+        assert_eq!(found, [(1, "new".to_owned()), (3, "c".to_owned())]);
+
+        sqlx::query("DELETE FROM moderation_cases WHERE chat_id = $1")
             .bind(chat)
             .execute(&settings.pool)
             .await

@@ -90,6 +90,13 @@ pub async fn handle(ctx: &Ctx, message: &Message) -> bool {
             return true;
         }
     };
+    if !add
+        && changed
+        && ctx.settings.is_locked(chat, super::bots::LOCK)
+        && ctx.known_bot(target_id).await != Some(false)
+    {
+        super::bots::on_lock_set(ctx, chat, super::bots::LOCK, true).await;
+    }
     let mark = if add { "✓" } else { "✗" };
     let what = match (add, changed) {
         (true, true) => "به لیست ویژه اضافه شد",

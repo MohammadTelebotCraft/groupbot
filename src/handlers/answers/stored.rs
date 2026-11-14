@@ -42,6 +42,10 @@ impl StoredAnswer {
         }
     }
 
+    pub(super) fn formatted(&self) -> bool {
+        !self.entities.is_empty()
+    }
+
     pub(super) fn media_only(media: String) -> Self {
         Self {
             media,

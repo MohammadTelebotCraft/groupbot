@@ -110,17 +110,22 @@ const HEAD_DELETE: f32 = 0.95;
 
 const STACK_VETO: f32 = 0.40;
 
+const DRAWN_SEEN: f32 = 0.15;
+const HEAD_DRAWN: f32 = 0.85;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Arbiter {
     pub explicit: f32,
     pub revealing: f32,
     pub head: f32,
     pub stack: f32,
+    pub drawn: f32,
 }
 
 impl Arbiter {
     fn agrees(&self) -> bool {
         self.stack >= STACK_VETO
+            && (self.drawn < DRAWN_SEEN || self.head >= HEAD_DRAWN)
             && (self.head_sure() || (self.explicit >= AGREE && self.head >= HEAD_VETO))
     }
 
@@ -144,6 +149,7 @@ pub fn arbiter_of(embedding: &[f32]) -> Arbiter {
         revealing: super::vision::dot(embedding, &super::concept_vectors::SUGGESTIVE) - ordinary,
         head: super::nsfw_head::probability(embedding),
         stack: 1.0,
+        drawn: 0.0,
     }
 }
 
@@ -397,16 +403,172 @@ impl std::fmt::Display for ModelError {
 
 impl std::error::Error for ModelError {}
 
-pub struct SessionPool {
-    sessions: Box<[Session]>,
-    next: AtomicUsize,
+pub struct SessionPool(std::sync::Arc<PoolInner>);
+
+const POOL_IDLE: std::time::Duration = std::time::Duration::from_secs(600);
+
+static PROBING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn probe_every_session() {
+    PROBING.store(true, Ordering::Relaxed);
 }
 
-impl SessionPool {
-    pub fn with<T>(&self, run: impl FnOnce(&Session) -> T) -> T {
-        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.sessions.len();
-        run(&self.sessions[index])
+type Load = Box<dyn Fn() -> Result<ort::session::Session, String> + Send + Sync>;
+
+struct Slot {
+    held: std::sync::Mutex<(Option<std::sync::Arc<Session>>, std::time::Instant)>,
+    busy: std::sync::atomic::AtomicBool,
+}
+
+struct PoolInner {
+    what: String,
+    slots: Box<[Slot]>,
+    next: AtomicUsize,
+    load: Load,
+}
+
+struct Release<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for Release<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
+}
+
+static POOLS: std::sync::Mutex<Vec<std::sync::Weak<PoolInner>>> = std::sync::Mutex::new(Vec::new());
+
+impl SessionPool {
+    fn open(what: &str, count: usize, load: Load) -> Option<Self> {
+        if !started() || count == 0 {
+            return None;
+        }
+        let first = match load() {
+            Ok(session) => std::sync::Arc::new(std::sync::Mutex::new(session)),
+            Err(error) => {
+                eprintln!("nsfw: the {what} pool would not load: {error}");
+                return None;
+            }
+        };
+        let now = std::time::Instant::now();
+        let slots = std::iter::once(Some(first))
+            .chain(std::iter::repeat_with(|| None))
+            .take(count)
+            .map(|session| Slot {
+                held: std::sync::Mutex::new((session, now)),
+                busy: std::sync::atomic::AtomicBool::new(false),
+            })
+            .collect();
+        let inner = std::sync::Arc::new(PoolInner {
+            what: what.to_owned(),
+            slots,
+            next: AtomicUsize::new(0),
+            load,
+        });
+        POOLS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(std::sync::Arc::downgrade(&inner));
+        static REAPER: std::sync::Once = std::sync::Once::new();
+        REAPER.call_once(|| {
+            std::thread::spawn(|| {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    reap_pools(POOL_IDLE);
+                }
+            });
+        });
+        Some(Self(inner))
+    }
+
+    pub fn with<T>(
+        &self,
+        run: impl FnOnce(&Session) -> Result<T, ModelError>,
+    ) -> Result<T, ModelError> {
+        let pool = &*self.0;
+        let free = if PROBING.load(Ordering::Relaxed) {
+            None
+        } else {
+            pool.slots.iter().find(|slot| !slot.busy.swap(true, Ordering::AcqRel))
+        };
+        let _release = free.map(|slot| Release(&slot.busy));
+        let slot = free.unwrap_or_else(|| {
+            &pool.slots[pool.next.fetch_add(1, Ordering::Relaxed) % pool.slots.len()]
+        });
+        let session = {
+            let mut held = slot
+                .held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            held.1 = std::time::Instant::now();
+            match &held.0 {
+                Some(session) => std::sync::Arc::clone(session),
+                None => {
+                    let session = (pool.load)().map_err(|error| {
+                        ModelError::runtime(format!("the {} would not reload: {error}", pool.what))
+                    })?;
+                    let session = std::sync::Arc::new(std::sync::Mutex::new(session));
+                    held.0 = Some(std::sync::Arc::clone(&session));
+                    session
+                }
+            }
+        };
+        run(&session)
+    }
+
+    #[cfg(test)]
+    fn loaded(&self) -> usize {
+        self.0
+            .slots
+            .iter()
+            .filter(|slot| slot.held.lock().unwrap().0.is_some())
+            .count()
+    }
+}
+
+impl PoolInner {
+    fn reap(&self, idle: std::time::Duration) -> Vec<std::sync::Arc<Session>> {
+        self.slots
+            .iter()
+            .filter(|slot| !slot.busy.load(Ordering::Acquire))
+            .filter_map(|slot| {
+                let mut held = slot
+                    .held
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (held.1.elapsed() >= idle).then(|| held.0.take()).flatten()
+            })
+            .collect()
+    }
+}
+
+fn reap_pools(idle: std::time::Duration) -> usize {
+    let pools: Vec<_> = {
+        let mut pools = POOLS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pools.retain(|pool| pool.strong_count() > 0);
+        pools.iter().filter_map(std::sync::Weak::upgrade).collect()
+    };
+    let mut names = Vec::new();
+    let mut dropped = Vec::new();
+    for pool in &pools {
+        let sessions = pool.reap(idle);
+        if !sessions.is_empty() {
+            names.push(format!("{} x{}", pool.what, sessions.len()));
+            dropped.extend(sessions);
+        }
+    }
+    let count = dropped.len();
+    if count != 0 {
+        drop(dropped);
+        trim::release_freed();
+        log::info!(
+            "nsfw: dropped after {}s without a pass: {}",
+            idle.as_secs(),
+            names.join(", ")
+        );
+    }
+    count
 }
 
 static RUNTIME_STAGING_SEQUENCE: std::sync::atomic::AtomicU64 =
@@ -585,11 +747,14 @@ fn runtime_path() -> Result<std::path::PathBuf, String> {
 
 fn initialize_runtime(path: &std::path::Path) -> Result<(), String> {
     let environment = ort::init_from(path).map_err(|error| error.to_string())?;
-    if environment.commit() {
-        Ok(())
-    } else {
-        Err("another ONNX Runtime environment was already committed".to_owned())
+    if !environment.commit() {
+        return Err("another ONNX Runtime environment was already committed".to_owned());
     }
+    let keep = builder()?
+        .commit_from_memory(super::facelock::DETECT)
+        .map_err(|error| error.to_string())?;
+    std::mem::forget(keep);
+    Ok(())
 }
 
 fn builder() -> Result<ort::session::builder::SessionBuilder, String> {
@@ -669,60 +834,32 @@ pub fn open_path_configured(
 }
 
 pub fn open_path_pool(path: &std::path::Path, what: &str, count: usize) -> Option<SessionPool> {
-    if !started() || count == 0 {
-        return None;
-    }
-    let mut sessions = Vec::with_capacity(count);
-    for _ in 0..count {
-        let mut builder = match builder() {
-            Ok(builder) => builder,
-            Err(error) => {
-                eprintln!("nsfw: the {what} pool builder failed: {error}");
-                return None;
+    let stamp = |path: &std::path::Path| {
+        let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+        Ok::<_, String>((metadata.len(), metadata.modified().ok()))
+    };
+    let opened = stamp(path).ok();
+    let path = path.to_owned();
+    SessionPool::open(
+        what,
+        count,
+        Box::new(move || {
+            if stamp(&path).ok() != opened {
+                return Err(format!("{} changed since it was checked", path.display()));
             }
-        };
-        match builder.commit_from_file(path) {
-            Ok(session) => sessions.push(std::sync::Mutex::new(session)),
-            Err(e) => {
-                eprintln!(
-                    "nsfw: the {what} pool would not load from {}: {e}",
-                    path.display()
-                );
-                return None;
-            }
-        }
-    }
-    Some(SessionPool {
-        sessions: sessions.into_boxed_slice(),
-        next: AtomicUsize::new(0),
-    })
+            builder()?
+                .commit_from_file(&path)
+                .map_err(|error| format!("{}: {error}", path.display()))
+        }),
+    )
 }
 
-pub fn open_pool(bytes: &[u8], what: &str, count: usize) -> Option<SessionPool> {
-    if !started() || count == 0 {
-        return None;
-    }
-    let mut sessions = Vec::with_capacity(count);
-    for _ in 0..count {
-        let mut builder = match builder() {
-            Ok(builder) => builder,
-            Err(error) => {
-                eprintln!("nsfw: the {what} pool builder failed: {error}");
-                return None;
-            }
-        };
-        match builder.commit_from_memory(bytes) {
-            Ok(session) => sessions.push(std::sync::Mutex::new(session)),
-            Err(e) => {
-                eprintln!("nsfw: the {what} pool would not load: {e}");
-                return None;
-            }
-        }
-    }
-    Some(SessionPool {
-        sessions: sessions.into_boxed_slice(),
-        next: AtomicUsize::new(0),
-    })
+pub fn open_pool(bytes: &'static [u8], what: &str, count: usize) -> Option<SessionPool> {
+    SessionPool::open(
+        what,
+        count,
+        Box::new(move || builder()?.commit_from_memory(bytes).map_err(|error| error.to_string())),
+    )
 }
 
 pub(super) fn initialize_pool_once_retry<'a, T>(
@@ -3853,6 +3990,7 @@ fn assemble_judgement(
     }
     let arbiter = arbiter.map(|value| Arbiter {
         stack: stack_of(&stack_features(score, look.peak, look.frail, grade, &value)),
+        drawn: grade.map_or(0.0, |grade| grade.drawn),
         ..value
     });
     Ok(Judgement {
@@ -4773,7 +4911,38 @@ fn scan_advert_frames_with(
 fn scan_advert_frames(
     frames: &[Arc<image::RgbImage>],
 ) -> Result<(super::AdvertVerdict, usize, usize), ModelError> {
-    scan_advert_frames_with(frames, super::ocr::read)
+    scan_advert_frames_with(frames, read_ahead(frames, OCR_FRAME_FANOUT, super::ocr::read))
+}
+
+const OCR_FRAME_FANOUT: usize = 3;
+
+fn read_ahead<'a>(
+    frames: &'a [Arc<image::RgbImage>],
+    fanout: usize,
+    read: impl Fn(&image::RgbImage) -> Result<String, ModelError> + Sync + 'a,
+) -> impl FnMut(&image::RgbImage) -> Result<String, ModelError> + 'a {
+    let mut ready = std::collections::VecDeque::new();
+    let mut next = 0;
+    move |_| {
+        if ready.is_empty() {
+            let batch = &frames[next..(next + fanout.max(1)).min(frames.len())];
+            next += batch.len();
+            let read = &read;
+            std::thread::scope(|scope| {
+                let rest = batch[1..]
+                    .iter()
+                    .map(|frame| scope.spawn(move || read(frame)))
+                    .collect::<Vec<_>>();
+                ready.push_back(read(&batch[0]));
+                ready.extend(rest.into_iter().map(|reading| {
+                    reading
+                        .join()
+                        .unwrap_or_else(|_| Err(ModelError::runtime("an OCR frame reader panicked")))
+                }));
+            });
+        }
+        ready.pop_front().expect("the scan asks once per frame")
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -6596,6 +6765,8 @@ fn spared(judged: Judgement, spare: bool, chat: i64, id: i64) -> bool {
         "the head reads it as an ordinary picture"
     } else if judged.arbiter.is_some_and(|a| a.stack < STACK_VETO) {
         "the fitted veto reads it as an ordinary picture"
+    } else if judged.arbiter.is_some_and(|a| a.drawn >= DRAWN_SEEN && a.head < HEAD_DRAWN) {
+        "a drawing, and the head is not sure of it"
     } else if judged.arbiter.is_some_and(|a| !a.agrees()) {
         "the general model reads it as an ordinary photograph"
     } else if judged.innocent && !sure {
@@ -6834,6 +7005,65 @@ mod tests {
             0,
             &InvocationError::Io(std::io::Error::from(std::io::ErrorKind::TimedOut))
         ));
+    }
+
+    #[test]
+    fn a_pool_loads_a_session_when_needed_and_drops_it_idle() {
+        configure_model_tests().expect("model configuration");
+        let pool = open_pool(GRADE, "test grader", 2).expect("the bundled grader must load");
+        let view = image::RgbImage::from_pixel(GRADE_SIDE as u32, GRADE_SIDE as u32, image::Rgb([90; 3]));
+        let pass = || pool.with(|session| grade_with(session, &view)).expect("a pass").hard;
+        let first = pass();
+        pass();
+        assert_eq!(pool.loaded(), 1, "passes one after another share a session");
+        pool.with(|_| {
+            pass();
+            Ok(())
+        })
+        .expect("a pass inside a pass");
+        assert_eq!(pool.loaded(), 2, "an overlapping pass loads the second");
+        assert!(pool.0.reap(Duration::from_secs(3600)).is_empty(), "just used");
+        assert_eq!(pool.0.reap(Duration::ZERO).len(), 2);
+        assert_eq!(pool.loaded(), 0);
+        assert_eq!(pass(), first, "a reloaded session answers as the first did");
+        assert_eq!(pool.loaded(), 1);
+    }
+
+    #[test]
+    #[ignore = "needs vision.onnx from an export"]
+    fn dropping_idle_pools_returns_their_memory() {
+        configure_model_tests().expect("configure the test's VISION_FILES bundle");
+        let anonymous_mb = || {
+            let status = std::fs::read_to_string("/proc/self/status").expect("status");
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("RssAnon:"))
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|kb| kb.parse::<u64>().ok())
+                .expect("RssAnon")
+                / 1024
+        };
+        let image = image::RgbImage::from_pixel(384, 384, image::Rgb([127; 3]));
+        let warm = || {
+            let started = Instant::now();
+            look(&image).expect("nsfw");
+            grade(&image).expect("grader");
+            let small = started.elapsed();
+            super::super::vision::embed_of(&image).expect("vision");
+            (small, started.elapsed())
+        };
+        let before = anonymous_mb();
+        warm();
+        let (small, all) = warm();
+        let held = anonymous_mb();
+        reap_pools(Duration::ZERO);
+        let idle = anonymous_mb();
+        let (cold_small, cold_all) = warm();
+        eprintln!(
+            "pools: {before} MB before, {held} MB held, {idle} MB after the idle drop; \
+             nsfw+grader {small:?} warm, {cold_small:?} reloading; with vision {all:?} warm, {cold_all:?} reloading"
+        );
+        assert!(held - idle >= 300, "only {} MB came back", held - idle);
     }
 
     #[test]
@@ -8602,6 +8832,64 @@ mod tests {
     }
 
     #[test]
+    fn read_ahead_answers_in_frame_order_and_stops_after_the_block_batch() {
+        let frames = (0..7u8)
+            .map(|at| Arc::new(image::RgbImage::from_pixel(1, 1, image::Rgb([at, 0, 0]))))
+            .collect::<Vec<_>>();
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let read = |frame: &image::RgbImage| {
+            reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match frame.get_pixel(0, 0)[0] {
+                1 => Err(ModelError::runtime("unreadable")),
+                4 => Ok("SALE t.me/deals".to_owned()),
+                _ => Ok("ordinary photo".to_owned()),
+            }
+        };
+        let mut answers = read_ahead(&frames, 3, read);
+        let seen = (0..7)
+            .map(|at| answers(&frames[at]).map_err(|_| at))
+            .collect::<Vec<_>>();
+        assert_eq!(seen[1], Err(1));
+        assert!(seen[4].as_ref().is_ok_and(|text| text.starts_with("SALE")));
+        assert!(seen[6].as_ref().is_ok_and(|text| text == "ordinary photo"));
+        drop(answers);
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 7);
+
+        reads.store(0, std::sync::atomic::Ordering::Relaxed);
+        let (verdict, _, frames_read) =
+            scan_advert_frames_with(&frames, read_ahead(&frames, 3, read)).unwrap();
+        assert_eq!(verdict.decision_name(), "block");
+        assert_eq!(frames_read, 5, "the verdict is the first block in frame order");
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 6, "only the block's batch is read past it");
+    }
+
+    #[test]
+    #[ignore = "set OCR_BENCH_IMAGES to semicolon-separated image paths"]
+    fn animated_ocr_read_ahead_benchmark() {
+        let images = std::env::var("OCR_BENCH_IMAGES").expect("OCR_BENCH_IMAGES is required");
+        let loaded = images
+            .split(';')
+            .filter(|path| !path.is_empty())
+            .map(|path| Arc::new(image::open(path).expect("a picture").to_rgb8()))
+            .collect::<Vec<_>>();
+        let frames = loaded.iter().cycle().take(7).cloned().collect::<Vec<_>>();
+        let _ = super::super::ocr::read(&frames[0]);
+        for fanout in [1, OCR_FRAME_FANOUT, 1, OCR_FRAME_FANOUT] {
+            let started = std::time::Instant::now();
+            let result = scan_advert_frames_with(
+                &frames,
+                read_ahead(&frames, fanout, super::super::ocr::read),
+            );
+            eprintln!(
+                "ocr-read-ahead fanout={fanout} frames={} ms={} verdict={:?}",
+                frames.len(),
+                started.elapsed().as_millis(),
+                result.map(|(verdict, _, read)| (verdict.decision_name(), read))
+            );
+        }
+    }
+
+    #[test]
     fn distinct_video_cover_is_one_extra_visual_and_ocr_frame() {
         let base = image::RgbImage::from_pixel(4, 4, image::Rgb([10, 20, 30]));
         let poster = image::RgbImage::from_pixel(4, 4, image::Rgb([200, 30, 20]));
@@ -9548,6 +9836,7 @@ mod tests {
             revealing: 0.0,
             head: HEAD_VETO,
             stack: 1.0,
+            drawn: 0.0,
         })
     }
 
@@ -9557,6 +9846,7 @@ mod tests {
             revealing: 0.0,
             head,
             stack: 1.0,
+            drawn: 0.0,
         })
     }
 
@@ -9586,6 +9876,7 @@ mod tests {
                             revealing: 0.0,
                             head,
                             stack: 1.0,
+                            drawn: 0.0,
                         }),
                     );
                     assert_eq!(
@@ -9619,6 +9910,7 @@ mod tests {
                             revealing: 0.0,
                             head,
                             stack,
+                            drawn: 0.0,
                         }),
                     )
                 };
@@ -9627,6 +9919,17 @@ mod tests {
             }
         }
         assert_eq!(arbiter_of(&[0.0; super::super::vision::DIM]).stack, 1.0);
+    }
+
+    #[test]
+    fn a_drawing_needs_a_surer_head() {
+        let with = |drawn: f32, head: f32| {
+            let arbiter = Arbiter { explicit: 0.065, revealing: 0.0, head, stack: 1.0, drawn };
+            allow_delete(false, true, false, false, true, Some(arbiter))
+        };
+        assert!(with(DRAWN_SEEN - 0.01, HEAD_DRAWN - 0.01));
+        assert!(!with(DRAWN_SEEN, HEAD_DRAWN - 0.01));
+        assert!(with(1.0, HEAD_DRAWN));
     }
 
     #[test]
@@ -9646,6 +9949,7 @@ mod tests {
             revealing: 0.0,
             head: 0.6,
             stack: 1.0,
+            drawn: 0.0,
         };
         let features = stack_features(0.8, 0.9, true, Some(&grade), &arbiter);
         let logit = (0.6f32 / 0.4).ln();
@@ -9675,6 +9979,7 @@ mod tests {
                 revealing: 0.0,
                 head,
                 stack: 1.0,
+                drawn: 0.0,
             })
         };
         assert!(
@@ -10117,6 +10422,7 @@ mod tests {
             revealing: 0.0,
             head: 0.5,
             stack: 1.0,
+            drawn: 0.0,
         };
         let blank = Grade {
             hard: 0.0,
@@ -10404,6 +10710,7 @@ mod tests {
             revealing: 0.01,
             head: HEAD_DELETE,
             stack: 1.0,
+            drawn: 0.0,
         };
         let judged = assemble_judgement(&look, Some(&grade), Some(arbiter))
             .expect("complete observations assemble");

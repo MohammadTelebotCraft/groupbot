@@ -18,7 +18,7 @@ const PREFIX: &str = "query: ";
 
 const UNK_PENALTY: f32 = 10.0;
 
-const MAX_CHARS: usize = 512;
+pub const MAX_CHARS: usize = 512;
 
 const UNK_LIMIT: f32 = 0.3;
 
@@ -199,6 +199,7 @@ pub fn available() -> bool {
         && matches!(model(), Ok(Some(_)))
 }
 
+#[cfg(test)]
 pub fn big_available() -> bool {
     matches!(vocab(), Ok(Some(_)))
         && matches!(frames(), Ok(Some(_)))
@@ -819,6 +820,7 @@ mod tests {
     #[test]
     #[ignore = "needs intent_big.onnx, intent_vocab.txt and intent_frames.txt from an export"]
     fn dropping_the_escalation_model_returns_its_memory() {
+        super::super::nsfw::configure_model_tests().expect("model test configuration");
         let anonymous_mb = || {
             let status = std::fs::read_to_string("/proc/self/status").expect("status");
             status
@@ -843,6 +845,7 @@ mod tests {
     #[test]
     #[ignore = "needs intent.onnx, intent_vocab.txt and intent_frames.txt from an export"]
     fn a_selling_message_scores_above_ordinary_chat() {
+        super::super::nsfw::configure_model_tests().expect("model test configuration");
         let scored = |text| match score(text).expect("inference succeeds") {
             ScoreOutcome::Scored(scored) => scored,
             other => panic!("expected a score, got {other:?}"),
@@ -870,6 +873,7 @@ mod tests {
     #[test]
     #[ignore = "needs shipped intent vocabulary and model"]
     fn incomplete_model_inputs_abstain() {
+        super::super::nsfw::configure_model_tests().expect("model test configuration");
         assert!(available(), "the test must have a real model");
         let long = format!("اکانت فروشی {} این فقط نقل قول بود", "سلام ".repeat(130));
         assert!(matches!(
