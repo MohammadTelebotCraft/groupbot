@@ -133,9 +133,103 @@ pub fn resolve(phrase: &str) -> Option<Route> {
     lookup(stem)
 }
 
+fn one_slip(a: &[char], b: &[char]) -> bool {
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    let same = short.iter().zip(long).take_while(|(x, y)| x == y).count();
+    if same == short.len() {
+        return long.len() == short.len() + 1;
+    }
+    match long.len() - short.len() {
+        0 => {
+            short[same + 1..] == long[same + 1..]
+                || (same + 1 < short.len()
+                    && short[same] == long[same + 1]
+                    && short[same + 1] == long[same]
+                    && short[same + 2..] == long[same + 2..])
+        }
+        1 => short[same..] == long[same + 1..],
+        _ => false,
+    }
+}
+
+const SLIP_FROM: usize = 5;
+
+pub fn nearly(phrase: &str) -> Option<&'static str> {
+    if resolve(phrase).is_some() {
+        return None;
+    }
+    let typed: Vec<char> = key(phrase).chars().collect();
+    if typed.len() < SLIP_FROM {
+        return None;
+    }
+    let mut near = tables().exact.iter().filter(|(name, _)| {
+        let name: Vec<char> = name.chars().collect();
+        name != typed && one_slip(&name, &typed)
+    });
+    let (first, route) = near.next()?;
+    let mut best: &'static str = first;
+    for (name, other) in near {
+        if other != route {
+            return None;
+        }
+        best = best.min(name);
+    }
+    Some(best)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn dropped_letters_measured() {
+        let (mut right, mut none, mut wrong, mut known) = (0, 0, 0, 0);
+        let mut names: Vec<&String> = tables().exact.keys().collect();
+        names.sort();
+        for name in names.into_iter().step_by(40) {
+            let letters: Vec<char> = name.chars().collect();
+            if letters.len() < SLIP_FROM + 1 {
+                continue;
+            }
+            for drop in 0..letters.len() {
+                let mut typed = letters.clone();
+                typed.remove(drop);
+                let typed: String = typed.into_iter().collect();
+                if resolve(&typed).is_some() {
+                    known += 1;
+                    continue;
+                }
+                match nearly(&typed).map(resolve) {
+                    None => none += 1,
+                    Some(route) if route == resolve(name) => right += 1,
+                    Some(_) => {
+                        wrong += 1;
+                        println!("wrong: {typed} for {name} became {:?}", nearly(&typed));
+                    }
+                }
+            }
+        }
+        println!("right {right}, nothing {none}, wrong {wrong}, already a name {known}");
+    }
+
+    #[test]
+    fn a_slip_of_the_keyboard_is_the_name_it_was_meant_to_be() {
+        let slip = |a: &str, b: &str| {
+            one_slip(&a.chars().collect::<Vec<_>>(), &b.chars().collect::<Vec<_>>())
+        };
+        assert!(slip("abcde", "abXde") && slip("abcde", "abde") && slip("abde", "abcde"));
+        assert!(slip("abcde", "acbde") && slip("abcde", "abcdX") && slip("abcd", "abcde"));
+        assert!(!slip("abcde", "aXcXe") && !slip("abcde", "abc") && !slip("abcde", "badce"));
+        for typed in ["کبوترر", "هواپیمای", "دوچرخهه", "شطرنجج"] {
+            if let Some(name) = nearly(typed) {
+                assert!(resolve(name).is_some(), "{typed} became {name}");
+            }
+        }
+        assert_eq!(nearly("کبوتر"), None);
+        assert_eq!(nearly("سگگ"), None);
+        assert_eq!(resolve(nearly("کبوترر").unwrap()), resolve("کبوتر"));
+    }
 
     fn well_formed(text: &'static str) -> Vec<Row> {
         let lines = text

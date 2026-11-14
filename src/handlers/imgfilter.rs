@@ -548,6 +548,20 @@ pub fn learn(text: &[f32]) -> Learned {
     blend(&start, &positives, &ranked)
 }
 
+const PICTURED_MIN: usize = 8;
+
+pub fn learn_pictured(text: &[f32], pictures: &[Vec<f32>]) -> Option<Learned> {
+    let start = unit(text);
+    let ranked = ranked_pool(&start);
+    let floor = margin(&pool().decode(*ranked.get(LEARN_TOP - 1)?), &start);
+    let positives: Vec<Vec<f32>> = pictures
+        .iter()
+        .filter(|picture| margin(picture, &start) >= floor)
+        .cloned()
+        .collect();
+    (positives.len() >= PICTURED_MIN).then(|| blend(&start, &positives, &ranked))
+}
+
 pub fn learn_examples(examples: &[Vec<f32>]) -> Learned {
     let mut sum = vec![0.0f32; DIM];
     for example in examples {
@@ -1380,6 +1394,48 @@ pub enum Made {
         name: &'static str,
     },
     Face,
+    Found { who: String, faces: usize },
+}
+
+async fn by_name(
+    ctx: &Arc<Ctx>,
+    chat: i64,
+    name: &str,
+    english: Option<&str>,
+    sure: bool,
+) -> Result<Result<Made, Option<super::facelookup::Miss>>, FilterError> {
+    if full(ctx, chat, name) {
+        return Err(FilterError::Full);
+    }
+    let existing = ctx
+        .settings
+        .try_image_filter(chat, name)
+        .await
+        .map_err(FilterError::Database)?;
+    if existing.is_some_and(|row| row.faces.is_some()) {
+        return Ok(Err(None));
+    }
+    let found = match super::facelookup::person(ctx, name, english, sure).await {
+        Ok(found) => found,
+        Err(miss) => return Ok(Err(Some(miss))),
+    };
+    save_face(ctx, chat, name, &found.prints, true).await?;
+    Ok(Ok(Made::Found {
+        who: found.label,
+        faces: found.prints.len(),
+    }))
+}
+
+fn found_reply(name: &str, who: &str, faces: usize) -> grammers_client::message::InputMessage {
+    super::premium::icon_html(
+        Some(super::premium::Icon::Image),
+        format!(
+            "<b>قفل چهره</b>\n\nنام · <b>{}</b>\nشناسایی · {}\nچهره مرجع · <b>{faces}</b>\n\nحالت · فعال\n\n\
+             <i>چهره او از عکس های عمومی اش در ویکی انبار برداشته شد. اگر شخص دیگری منظور بود، قفل را حذف کنید و روی عکس خودش با همین دستور ریپلای کنید.</i>",
+            esc(name),
+            esc(who),
+        ),
+    )
 }
 
 async fn text_direction(
@@ -1444,7 +1500,9 @@ pub async fn create_from_phrase(
         }
         Some(Route::Person(english)) => {
             if super::facelock::person(english).is_none() {
-                return Err(FilterError::Person);
+                return by_name(ctx, chat, phrase, Some(english), true)
+                    .await?
+                    .map_err(|_| FilterError::Person);
             }
             if full(ctx, chat, phrase) {
                 return Err(FilterError::Full);
@@ -1477,6 +1535,11 @@ pub async fn create_from_phrase(
         Ok(_) => {}
         Err(error) => return Err(FilterError::Database(error)),
     }
+    if route.is_none()
+        && let Ok(made) = by_name(ctx, chat, phrase, None, false).await?
+    {
+        return Ok(made);
+    }
     if let Some(Route::Visual(english)) = route
         && let Some(fitted) = fitted_filter(english)
     {
@@ -1490,13 +1553,24 @@ pub async fn create_from_phrase(
     };
     let vector = text_direction(ctx, &text, frames).await?;
     let typed = route.is_none();
+    let pictured = match route {
+        Some(Route::Visual(english)) => super::facelookup::pictured(english).await,
+        _ => Vec::new(),
+    };
     let slot = ctx.nsfw_slot().await;
     let learned = tokio::task::spawn_blocking(move || {
         let _slot = slot;
         if typed && !understanding(&vector).ok() {
             return None;
         }
-        Some(learn(&vector))
+        let pictures: Vec<Vec<f32>> = pictured
+            .iter()
+            .filter_map(|bytes| {
+                let image = super::nsfw::decode_still(bytes).ok()?;
+                Some(unit(&super::vision::embed_of(&image).ok()??))
+            })
+            .collect();
+        Some(learn_pictured(&vector, &pictures).unwrap_or_else(|| learn(&vector)))
     })
     .await
     .map_err(|error| {
@@ -1535,6 +1609,7 @@ async fn arm(
 }
 
 async fn from_text(ctx: &Arc<Ctx>, message: &Message, chat: i64, phrase: &str) {
+    let phrase = super::imgsubject::nearly(phrase).unwrap_or(phrase);
     if matches!(super::imgsubject::resolve(phrase), Some(Route::Person(_)))
         && message.reply_to_message_id().is_some()
     {
@@ -1564,6 +1639,9 @@ async fn from_text(ctx: &Arc<Ctx>, message: &Message, chat: i64, phrase: &str) {
             )),
         ),
         Ok(Made::Face) => (ResponseKind::FilterManagement, built_in_reply(phrase)),
+        Ok(Made::Found { who, faces }) => {
+            (ResponseKind::FilterManagement, found_reply(phrase, &who, faces))
+        }
         Err(FilterError::Person) => (
             ResponseKind::FilterManagement,
             super::premium::html(format!(
@@ -1637,6 +1715,9 @@ async fn from_text(ctx: &Arc<Ctx>, message: &Message, chat: i64, phrase: &str) {
 }
 
 async fn from_face(ctx: &Arc<Ctx>, message: &Message, chat: i64, name: &str) {
+    let name = super::imgsubject::nearly(name)
+        .filter(|near| matches!(super::imgsubject::resolve(near), Some(Route::Person(_))))
+        .unwrap_or(name);
     let refuse =
         |text: String| super::premium::icon_text(Some(super::premium::Icon::ErrorRed), text);
     if !acceptable(name) {
@@ -1703,8 +1784,30 @@ async fn from_face(ctx: &Arc<Ctx>, message: &Message, chat: i64, name: &str) {
             super::respond(ctx, message, ResponseKind::FilterManagement, built_in_reply(name)).await;
             return;
         }
+        let english = match super::imgsubject::resolve(name) {
+            Some(Route::Person(english)) => Some(english),
+            _ => None,
+        };
+        use super::facelookup::Miss;
+        let why = match by_name(ctx, chat, name, english, true).await {
+            Ok(Ok(Made::Found { who, faces })) => {
+                let reply = found_reply(name, &who, faces);
+                super::respond(ctx, message, ResponseKind::FilterManagement, reply).await;
+                return;
+            }
+            Ok(Ok(_) | Err(None)) => "",
+            Ok(Err(Some(Miss::Nobody))) => "شخصی با این نام پیدا نشد؛ نام کامل او را بنویسید، یا ",
+            Ok(Err(Some(Miss::Faceless))) => "از این شخص عکسی با چهره واضح پیدا نشد؛ ",
+            Ok(Err(Some(Miss::Unreachable))) => {
+                "جستجوی نام الان ممکن نشد؛ کمی بعد دوباره بفرستید، یا "
+            }
+            Err(error) => {
+                ::log::warn!("face lock: lookup for {chat}/{name} failed: {error}");
+                ""
+            }
+        };
         let text = format!(
-            "روی عکسی که چهره «{0}» در آن پیدا است ریپلای کنید و بنویسید «قفل چهره {0}».",
+            "{why}روی عکسی که چهره «{0}» در آن پیدا است ریپلای کنید و بنویسید «قفل چهره {0}».",
             esc(name)
         );
         super::respond(ctx, message, ResponseKind::CommandError, text).await;
@@ -2676,6 +2779,24 @@ mod tests {
             assert!(margin(example) > margin(&other));
         }
         assert_eq!(learned_examples(&[]), None);
+    }
+
+    #[test]
+    #[ignore = "seconds of arithmetic per run"]
+    fn photographs_of_the_subject_are_the_positives() {
+        let mut text = vec![0.0f32; DIM];
+        text[3] = 1.0;
+        text[100] = -0.5;
+        let ranked = ranked_pool(&unit(&text));
+        let best: Vec<Vec<f32>> =
+            ranked.iter().take(LEARN_TOP).map(|at| pool().decode(*at)).collect();
+        let (pictured, learned) = (learn_pictured(&text, &best).unwrap(), learn(&text));
+        assert_eq!(pictured.vector, learned.vector);
+        assert_eq!(pictured.cut, learned.cut);
+        assert!(learn_pictured(&text, &best[..PICTURED_MIN - 1]).is_none());
+        let worst: Vec<Vec<f32>> =
+            ranked.iter().rev().take(LEARN_TOP).map(|at| pool().decode(*at)).collect();
+        assert!(learn_pictured(&text, &worst).is_none());
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub async fn create(
             .into_response();
     }
     let phrase = body.phrase.trim();
+    let phrase = crate::handlers::imgsubject::nearly(phrase).unwrap_or(phrase);
     let refused = |text: String| {
         (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": text }))).into_response()
     };
@@ -45,6 +46,11 @@ pub async fn create(
         Ok(imgfilter::Made::Face) => (
             StatusCode::OK,
             Json(json!({ "notice": format!("قفل چهره «{phrase}» فعال شد؛ چهره او از قبل شناخته شده است.") })),
+        )
+            .into_response(),
+        Ok(imgfilter::Made::Found { who, faces }) => (
+            StatusCode::OK,
+            Json(json!({ "notice": format!("قفل چهره «{phrase}» فعال شد؛ {faces} چهره از عکس های عمومی «{who}» برداشته شد.") })),
         )
             .into_response(),
         Err(imgfilter::FilterError::Person) => refused(format!(

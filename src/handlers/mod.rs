@@ -19,6 +19,7 @@ pub mod emoji_image;
 pub mod ephemeral;
 pub mod extras;
 pub mod facelock;
+pub mod facelookup;
 pub mod filters;
 pub mod flood;
 pub mod help;
